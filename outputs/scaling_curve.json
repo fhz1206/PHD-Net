@@ -1,0 +1,41 @@
+{
+  "meta": {
+    "status": "running",
+    "done": [
+      "P1_1.7M",
+      "P2_17M"
+    ]
+  },
+  "points": [
+    {
+      "name": "P1_1.7M",
+      "n_sdr": 256,
+      "n_mid": 256,
+      "n_top": 256,
+      "k_sparse": 32,
+      "n_params": 1712388,
+      "ppl_char": 97.25958476078705,
+      "bpc": 6.603768527047644,
+      "ms_per_token": 10.7116,
+      "n_tok_train": 2780,
+      "n_tok_eval": 3022,
+      "oov_eval": 0,
+      "train_sec": 29.78
+    },
+    {
+      "name": "P2_17M",
+      "n_sdr": 1200,
+      "n_mid": 1200,
+      "n_top": 1200,
+      "k_sparse": 150,
+      "n_params": 17089204,
+      "ppl_char": 119.09774992993363,
+      "bpc": 6.896002346926454,
+      "ms_per_token": 54.5865,
+      "n_tok_train": 2780,
+      "n_tok_eval": 3022,
+      "oov_eval": 0,
+      "train_sec": 151.75
+    }
+  ]
+}

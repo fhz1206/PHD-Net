@@ -1,0 +1,18 @@
+# O7 PHD-Net 词级 LM 参数规模缩放曲线
+# corpus=23504  vocab_from=full_corpus  train_trunc=4000 chars (前4000)  eval=4701 chars (后20%)
+# SEG={'max_len': 6, 'min_count': 5, 'min_entropy': 1.0}  seed=11  pred_in_readout=True
+# 参数规模=count_params 实测；幂律 PPL=a·N^(-α) 对 log10 线性回归
+
+
+[START] P1_1.7M  config={'n_sdr': 256, 'n_mid': 256, 'n_top': 256, 'k_sparse': 32}
+  vocab_size=1,540  measured_params=1,712,388  train_tokens=2,780
+  -> ppl_char=97.2596  bpc=6.6038  ms/token=10.712  (train 29.8s, eval n_tok=3022, oov=0)
+[DONE] P1_1.7M
+
+[START] P2_17M  config={'n_sdr': 1200, 'n_mid': 1200, 'n_top': 1200, 'k_sparse': 150}
+  vocab_size=1,540  measured_params=17,089,204  train_tokens=2,780
+  -> ppl_char=119.0977  bpc=6.8960  ms/token=54.587  (train 151.8s, eval n_tok=3022, oov=0)
+[DONE] P2_17M
+
+[START] P3_170M  config={'n_sdr': 4350, 'n_mid': 4350, 'n_top': 4350, 'k_sparse': 543}
+  vocab_size=1,540  measured_params=171,568,354  train_tokens=2,780

@@ -1,0 +1,20 @@
+
+=== 配置: float  {'int8_store': False, 'growth_guidance': False} ===
+[PASS] float: 300 步 predict 逐位一致  不一致步数 0
+[PASS] float: compact_csr 逐位一致
+[PASS] float: stats 计数一致  dict grown=283792 vs csr grown=283792
+[PASS] float: shard round-trip predict 逐位一致  entries=283792, 不一致步数 0
+
+=== 配置: int8  {'int8_store': True, 'growth_guidance': False} ===
+[PASS] int8: 300 步 predict 逐位一致  不一致步数 0
+[PASS] int8: compact_csr 逐位一致
+[PASS] int8: stats 计数一致  dict grown=283792 vs csr grown=283792
+[PASS] int8: shard round-trip predict 逐位一致  entries=283792, 不一致步数 0
+
+=== 配置: int8+guidance  {'int8_store': True, 'growth_guidance': True, 'prune': 2000} ===
+[PASS] int8+guidance: 300 步 predict 逐位一致  不一致步数 0
+[PASS] int8+guidance: compact_csr 逐位一致
+[PASS] int8+guidance: stats 计数一致  dict grown=283017 vs csr grown=283017
+[PASS] int8+guidance: shard round-trip predict 逐位一致  entries=283017, 不一致步数 0
+
+=== 全部逐位等价 ===

@@ -1,0 +1,28 @@
+# ── 数据（体积过大，不入库；由 tools/ 下的转换脚本从公开数据集生成）──
+datasets/pretrain/
+datasets/sft/
+# 注：datasets/eval/（冻结语料 + OOD 探针，43 KB）**保留入库**——评测基线必需
+
+# ── 训练产物与检查点 ──
+outputs/ckpt/
+*.npz
+
+# ── Python / numba 缓存 ──
+__pycache__/
+*.py[cod]
+*.nbc
+*.nbi
+.pytest_cache/
+
+# ── 工作记忆（含个人工作记录与偏好，不入库）──
+.workbuddy/
+
+# ── 临时文件 ──
+.tmp_*
+*.tmp
+*.bak
+
+# ── 系统 ──
+.DS_Store
+Thumbs.db
+desktop.ini

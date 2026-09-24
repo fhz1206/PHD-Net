@@ -1,0 +1,4 @@
+T4.4+T1.2+T2.2+T3.2+T3.4+replay+rate OK, ppl_char=8.47
+episodic generation OK, validity=0.33
+int8+growth OK, grown=256, csr=256, recall_b=0.50
+sparse_pc OK

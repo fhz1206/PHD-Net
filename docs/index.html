@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PHD-Net v0.0.0 · 预测编码 × Hebbian/STDP × 双记忆网络</title>
+<style>
+:root{
+  --bg:#0b0f16; --bg2:#111826; --card:#151d2c; --card2:#1b2436;
+  --line:#243044; --txt:#e6edf7; --dim:#9aa9bf; --dim2:#6f8098;
+  --cyan:#38bdf8; --teal:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24;
+  --green:#34d399; --red:#f87171;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.7;-webkit-font-smoothing:antialiased}
+a{color:var(--cyan);text-decoration:none}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+
+/* nav */
+nav{position:sticky;top:0;z-index:50;background:rgba(11,15,22,.88);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+nav .wrap{display:flex;align-items:center;gap:22px;height:56px;overflow-x:auto}
+nav .brand{font-weight:700;letter-spacing:.5px;white-space:nowrap}
+nav .brand span{color:var(--cyan)}
+nav a{color:var(--dim);font-size:14px;white-space:nowrap}
+nav a:hover{color:var(--txt)}
+
+/* hero */
+header{padding:64px 0 40px;border-bottom:1px solid var(--line);
+  background:radial-gradient(1000px 320px at 20% -10%,rgba(56,189,248,.16),transparent),
+             radial-gradient(800px 300px at 85% 0%,rgba(167,139,250,.14),transparent)}
+h1{font-size:38px;line-height:1.25;letter-spacing:-.5px}
+h1 em{font-style:normal;color:var(--cyan)}
+.sub{color:var(--dim);margin-top:14px;font-size:16px;max-width:760px}
+.tagline{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}
+.chip{font-size:12.5px;padding:5px 12px;border:1px solid var(--line);border-radius:999px;color:var(--dim);background:var(--bg2)}
+.chip.ok{border-color:rgba(52,211,153,.4);color:var(--green)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-top:32px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.stat b{display:block;font-size:26px;color:var(--cyan);letter-spacing:-.5px}
+.stat small{color:var(--dim2);font-size:12.5px}
+
+section{padding:52px 0;border-bottom:1px solid var(--line)}
+h2{font-size:24px;margin-bottom:6px;letter-spacing:-.3px}
+h2 .n{color:var(--dim2);font-weight:400;margin-right:8px;font-variant-numeric:tabular-nums}
+.lead{color:var(--dim);margin-bottom:24px;max-width:820px;font-size:15px}
+h3{font-size:17px;margin:26px 0 12px}
+
+/* cards */
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+.g3{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px}
+.card:hover{border-color:#2f3d55}
+.card h4{font-size:15.5px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.card .mod{font-size:11.5px;font-weight:700;color:var(--bg);background:var(--cyan);border-radius:5px;padding:2px 6px}
+.card .mod.cog{background:var(--purple)}
+.card p{color:var(--dim);font-size:14px}
+.card .brain{margin-top:10px;font-size:13px;color:var(--teal)}
+.card .brain b{color:var(--teal);font-weight:600}
+.rule{display:grid;grid-template-columns:150px 1fr;gap:10px;padding:10px 0;border-bottom:1px dashed var(--line);font-size:14px}
+.rule:last-child{border-bottom:none}
+.rule .name{color:var(--txt);font-weight:600}
+.rule code{color:var(--amber);font-family:ui-monospace,Consolas,monospace;font-size:13px}
+.rule .desc{color:var(--dim)}
+
+/* diagram */
+.diagram{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:18px;overflow-x:auto}
+.diagram svg{display:block;min-width:760px;width:100%;height:auto}
+
+/* table */
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line)}
+th{color:var(--dim2);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:.4px}
+td b{color:var(--txt)}
+.bad{color:var(--red)}
+.good{color:var(--green)}
+.win{color:var(--cyan);font-weight:600}
+
+/* bars */
+.bars{margin-top:8px}
+.bar{display:grid;grid-template-columns:170px 1fr 74px;align-items:center;gap:12px;margin-bottom:10px;font-size:13.5px}
+.bar .track{background:var(--bg2);border-radius:6px;height:22px;overflow:hidden}
+.bar .fill{height:100%;border-radius:6px;background:linear-gradient(90deg,#0ea5e9,#38bdf8)}
+.bar .fill.tf{background:linear-gradient(90deg,#7c3aed,#a78bfa)}
+.bar .fill.ng{background:linear-gradient(90deg,#475569,#64748b)}
+.bar .val{text-align:right;font-variant-numeric:tabular-nums;color:var(--dim)}
+.note{color:var(--dim2);font-size:12.5px;margin-top:10px}
+
+/* timeline */
+.tl{position:relative;padding-left:26px}
+.tl::before{content:"";position:absolute;left:7px;top:6px;bottom:6px;width:2px;background:var(--line)}
+.tl .item{position:relative;margin-bottom:18px}
+.tl .dot{position:absolute;left:-24px;top:6px;width:12px;height:12px;border-radius:50%;background:var(--dim2);border:2px solid var(--bg)}
+.tl .item.ok .dot{background:var(--green)}
+.tl .item.part .dot{background:var(--amber)}
+.tl .t{font-weight:600;font-size:15px}
+.tl .d{color:var(--dim);font-size:13.5px}
+.tag{font-size:11.5px;padding:2px 8px;border-radius:999px;margin-left:8px;vertical-align:middle}
+.tag.ok{background:rgba(52,211,153,.14);color:var(--green);border:1px solid rgba(52,211,153,.35)}
+.tag.part{background:rgba(251,191,36,.14);color:var(--amber);border:1px solid rgba(251,191,36,.35)}
+
+/* two col */
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+ul.clean{list-style:none}
+ul.clean li{padding:7px 0 7px 18px;position:relative;color:var(--dim);font-size:14px;border-bottom:1px dashed var(--line)}
+ul.clean li:last-child{border-bottom:none}
+ul.clean li::before{content:"";position:absolute;left:2px;top:15px;width:6px;height:6px;border-radius:50%;background:var(--cyan)}
+ul.clean.diff li::before{background:var(--red)}
+
+/* code */
+pre{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;font-family:ui-monospace,Consolas,monospace;font-size:13px;color:var(--dim)}
+pre .c{color:var(--dim2)}
+.docs{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+.doc{display:block;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;color:var(--txt)}
+.doc:hover{border-color:var(--cyan)}
+.doc small{display:block;color:var(--dim2);font-size:12.5px;margin-top:4px}
+footer{padding:34px 0;color:var(--dim2);font-size:13px}
+@media(max-width:640px){h1{font-size:28px}.rule{grid-template-columns:1fr}.bar{grid-template-columns:120px 1fr 60px}}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <div class="brand">PHD<span>-Net</span></div>
+    <a href="#overview">概览</a>
+    <a href="#arch">架构与信息流</a>
+    <a href="#modules">模块</a>
+    <a href="#rules">学习规则</a>
+    <a href="#bench">实测对比</a>
+    <a href="#roadmap">里程碑</a>
+    <a href="#scale">规模对标</a>
+    <a href="#brain">人脑同构</a>
+    <a href="#hw">硬件生态</a>
+    <a href="#docs">文档与复现</a>
+  </div>
+</nav>
+
+<header>
+  <div class="wrap">
+    <h1>预测编码 × Hebbian/STDP × 双记忆<br><em>一个完全不依赖自注意力的类脑架构</em></h1>
+    <p class="sub">PHD-Net 把「关联」交给突触局部可塑性（STDP）、把「记忆」交给双速率可塑权重（海马快印迹 + 皮层慢巩固）、
+    把「抽象」交给预测编码层级——全程无自注意力、无位置编码、无堆叠层，每个模块都有明确的神经认知对应。
+    当前版本 <b>v0.0.0</b>。</p>
+    <div class="tagline">
+      <span class="chip">无 Self-Attention</span>
+      <span class="chip">无位置编码</span>
+      <span class="chip">无堆叠层</span>
+      <span class="chip">无反向传播（学习规则全部局部化）</span>
+      <span class="chip">事件驱动稀疏计算</span>
+      <span class="chip ok">v0.0.0 · 2026-09-21 · M9 五轨道收官 · 全量 19/19</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><b>78.16</b><small>词级 LM 字符归一 PPL（冻结语料 23,504 字符，bpc 6.288；同口径 Transformer 0.52M 为 85.27）</small></div>
+      <div class="stat"><b>0.000</b><small>持续学习遗忘率 BWT；同条件 Transformer 为 −1.000（完全遗忘）</small></div>
+      <div class="stat"><b>1.28 ms</b><small>10 亿突触容量模型单步训练耗时（tools/train_1b.py 端到端复跑，本机 CPU 无独显）</small></div>
+      <div class="stat"><b>100%</b><small>单样本记忆召回准确率（每条只印迹一次，30% 噪声线索）</small></div>
+      <div class="stat"><b>0.68–1.05×</b><small>近域泛化膨胀倍数（未见过的同领域文档 vs 域内；远域维基 OOD 受 OOV 覆盖墙限制 9.38×）</small></div>
+    </div>
+  </div>
+</header>
+
+<section id="overview">
+  <div class="wrap">
+    <h2><span class="n">01</span>它解决什么问题</h2>
+    <p class="lead">Transformer 把「关联」建模为全局成对相似度（QKᵀ，O(T²·d)）、把「记忆」建模为无学习的 KV 缓存、
+    把「学习」寄托于非局部的反向传播。这三点都与生物智能的工作方式相去甚远。PHD-Net 逐条换成了类脑机制。</p>
+    <div class="grid g3">
+      <div class="card"><h4>人脑做法</h4><p>突触局部可塑性，无需全局梯度；每个突触只看自己两端</p><p class="brain"><b>对应</b>：全部学习规则局部化，无反向传播</p></div>
+      <div class="card"><h4>稀疏放电</h4><p>皮层任一时刻仅约 1–5% 神经元活跃，计算与能耗随活跃度而非总规模增长</p><p class="brain"><b>对应</b>：k-WTA 稀疏编码 SDR + 事件驱动计算</p></div>
+      <div class="card"><h4>双系统记忆</h4><p>海马快速一次性印迹，皮层缓慢统计巩固（互补学习系统 CLS 理论）</p><p class="brain"><b>对应</b>：双速率记忆（快权重 + 慢权重 EMA）</p></div>
+      <div class="card"><h4>有限容量工作记忆</h4><p>前额叶约 7±2 个槽位，基底核门控决定「什么值得记住」</p><p class="brain"><b>对应</b>：有界槽位 WM + 调制门控</p></div>
+      <div class="card"><h4>层级预测</h4><p>高层级向低层级发预测，低层级只上传预测误差（预测编码 / 自由能原理）</p><p class="brain"><b>对应</b>：生成-识别闭环的预测编码层级</p></div>
+      <div class="card"><h4>神经调制</h4><p>DA / NE / ACh 依意外与奖赏门控可塑性与编码-检索模式切换</p><p class="brain"><b>对应</b>：surprise z 分数全局调制标量</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="arch">
+  <div class="wrap">
+    <h2><span class="n">02</span>架构与信息流</h2>
+    <p class="lead">五条通路并行：前馈识别流、反馈预测流、横向关联流（层内 Hebbian + 跨时间步 STDP）、记忆流（WM ⟷ LTM）、调制流（预测误差 → 全局门控）。认知层 M7–M12 在基础架构之上提供语言理解、上下文、知识调用与生成。</p>
+    <div class="diagram">
+      <svg viewBox="0 0 900 300" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system,Segoe UI,Microsoft YaHei" font-size="12">
+        <defs>
+          <marker id="ar" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+            <polygon points="0 0,9 3.5,0 7" fill="#38bdf8"/>
+          </marker>
+          <marker id="ar2" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+            <polygon points="0 0,9 3.5,0 7" fill="#a78bfa"/>
+          </marker>
+          <marker id="ar3" markerWidth="9" markerHeight="7" refX="8" refY="3.5" orient="auto">
+            <polygon points="0 0,9 3.5,0 7" fill="#2dd4bf"/>
+          </marker>
+        </defs>
+        <rect x="6" y="6" width="888" height="288" rx="10" fill="#111826" stroke="#243044"/>
+        <text x="24" y="30" fill="#6f8098" font-size="11">基础架构 M1–M6</text>
+        <g>
+          <rect x="24" y="52" width="120" height="52" rx="8" fill="#151d2c" stroke="#38bdf8"/>
+          <text x="84" y="74" fill="#e6edf7" text-anchor="middle">M1 稀疏编码器</text>
+          <text x="84" y="90" fill="#6f8098" text-anchor="middle" font-size="10">k-WTA / SDR</text>
+          <rect x="170" y="52" width="120" height="52" rx="8" fill="#151d2c" stroke="#38bdf8"/>
+          <text x="230" y="74" fill="#e6edf7" text-anchor="middle">M2 预测编码</text>
+          <text x="230" y="90" fill="#6f8098" text-anchor="middle" font-size="10">误差 ↑ / 预测 ↓</text>
+          <rect x="316" y="52" width="120" height="52" rx="8" fill="#151d2c" stroke="#38bdf8"/>
+          <text x="376" y="74" fill="#e6edf7" text-anchor="middle">M3 STDP 核</text>
+          <text x="376" y="90" fill="#6f8098" text-anchor="middle" font-size="10">突触迹 · 因果</text>
+          <rect x="462" y="52" width="120" height="52" rx="8" fill="#151d2c" stroke="#38bdf8"/>
+          <text x="522" y="74" fill="#e6edf7" text-anchor="middle">M4a 工作记忆</text>
+          <text x="522" y="90" fill="#6f8098" text-anchor="middle" font-size="10">有界槽位+门控</text>
+          <rect x="608" y="52" width="120" height="52" rx="8" fill="#151d2c" stroke="#38bdf8"/>
+          <text x="668" y="74" fill="#e6edf7" text-anchor="middle">M4b 长期记忆</text>
+          <text x="668" y="90" fill="#6f8098" text-anchor="middle" font-size="10">快/慢双速率</text>
+          <rect x="754" y="52" width="120" height="52" rx="8" fill="#151d2c" stroke="#38bdf8"/>
+          <text x="814" y="74" fill="#e6edf7" text-anchor="middle">M6 读出头</text>
+          <text x="814" y="90" fill="#6f8098" text-anchor="middle" font-size="10">局部感知器</text>
+        </g>
+        <g stroke="#38bdf8" fill="none" marker-end="url(#ar)">
+          <line x1="144" y1="78" x2="168" y2="78"/><line x1="290" y1="78" x2="314" y2="78"/>
+          <line x1="436" y1="78" x2="460" y2="78"/><line x1="582" y1="78" x2="606" y2="78"/>
+          <line x1="728" y1="78" x2="752" y2="78"/>
+        </g>
+        <path d="M230 104 L230 132 L522 132 L522 106" stroke="#2dd4bf" fill="none" stroke-dasharray="4 3" marker-end="url(#ar3)"/>
+        <text x="376" y="126" fill="#2dd4bf" text-anchor="middle" font-size="10">记忆流：写入 / 吸引子检索</text>
+        <rect x="316" y="150" width="300" height="44" rx="8" fill="#151d2c" stroke="#fbbf24"/>
+        <text x="466" y="168" fill="#e6edf7" text-anchor="middle">M5 神经调制器（surprise → z 分数 → 门控全部模块）</text>
+        <text x="466" y="184" fill="#6f8098" text-anchor="middle" font-size="10">对应 NE / DA / ACh 弥散投射</text>
+        <path d="M466 150 L466 112 M466 150 L200 112 M466 150 L700 112" stroke="#fbbf24" fill="none" stroke-dasharray="3 3"/>
+        <text x="24" y="218" fill="#6f8098" font-size="11">认知层 M7–M12（面向 LLM 功能目标）</text>
+        <g>
+          <rect x="24" y="230" width="128" height="44" rx="8" fill="#151d2c" stroke="#a78bfa"/>
+          <text x="88" y="248" fill="#e6edf7" text-anchor="middle">M7 组合编码</text><text x="88" y="264" fill="#6f8098" text-anchor="middle" font-size="10">词涌现</text>
+          <rect x="164" y="230" width="128" height="44" rx="8" fill="#151d2c" stroke="#a78bfa"/>
+          <text x="228" y="248" fill="#e6edf7" text-anchor="middle">M8 情景缓冲</text><text x="228" y="264" fill="#6f8098" text-anchor="middle" font-size="10">上下文（无位置编码）</text>
+          <rect x="304" y="230" width="128" height="44" rx="8" fill="#151d2c" stroke="#a78bfa"/>
+          <text x="368" y="248" fill="#e6edf7" text-anchor="middle">M9 语义关联图</text><text x="368" y="264" fill="#6f8098" text-anchor="middle" font-size="10">三元组印迹</text>
+          <rect x="444" y="230" width="128" height="44" rx="8" fill="#151d2c" stroke="#a78bfa"/>
+          <text x="508" y="248" fill="#e6edf7" text-anchor="middle">M10 分层摘要</text><text x="508" y="264" fill="#6f8098" text-anchor="middle" font-size="10">细节→要旨</text>
+          <rect x="584" y="230" width="128" height="44" rx="8" fill="#151d2c" stroke="#a78bfa"/>
+          <text x="648" y="248" fill="#e6edf7" text-anchor="middle">M11 生成解码</text><text x="648" y="264" fill="#6f8098" text-anchor="middle" font-size="10">WM 锚定采样</text>
+          <rect x="724" y="230" width="150" height="44" rx="8" fill="#151d2c" stroke="#a78bfa"/>
+          <text x="799" y="248" fill="#e6edf7" text-anchor="middle">M12 联想链推理</text><text x="799" y="264" fill="#6f8098" text-anchor="middle" font-size="10">检索→回填→再检索</text>
+        </g>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<section id="modules">
+  <div class="wrap">
+    <h2><span class="n">03</span>模块与大脑对应</h2>
+    <p class="lead">12 个模块，每个都有明确的神经科学对应：7 个机制级同构、4 个功能级同构、1 个设计级对应。</p>
+    <div class="grid g2">
+      <div class="card"><h4><span class="mod">M1</span>稀疏编码器</h4>
+        <p>输入经随机投影后 k-WTA 竞争，仅保留 top-k 胜者得到 SDR（稀疏分布式表示），典型激活率约 12.5%。</p>
+        <p class="brain"><b>大脑</b>：初级感觉皮层稀疏放电 + SST/PV 中间神经元侧抑制</p></div>
+      <div class="card"><h4><span class="mod">M2</span>预测编码层级</h4>
+        <p>每层含识别（上行）与生成（下行）权重：上行传表示，下行传预测，层间只上传预测误差，推理时迭代精炼以逼近自由能最小。</p>
+        <p class="brain"><b>大脑</b>：V1→V2→V4→IT 层级预测编码（Rao &amp; Ballard 1999；Friston 自由能原理）</p></div>
+      <div class="card"><h4><span class="mod">M3</span>时序关联核（STDP）</h4>
+        <p>稀疏固定拓扑，每神经元 m 条出边；突触迹模型下 Δw = η·(P_pre·post − P_post·pre)₊，A₊ = 2·A₋ 的幅度不对称——「先响后响则增强，后响先响则抑制」。</p>
+        <p class="brain"><b>大脑</b>：海马 CA3 递归网络 + 皮层局部突触的脉冲时序依赖可塑性（Bi &amp; Poo 1998）</p></div>
+      <div class="card"><h4><span class="mod">M4a</span>工作记忆</h4>
+        <p>C 个槽位（默认 4），每步衰减模拟漏积分持续放电；写入由调制门控决定——只有「意外」的信息才占用槽位。</p>
+        <p class="brain"><b>大脑</b>：背外侧前额叶 dlPFC 延迟期持续放电 + 基底核-丘脑门控</p></div>
+      <div class="card"><h4><span class="mod">M4b</span>长期记忆（双速率）</h4>
+        <p>快权重做一次性 Hebbian 印迹，慢权重在睡眠巩固阶段以指数滑动平均吸收快权重；检索用 Hopfield 式吸引子动力学，天然支持模式补全。</p>
+        <p class="brain"><b>大脑</b>：海马快速印迹 + 新皮层慢速巩固（CLS，McClelland 1995）；CA3 自动联想</p></div>
+      <div class="card"><h4><span class="mod">M5</span>神经调制器</h4>
+        <p>底层预测误差范数经在线 Welford 标准化为 z 分数，门控学习率并切换编码/检索模式——「先见者学，重复者忘」。</p>
+        <p class="brain"><b>大脑</b>：蓝斑 NE / VTA DA 的意外与奖赏信号；基底前脑 ACh 的模式切换（Hasselmo）</p></div>
+      <div class="card"><h4><span class="mod">M6</span>读出头</h4>
+        <p>h = [r_L ; WM ; 召回结果]，感知器式局部规则学习；监督信号仅存在于最末端，主干完全无监督。</p>
+        <p class="brain"><b>大脑</b>：IT → 前额叶 / 前运动皮层的决策读出</p></div>
+      <div class="card"><h4><span class="mod cog">M7</span>组合编码器（词汇涌现）</h4>
+        <p>字符 SDR 经 STDP 链绑定为词级表示；工程实现为无词典统计分词（n-gram 频次 + 左右边界熵判据），词表由语料自动涌现。</p>
+        <p class="brain"><b>大脑</b>：视觉词形区 VWFA 的组合调谐 · <span class="tag ok">已实现</span></p></div>
+      <div class="card"><h4><span class="mod cog">M8</span>情景缓冲</h4>
+        <p>逐模式寻址的事件序列存储，任意历史事件可作线索链式回放恢复顺序——时间由连接承载，无位置编码。</p>
+        <p class="brain"><b>大脑</b>：海马情景记忆 + Baddeley 情景缓冲</p></div>
+      <div class="card"><h4><span class="mod cog">M9</span>语义关联图</h4>
+        <p>三元组 (s, r, o) 以组合线索印迹 W += η·outer(o, [s;r])；检索一次矩阵-向量乘完成，无需注意力打分。</p>
+        <p class="brain"><b>大脑</b>：海马-皮层语义网络 + 扩散激活</p></div>
+      <div class="card"><h4><span class="mod cog">M10</span>分层摘要</h4>
+        <p>句级→段级→篇级递归压缩，各层独立衰减率，形成「细节易逝、要旨长存」的记忆梯度。</p>
+        <p class="brain"><b>大脑</b>：记忆要旨与细节的双分离</p></div>
+      <div class="card"><h4><span class="mod cog">M11</span>生成解码器</h4>
+        <p>工作记忆主题锚定 + 读出分布 + 温度 τ 采样（对应神经噪声与变异性），自回归但条件化机制不是注意力。</p>
+        <p class="brain"><b>大脑</b>：内言语与运动皮层生成通路</p></div>
+      <div class="card"><h4><span class="mod cog">M12</span>联想链推理</h4>
+        <p>state ← WM；for r in 链: state ← query(state, r)；结果回填再检索——逐步推理 = 联想链展开。</p>
+        <p class="brain"><b>大脑</b>：扩散激活式联想推理（与思维链功能同构、机制不同）</p></div>
+      <div class="card"><h4><span class="mod cog">M13</span>上下文漂移情景记忆<span class="tag ok">长程依赖</span></h4>
+        <p>上下文随经历缓慢漂移（c ← ρc + (1−ρ)item）并印迹「上下文→项目」；回忆时内容寻址检索，回忆出的项目又驱动上下文继续漂移 → 串行顺序回忆自然涌现。配套：事件边界触发回放 + PFC 免衰减保持槽 + DG 模式分离。</p>
+        <p class="brain"><b>大脑</b>：时间上下文模型 TCM / CMR（Howard &amp; Kahana；Polyn 2009）+ 齿状回模式分离 + 前额叶延迟期活动<br><b>实测</b>：延迟复制位置准确率 n=4/8/16 = 45.6% / 25.9% / 17.8%（随机 8.3%，字符级 LM 基线 ~10%）</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="rules">
+  <div class="wrap">
+    <h2><span class="n">04</span>学习规则总表</h2>
+    <p class="lead">全部为局部规则：每个突触的更新只依赖其两端神经元活性、局部迹，以及一个全局调制标量——无反向传播。</p>
+    <div class="card">
+      <div class="rule"><span class="name">k-WTA 竞争</span><span><code>s = top-k(normalize(u))</code><span class="desc"> — 稀疏编码</span></span></div>
+      <div class="rule"><span class="name">Oja 规则</span><span><code>Δw = η·y·(x − y·w)</code><span class="desc"> — 稳定的 Hebbian 特征学习，防发散</span></span></div>
+      <div class="rule"><span class="name">PC 误差规则</span><span><code>ΔW_dn = η·e ⊗ r_hi</code><span class="desc"> — 生成模型拟合数据分布</span></span></div>
+      <div class="rule"><span class="name">STDP 迹</span><span><code>Δw = η·(P_pre·post − P_post·pre)₊</code><span class="desc"> — 时间因果结构学习</span></span></div>
+      <div class="rule"><span class="name">海马印迹</span><span><code>W_fast += η_h·p_out ⊗ p_in</code><span class="desc"> — 一次性经验快速存储</span></span></div>
+      <div class="rule"><span class="name">皮层巩固</span><span><code>W_slow ← (1−η_c)·W_slow + η_c·W_fast</code><span class="desc"> — 慢速统计学习（睡眠回放）</span></span></div>
+      <div class="rule"><span class="name">感知器读出</span><span><code>ΔW_ro = η·(t − y) ⊗ h</code><span class="desc"> — 仅末端使用监督</span></span></div>
+      <div class="rule"><span class="name">调制门控</span><span><code>η_t = η₀·σ(a·z(surprise))</code><span class="desc"> — 全局可塑性调度</span></span></div>
+    </div>
+  </div>
+</section>
+
+<section id="bench">
+  <div class="wrap">
+    <h2><span class="n">05</span>实测：与同规模 Transformer 的正面对比</h2>
+    <p class="lead">同语料、同划分、同字符预算，对照组为自建 nanoGPT 级 Transformer（PyTorch）。跨粒度统一用<b>字符归一 PPL</b> 与 bpc 比较。✅ 2026-09-21 起内置语料<b>冻结</b>为 <code>datasets/eval/internal_corpus.txt</code>（23,504 字符，架构设计文档的逐字副本）——<b>编辑文档不再改变语料与基线</b>，冻结值即长期稳定锚点。</p>
+    <div class="card">
+      <h3>内置语料：语言建模（越低越好，冻结语料 23,504 字符，训练 18,803 / 评估 4,701）</h3>
+      <div class="bars">
+        <div class="bar"><span>PHD-Net v0.0.0（默认 256 维栈）</span><span class="track"><span class="fill" style="width:91.2%"></span></span><span class="val">78.16</span></div>
+        <div class="bar"><span>Transformer 0.52M（96d×2L）</span><span class="track"><span class="fill tf" style="width:99.6%"></span></span><span class="val">85.27</span></div>
+        <div class="bar"><span>Transformer 2.38M（192d×4L）</span><span class="track"><span class="fill tf" style="width:100%"></span></span><span class="val">85.66</span></div>
+      </div>
+      <p class="note">条形按本组最大值（85.66）归一化。本组三项<b>严格同口径</b>（评测套件 task1，bpc 6.288 / 6.414 / 6.421）→ 判定 <b>「相当（达标）」，低 8.3%</b>。</p>
+      <p class="note"><b>⚠ 两组数字不能混用</b>：M9 消融（<code>tests/demo_m9.py</code>）跑的是 <b>128 维小网络栈</b>（n_sdr=128、分词 min_count=8），
+        冻结语料下参照基线 R = <b>102.97</b>（bpc 6.686），稳定正增益 <b>T3.4 内容寻址 101.29（−1.6%）</b>、② 回放稳定读出 101.48（−1.4%）；
+        T3.2 top-k 检索 <b>106.24（+3.2%，符号翻转转有害）</b>，不推荐启用。
+        它<b>不等于</b>上方默认 256 维栈的 78.16——网络宽度与分词粒度都不同，跨组比较无效。</p>
+      <p class="note">历史漂移（已终结）：<b>99.36 @9K → 155.80 @13.3K → 110.57 @18,692 → 117.05 @19,013 → 76.53 @22,420 → 72.48 @23,276 → 76.72 @23,451 → 冻结 78.16 @23,504</b>
+        （各阶段为<b>当时默认口径</b>，历史值的口径细节见《性能评估》§5.1）。
+        <b>不是架构回归，是语料变了</b>——这一根因已通过语料冻结根治，编辑文档不再漂移基线。</p>
+      <p class="note"><b>泛化探针（<code>tests/demo_gen.py</code>，2026-09-21 新增）</b>：近域四份未见项目文档 inflation <b>0.68–1.05×</b>（优，且一致优于统计基线 20–30%）；
+        远域维基 OOD inflation <b>9.38×</b>（不足）——根因是 <b>OOV 58.5% 覆盖墙</b>（词表仅 1,300、训练语料 1.9 万字符），属数据规模问题；
+        加强组（T3.4+②）近域再 −1.8~−2.2%、远域无效（−0.2%）→ 加强路径是扩大预训练语料（已拍板 Infinity-Instruct 7M_core / M7_Core，7,449,106 条 / 10.07 GB 文本（en 89.9% / zh-cn 10.1%），2026-09-22 已就位）。
+        中文维基预训练语料（原 59 MB 外部锚点，历史值 300.66 vs 2-gram 687.55）已按指令删除。</p>
+    </div>
+    <h3>六任务套件</h3>
+    <table>
+      <thead><tr><th>任务</th><th>PHD-Net</th><th>Transformer</th><th>结论</th></tr></thead>
+      <tbody>
+        <tr><td>语言建模（冻结语料，字符归一 PPL，256 维栈）</td><td><b>78.16</b>（bpc 6.288）</td><td>85.27（0.52M） / 85.66（2.38M）</td><td class="win"><b>相当（达标）</b>（低 8.3%）</td></tr>
+        <tr><td>语言建模 M9 稳定正增益（128 维小栈口径）</td><td>T3.4 内容寻址 <b>101.29</b>（R=102.97，−1.6%）；② 回放稳定读出 101.48（−1.4%）</td><td>—</td><td>两者为稳定正增益；T3.2 符号翻转 +3.2%（有害），不推荐</td></tr>
+        <tr><td>泛化探针（近域四文档 / 远域维基 OOD）</td><td>inflation <b>0.68–1.05×</b>（优） / <b>9.38×</b>（不足，OOV 58.5%）</td><td>词级 2-gram 统计基线</td><td>近域全面占优；远域受词表覆盖墙限制（数据规模问题）</td></tr>
+        <tr><td>单样本记忆（一次印迹，30% 噪声线索）</td><td><b>100%</b></td><td>原生不具备</td><td class="win">结构性独占</td></tr>
+        <tr><td>持续学习 BWT（任务 A→B）</td><td class="good"><b>+0.000</b></td><td class="bad">−1.000（acc_A2=0.000）</td><td class="win">零遗忘 vs 完全遗忘</td></tr>
+        <tr><td>多跳推理（语义图 2 跳）</td><td>链式 4/4</td><td>不适用</td><td>机制验证</td></tr>
+        <tr><td>长程依赖（延迟复制 n=4/8/16）</td><td>默认栈 ~10.1% / 11.0% / 10.0%；<b>启用 M13 后 45.6% / 25.9% / 17.8%</b></td><td>5.7% / 9.7% / 8.6%（随机 8.3%）</td><td class="win">M13 带来 3.6× 提升；整段复现率仍低（n=4 约 7.5%）</td></tr>
+        <tr><td>效率（LM 路径）</td><td><b>6.96 ms/token</b>（P6 热路径优化，修复前 12.84；逐位等价），可塑参数 1,712,388</td><td>训练 1.0 s / 4.7 s（批量并行）</td><td>各有胜负</td></tr>
+      </tbody>
+    </table>
+    <p class="note">判定（路线图 §七）：主任务差距 ≤10% 且 ≥2 项结构化任务显著占优 → 「相当」；持平或更优且 ≥3 项占优 → <b>「更强」</b>。
+    诚实边界：内置语料仅 2 万字符级、外部实际评估预算 8 千字符，与真实 LLM 训练量差 8–10 个数量级，结论<b>不构成对通用 LLM 能力的宣示</b>；Transformer 对照为自建最小实现，未做 warmup / 调度 / 正则调优。</p>
+    <h3>规模化（10 亿突触容量）</h3>
+    <div class="grid g3">
+      <div class="card"><h4>1.28 ms/步</h4><p>容量 2²⁴ × 60 ≈ 1.007×10⁹ 突触，端到端单步训练耗时（tools/train_1b.py 1500 步复跑，本机 8 线程 CPU，无独显）</p></div>
+      <div class="card"><h4>~0 MB 内存增量</h4><p>迹与时间戳按触碰量存储（dict 按需），相对 N 长度数组方案（~197 MB）的实质改进</p></div>
+      <div class="card"><h4>0.0003% 触达</h4><p>已生长 3,072 条突触——容量是「可生长上限」而非「已用能力」，随经验积累而增长</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="roadmap">
+  <div class="wrap">
+    <h2><span class="n">06</span>里程碑进展</h2>
+    <p class="lead">对标 Transformer 的优化路线图共 <b>M1–M6 六个主里程碑 + M7 硬件适配 + M9 五轨道收官</b>，当前<b>全部执行完毕</b>，无剩余待办；路线图文档已按 fhz 要求压成状态摘要，未落地的项统一列入下方「已知阻塞项与开放项」O1–O7。</p>
+    <div class="tl">
+      <div class="item part"><span class="dot"></span><div class="t">M1 误差广播调制 / 错误驱动写入 / 预测通路三拼<span class="tag part">△ 机制落地</span></div>
+        <div class="d">三机制正确落地且零回归，但在「表征冻结的字符级 LM」上无 PPL 增益；意外收获：发现 M3 的时序预测信号此前从未接入读出特征。</div></div>
+      <div class="item ok"><span class="dot"></span><div class="t">M2 词涌现 + 上下文绑定编码<span class="tag ok">✓ 通过</span></div>
+        <div class="d">无词典统计分词（频次 + 边界熵）+ [当前词; 前词] 双库 SDR。字符归一 PPL 从 155.80 降至 <b>89.15</b>（−42.8%），全面优于 n-gram 参照。</div></div>
+      <div class="item part"><span class="dot"></span><div class="t">M3 优化调度（自适应学习率 / 多尺度双迹 / 课程学习）<span class="tag part">△ 增益噪声级</span></div>
+        <div class="d">−0.4% / −0.8% / +4.2%：全部在 1% 噪声带内，课程学习反而有害。结论：优化器层不是当前瓶颈。</div></div>
+      <div class="item part"><span class="dot"></span><div class="t">M4 10 亿容量栈接入<span class="tag part">△ 容量层 ✓ / 接入 ✗</span></div>
+        <div class="d">容量层 1.28 ms/步、因果结构 ✓、内存按需；但单纯扩容未带来 PPL 收益（102.11 vs 89.88）且慢 5.7×——容量未被经验填充前不产生价值。</div></div>
+      <div class="item ok"><span class="dot"></span><div class="t">M5 公平评测与判定<span class="tag ok">✓ 判定「相当（达标）」</span></div>
+        <div class="d">六任务套件 + nanoGPT 级 Transformer 对照 + 自动判定矩阵落地，主任务更优且 3 项结构化任务占优。</div></div>
+      <div class="item ok"><span class="dot"></span><div class="t">M6 长程复制增强（上下文漂移情景记忆）<span class="tag ok">✓ 显著</span></div>
+        <div class="d">TCM/CMR 式串行回忆 + DG 模式分离。延迟复制位置准确率 <b>45.6% / 25.9% / 17.8%</b>（n=4/8/16），为随机基线 8.3% 的 3.6×、既有 LM 基线 ~10% 的 3.0×；模式分离是决定性开关（关闭时≈随机）。整段完全复现率仍低（n=4 约 7.5%）。</div></div>
+      <div class="item ok"><span class="dot"></span><div class="t">M7 硬件生态适配（昇腾 / ROCm / CUDA）<span class="tag part">△ 代码就绪·待硬件验证</span></div>
+        <div class="d">统一后端层 + torch 算子（同一份代码覆盖 cpu/cuda/hip/npu）。CPU 上等价性自检通过、回归 11/11；昇腾与 ROCm 因本机无对应硬件，仅完成适配与接口探测。</div></div>
+      <div class="item ok"><span class="dot"></span><div class="t">M9 五轨道全量收官（15 项 + 容量赛道）<span class="tag ok">✓ 2 稳定正 / 2 中 / 5 负</span></div>
+        <div class="d">正：<b>T3.4 内容寻址 −1.6%</b>、② 回放稳定读出 −1.4%（四轮均为增益）；<b>T3.2 top-k 检索 +3.2% 符号翻转转有害，移出推荐</b>；中性：T4.4 验证驱动睡眠 ±0.0%；
+          负：V4′ +23.1% / ①+T1.2 +22.0% / ① +22.0% / T2.2 +18.4% / ③ +62.9%（均为冻结语料 23,504 字符实测，R = 102.97）。
+          历史各轮（19,013 / 22,420 / 23,451 字符）三项检索/记忆增益排序反复互换——<b>排序对语料敏感</b>，唯 T3.4 与 ② 四轮均为增益。
+          容量赛道：int8 量化 cos=0.9999、值内存 3.0×↓；稀疏 PC 1.91×；拓扑生长引导入度上限 32 生效但因果中性。</div></div>
+    </div>
+    <h3>一句话总判读</h3>
+    <p class="note">PPL 增益<b>全部来自检索/记忆通路</b>；表征可塑性五类尝试跨 M1/M8/M9 四轮<b>全负</b>——「冻结表征」（<code>eta_pc = 0</code>）是当前硬约束，也决定了所有收益的天花板。</p>
+    <h3>numba 结论更正（2026-09-18）</h3>
+    <p class="note">此前记录为「numba 0.67 对 STDP 核静默错编译」，经复检为<b>误判</b>：真实根因是自检脚本传 <code>0.1·t_pre</code> 而 LTD 项用完整 <code>t_post</code>，净增量恒负使权重被截断为 0，numba 与 numpy 两条路径<b>同时</b>失败（控制变量：错误缩放两者均 0.0000，正确缩放两者均 5.0000 —— 逐位一致）。自检已改为三重门槛并修复，现 <b>NUMBA_OK = True</b>，实测加速 n=8192/m=32 → <b>51.5×</b>（0.046 vs 2.387 ms/步）、n=4096/m=64 → 5.83×。副作用：启用后序列误差 0.282 → 0.317、结构 cos 0.81 → 0.73（浮点分歧在 600 步在线学习中被放大），因果结构与其余指标保持。</p>
+    <h3>已知阻塞项与开放项（2026-09-23 收口）</h3>
+    <ul class="clean diff">
+      <li><b>O1 完整双栈统一</b>：<b>✅ 完成（2026-09-23）</b>——① <b>容量栈合并</b>：LM 栈挂 1B 事件驱动容量栈，<b>ppl −1.83%</b>（95.48 vs 97.26）、可塑参数 1.58M、容量上限 <b>1.0B 突触</b>；② <b>主干结构性稀疏连接</b>（CSR 稀疏图 + numba）：<b>连接率 3.1% 时 PPL 持平（+0.03%）</b>、突触存储压缩 <b>32×</b>、PC 层加速 <b>1.68–4.02×</b>，与稠密栈数值等价（≤1.1e-15）；③ 关键区分：「稠密矩阵 + 稀疏更新」≠「结构性稀疏连接」——后者才对应皮层 <b>dense representation + sparse connectivity</b>。</li>
+      <li><b>O2 表征可塑性解锁</b>：<b>10 配置实测 → 当前不可解锁</b>——最优组合（稳态 + 发育冻结 + 回放 + 退火）仍 <b>2.55×</b> 劣于冻结基线，<code>stdp_homeostasis</code> 单独启用即发散（3.9×10⁴）。冻结表征仍是必要配方。</li>
+      <li><b>O3 100B 在线 CSR 迁移</b>：<b>1B 档验证完成</b>（内存 91.8 → <b>16.0 B/条目</b>，5.74×↓；分片落盘 round-trip 逐位一致）；100B 即便 int8 亦需 ≥0.9 TB → 本机不可验证（结构就绪、规模受限）。</li>
+      <li><b>O4 分词器向量化</b>：<b>完成</b>——<b>36.9×</b> 加速（7,035 → 191 ms，23,504 字符），3 组超参下 vocab 与 tokenize 输出逐元素一致。</li>
+      <li><b>O5 长程整段完全复制</b>：<b>部分兑现</b>——再入连接实测 LM PPL <b>−1.88%</b>（正增益）；分段校验实现后实测<b>未触发重锚定</b>（误差是"自洽地漂移"），整段 exact 未突破（n=4 5.0%）。</li>
+      <li><b>O6 脑同源机制功效消融</b>：<b>完成</b>——14 配置敏感度排序：词涌现 <b>+177.5%</b>｜稀疏 k-WTA <b>+84.0%</b>｜WM +1.2% 为真贡献；<b>M5 调制器 −4.2%（净负担）</b>；M3 STDP −0.004%、M4b LTM 0.000% 属装饰/中性。</li>
+      <li><b>O7 自身 scaling curve</b>：<b>完成</b>——参数轴 1.71M→17M 反而 <b>+22.4%</b>；数据轴 4k→16k 字符 <b>−11.2%</b>（β=0.085）⇒ <b>瓶颈在数据预算而非参数规模</b>。</li>
+    </ul>
+  </div>
+</section>
+
+<section id="brain">
+  <div class="wrap">
+    <h2><span class="n">07</span>与人脑：机制同构，而非相同</h2>
+    <p class="lead">可以确认的是「机制级同构的功能性缩比模型」，不能确认「与人脑架构相同」——12/12 模块有神经认知对应；2026-09-19 已将 10 个实现级差异中的 5 个（突触类型/调制系统/可塑性/发育/睡眠）统一为脑同构（默认关闭、零回归），剩余 5 个（规模/计算基底/具身/胶质/能效）仍大幅简化。</p>
+    <div class="cols">
+      <div class="card"><h4>同构层（可确认）</h4>
+        <ul class="clean">
+          <li>稀疏编码 ↔ 皮层稀疏放电与侧抑制 WTA</li>
+          <li>预测编码层级 ↔ 皮层层级预测编码 / 自由能原理</li>
+          <li>STDP 突触迹 ↔ 脉冲时序依赖可塑性</li>
+          <li>工作记忆槽位与门控 ↔ dlPFC 持续放电 + 基底核门控</li>
+          <li>双速率记忆 ↔ 海马快印迹 + 皮层慢巩固（CLS）</li>
+          <li>吸引子检索 ↔ CA3 自动联想</li>
+          <li>调制门控 ↔ NE / DA / ACh 弥散投射</li>
+          <li>情景缓冲 ↔ 海马情景记忆；语义图 ↔ 扩散激活</li>
+          <li>生成解码 ↔ 内言语与运动生成通路</li>
+          <li>联想链推理 ↔ 扩散激活式逐步推理</li>
+        </ul></div>
+      <div class="card"><h4>差异层（剩余 5 项不可称相同）</h4>
+        <ul class="clean diff">
+          <li>规模：人脑约 860 亿神经元 / 10¹⁴–¹⁵ 突触 vs 本项目 1,677 万神经元 / 10⁹ 容量</li>
+          <li>计算基底：脉冲时序 + 树突非线性 + 神经振荡 vs 速率编码矩阵运算</li>
+          <li>具身与多模态：全身感觉运动闭环 vs 单通道符号输入</li>
+          <li>胶质细胞与神经肽体积传导：完全缺失</li>
+          <li>能效：人脑 20 W 完成全部认知功能</li>
+        </ul></div>
+      <div class="card"><h4>已统一为脑同构（2026-09-19，默认关闭）</h4>
+        <ul class="clean ok">
+          <li>突触类型：新增 E/I 分型（抑制性出边权重为负、侧向抑制）</li>
+          <li>调制系统：单标量 z → 四通道 ACh/NE/DA/5-HT</li>
+          <li>可塑性：稳态缩放扩展至 STDP + BCM 元可塑性滑动阈值</li>
+          <li>发育：新增临界期（经验衰减学习率）+ 突触修剪</li>
+          <li>睡眠：新增 SWS/REM 分期 + 突触 downscaling</li>
+        </ul></div>
+    </div>
+  </div>
+</section>
+
+<section id="scale">
+  <div class="wrap">
+    <h2><span class="n">08</span>规模对标：PHD-Net 100B vs GLM-5.3-Flash（320B-A18B MoE）</h2>
+    <p class="lead">这一节的数字<b>不全是实测</b>：GLM 侧为公开事实（引用），PHD-Net 侧为<b>推算</b>，能力维度为<b>估算</b>（借 Transformer α≈0.34 外推）。之所以仍要写，是因为「100B」这个词必须先定义清楚，否则比较毫无意义。</p>
+
+    <h3>先解决口径：两种「参数」不能直接比大小</h3>
+    <table>
+      <thead><tr><th>口径</th><th>PHD-Net 100B</th><th>GLM-5.3-Flash</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td>存储口径</td><td>~10¹¹ 条可塑突触（稀疏按需，未触碰不落盘）</td><td>320B 总参数（FP8 ≈305.8 GiB）</td><td>谁占多少介质</td></tr>
+        <tr><td>每步激活</td><td><b>~5×10⁴ 条突触</b>（≈2×10⁵ FLOPs/token）</td><td>18B 激活（≈3.6×10¹⁰ FLOPs/token）</td><td>真正的算力差：<b>约 5 个数量级</b></td></tr>
+        <tr><td>稠密可训练</td><td>版本 A ~0.2M（已被 M4 证伪）｜版本 B ~20M</td><td>全部 320B</td><td>「可训练」才是主口径</td></tr>
+      </tbody>
+    </table>
+    <p class="note">「100B」的三种定义：<b>A 仅容量放大</b>（LM 栈不变，M4 已证明不产生收益）、<b>B 按比例放大</b>（~20M 稠密，需 T5.1-lite 才能压住 O(n²)）、<b>C = B + 10⁸–10⁹ token 经验</b>。三者能力完全不同，混用即无效比较。</p>
+
+    <h3>资源 / 效率维度（推算）</h3>
+    <div class="grid g3">
+      <div class="card"><h4>内存与部署</h4><p>PHD-Net 事件驱动、按触达量按需分配，1B 训练态实测 197 MB；GLM-5.3-Flash FP8 原生约 305.8 GiB，社区方案需 8×H20 才能跑 512K 上下文。</p><p class="brain"><b>PHD-Net 胜</b>：届时仍需 int8 + 定长 CSR 才能可靠装下 100B</p></div>
+      <div class="card"><h4>每 token 算力</h4><p>~2×10⁵ vs ~3.6×10¹⁰ FLOPs/token</p><p class="brain"><b>PHD-Net 胜 ≈5 个数量级</b></p></div>
+      <div class="card"><h4>训练算力</h4><p>~2×10¹⁴（10⁹ token）vs ~3.2×10²⁴ FLOPs（30T token）</p><p class="brain"><b>PHD-Net 胜</b>（前提：能力可兑现）</p></div>
+      <div class="card"><h4>在线学习 / 单样本</h4><p>PHD-Net 天然在线；GLM 需微调且会遗忘</p><p class="brain"><b>PHD-Net 独占</b></p></div>
+      <div class="card"><h4>上下文长度</h4><p>PHD-Net 无硬窗口但有界 WM；GLM 原生 1M token</p><p class="brain"><b>GLM 胜</b></p></div>
+      <div class="card"><h4>多模态 / 生态</h4><p>GLM 原生图文视频 + vLLM 生态；PHD-Net 均无</p><p class="brain"><b>GLM 胜</b></p></div>
+    </div>
+
+    <h3>能力维度：三情景外推（估算，非实测）</h3>
+    <div class="bars">
+      <div class="bar"><span>悲观 · 版本 A</span><span class="track"><span class="fill ng" style="width:100%"></span></span><span class="val">PPL 100–120</span></div>
+      <div class="bar"><span>中性 · 版本 B</span><span class="track"><span class="fill" style="width:50%"></span></span><span class="val">PPL 20–60</span></div>
+      <div class="bar"><span>乐观 · 版本 C</span><span class="track"><span class="fill" style="width:18%"></span></span><span class="val">PPL 10–20</span></div>
+      <div class="bar"><span>GLM-5.3-Flash（参照）</span><span class="track"><span class="fill tf" style="width:6%"></span></span><span class="val">远低于此</span></div>
+    </div>
+    <p class="note">关键假设列在《竞争力与脑同构性评估》§2.5。<b>诚实校准</b>：PHD-Net 目前只有 ~0.2M 一个稠密数据点，无自身 scaling curve，上述外推必须被下面三组实测证伪或修正。</p>
+
+    <h3>要让预估可证伪，必须先补的三组实测</h3>
+    <ul class="clean diff">
+      <li><b>PHD-Net scaling curve</b>：固定配方跑 0.2M / 2M / 20M 三点，拟合 α（当前完全缺失）。</li>
+      <li><b>表征可塑性解锁</b>：在解锁前，capacity→capability 的转化率为 0，任何外推都只是 resource 故事。</li>
+      <li><b>100B 在线 CSR 可行性</b>：现 dict 邻接约 100+ B/条目，100B 规模不可行；需先做 int8 + 定长 CSR + mmap 分片。</li>
+    </ul>
+    <p class="note"><b>结论：</b>100B 只会放大<b>容量</b>，不会自动转化为<b>能力</b>——缺的是「把容量转成能力的可塑机制」。在 O2 解锁之前，任何 PPL 数字都只是 resource 侧的胜利。</p>
+  </div>
+</section>
+
+<section id="hw">
+  <div class="wrap">
+    <h2><span class="n">09</span>硬件生态：昇腾 NPU / ROCm / CUDA / CPU</h2>
+    <p class="lead">同一份算子代码覆盖所有后端——torch 后端只切换 device/dtype，算法语义不变；无加速器时自动回退 numpy(+numba) CPU 路径，默认行为逐位不变（零回归）。</p>
+    <div class="grid g3">
+      <div class="card"><h4>CPU · numpy + numba<span class="tag ok">✓ 默认路径</span></h4>
+        <p>默认后端，回归 11/11 通过；numba JIT 加速实测 5.8–51.5×</p>
+        <p class="brain"><b>状态</b>：verified（本机）</p></div>
+      <div class="card"><h4>torch CPU<span class="tag ok">✓ 等价性通过</span></h4>
+        <p>TorchSTDPCore 与 numpy 参考逐元素一致（atol 1e-5），predict 用 <code>index_add_</code> 做 scatter</p>
+        <p class="brain"><b>状态</b>：verified（本机）</p></div>
+      <div class="card"><h4>NVIDIA CUDA<span class="tag part">△ 代码就绪</span></h4>
+        <p>设备标识 <code>cuda</code>，需 CUDA 版 PyTorch</p>
+        <p class="brain"><b>状态</b>：本机无 GPU，未实测</p></div>
+      <div class="card"><h4>昇腾 NPU（华为）<span class="tag part">△ 代码就绪</span></h4>
+        <p>设备标识 <code>npu</code>；需 CANN 工具包 + <code>torch_npu</code>（版本须与 torch 严格匹配）</p>
+        <p class="brain"><b>状态</b>：本机无 NPU，仅完成适配与接口探测</p></div>
+      <div class="card"><h4>ROCm / HIP（AMD）<span class="tag part">△ 代码就绪</span></h4>
+        <p>走 <code>cuda</code> 设备接口；<b>ROCm 官方仅支持 Linux</b>，Windows 上 AMD GPU 建议 DirectML 路径</p>
+        <p class="brain"><b>状态</b>：本机为 Windows 且无 AMD GPU，未实测</p></div>
+      <div class="card"><h4>DirectML<span class="tag part">△ 仅探测</span></h4>
+        <p><code>torch_directml</code> 插件，适用于 Windows 上的 AMD/Intel GPU</p>
+        <p class="brain"><b>状态</b>：本机未安装</p></div>
+    </div>
+    <h3>启用方式</h3>
+    <pre>cfg = PHDNetConfig(backend="torch")   <span class="c"># 或 "npu" / "rocm" / "cuda" / "cpu" / "numpy"</span>
+net = PHDNet(cfg)                     <span class="c"># 自动在目标设备上构建 STDP 关联核</span>
+
+<span class="c"># 环境体检：探测后端并在可用设备上跑等价性自检</span>
+python tools/backend_probe.py
+python tools/backend_probe.py --torch</pre>
+    <h3>覆盖范围与限制</h3>
+    <ul class="clean diff">
+      <li>目前仅 <b>M3 STDP 热点</b>完成 torch 化；M1/M2/M4/M6 与读出仍为 numpy/numba</li>
+      <li>1B 大容量印迹表仍是 dict 邻接表（CPU 结构），尚未迁移到设备端稀疏张量</li>
+      <li>torch 后端不支持 T4.1 逐突触自适应学习率，开启时显式报错</li>
+      <li>昇腾部分型号建议 float16，但未经实机验证，默认 float32</li>
+    </ul>
+    <p class="note">诚实说明：昇腾 NPU 与 ROCm 路径在本机（Windows 11 + torch 2.13.0+cpu，无 NPU / 无 AMD GPU）<b>无法实测</b>，当前状态为「代码适配完成 + 接口探测可用 + 待硬件验证」。在有硬件的机器上执行 <code>python tools/backend_probe.py</code> 即可完成验证。</p>
+  </div>
+</section>
+
+<section id="docs">
+  <div class="wrap">
+    <h2><span class="n">10</span>文档与复现</h2>
+    <p class="lead">全部代码与文档在同一工作区，Python 3.14 可直接运行；版本号统一为 v0.0.0。</p>
+    <div class="docs">
+      <a class="doc" href="./PHD-Net_架构设计.md"><b>PHD-Net_架构设计.md</b><small>总设计文档：M1–M6 基础架构 + M7–M12 认知层 + 学习规则 + 1B 规模化设计</small></a>
+      <a class="doc" href="./PHD-Net_对标Transformer优化路线图.md"><b>对标 Transformer 优化路线图</b><small>瓶颈定位、五轨道改进、评测协议与 M1–M6 实施记录</small></a>
+      <a class="doc" href="./PHD-Net_竞争力与脑同构性评估.md"><b>竞争力与脑同构性评估</b><small>与市面 LLM 的训练/推理对比、<b>100B vs GLM-5.3-Flash</b>、人脑同构对照与工程债</small></a>
+      <a class="doc" href="./PHD-Net_性能评估与迭代方案.md"><b>性能评估与迭代方案</b><small>CPU / RAM 定量数据与 P1–P6 + 五轨道结果账</small></a>
+    </div>
+    <p class="note">工程状态（2026-09-20）：A/B/C 类代码风险已全部修复（A1 静默降级、A2 <code>SparseLTM</code> 契约校验、A3 非 softmax 读出配置生效、B1–B7、C1/C2/C6/C7/C8），C3/C4/C5 为性能类风险留待专项；新增行为一律走 config 开关且默认关闭、默认路径逐位不变；<code>tests/run_tests.py</code> fast <b>11/11 通过</b>。原《代码审计报告》已按指令删除，修复记录并入各文档"工程状态"说明。</p>
+    <h3>复现入口</h3>
+    <pre><span class="c"># 环境：Python 3.14.5 + numpy / torch / numba / psutil</span>
+python tests/run_tests.py          <span class="c"># 快速回归（11 项，约 40 秒）—— 零回归门槛</span>
+python tests/run_tests.py --full   <span class="c"># 全量验收（约 35 分钟）</span>
+python tests/demo_m2.py            <span class="c"># M2 词级 LM 消融（字符归一 PPL）</span>
+python tests/demo_m9.py            <span class="c"># M9 五轨道全量消融（15 项）</span>
+python tests/eval_suite.py         <span class="c"># 六任务评测 + Transformer 对照 + 判定矩阵</span>
+python tests/demo_m4.py            <span class="c"># 10 亿容量层与接入验证</span>
+python tools/train_1b.py           <span class="c"># 1B 容量模型训练（1.28 ms/步）</span>
+
+<span class="c"># 泛化探针（域内 / 近域 / 远域）</span>
+python tests/demo_gen.py                    <span class="c"># 基准组（--strength 为 T3.4+② 加强组）</span></pre>
+    <p class="note">提示：内置语料已<b>冻结</b>为 <code>datasets/eval/internal_corpus.txt</code>（23,504 字符，架构设计文档的逐字副本）——<b>编辑文档不再改变语料与基线</b>，冻结值即长期稳定锚点（当前值见本页第 05 节）。目录新布局：<code>datasets/eval/ sft/ pretrain/</code>（<code>data/</code> 已更名）；中文维基预训练语料与旧 SFT 语料（<code>tool_train.txt</code> 等）、ModelScope mimo 数据集均已按指令删除。预训练语料已拍板（2026-09-22）：<b>Infinity-Instruct 7M_core（M7_Core）</b>——75 parquet 分片 6.1 GB，实测 750 万条对话 / 全量文本 ~10.2 GB，经 <code>tools/convert_infinity.py</code> 转换落 <code>datasets/pretrain/infinity_m7core.txt</code>（已就位 7,449,106 条 / 10.07 GB 文本）。<b>SFT 语料已就位（2026-09-23）</b>：OpenBMB <code>UltraInteract_sft</code>——288,579 条 / <b>0.603 GB 文本</b>，77,023 条唯一指令（Coding 39.8% / Math 56.2% / Logic 4.0%，含偏好树 <code>parent_id</code>），经 <code>tools/convert_ultrainteract.py</code> 转换落 <code>datasets/sft/ultrainteract_sft.txt</code>。
+    <br>ℹ 本机网络事实（2026-09-20 实测）：境外源严重受限（wikimedia ~10 KB/s、huggingface 不可达），国内源可达且快（ModelScope ~5 MB/s、清华 PyPI ~5 MB/s），语料通道因此走 ModelScope。</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">PHD-Net v0.0.0 · 2026-09-20 · 预测编码 × Hebbian/STDP × 双记忆网络 · 无自注意力 / 无位置编码 / 无堆叠层</div>
+</footer>
+
+<script>
+document.querySelectorAll('nav a[href^="#"]').forEach(function(a){
+  a.addEventListener('click',function(e){
+    var t=document.querySelector(a.getAttribute('href'));
+    if(t){e.preventDefault();window.scrollTo({top:t.offsetTop-64,behavior:'smooth'});}
+  });
+});
+</script>
+</body>
+</html>

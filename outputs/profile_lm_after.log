@@ -1,0 +1,150 @@
+语料: D:\AiModel\train\datasets\eval\internal_corpus.txt  共 23504 字符
+BASE 配置: {'n_sdr': 256, 'k_sparse': 32, 'n_mid': 256, 'n_top': 256, 'eta_pc': 0.0, 'eta_oja': 0.0, 'eta_stdp': 0.02, 'seed': 11, 'pred_in_readout': True}
+SEG 配置: {'max_len': 6, 'min_count': 5, 'min_entropy': 1.0}
+
+[分词] 11851 tokens / 18803 chars, 13.6 ms 全量 (1.2 us/token)
+
+==============================================================================
+ cProfile — 训练 train_stream
+==============================================================================
+         96184 function calls in 4.461 seconds
+   Ordered by: internal time
+   List reduced from 87 to 22 due to restriction <22>
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+      663    1.639    0.002    1.640    0.002 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\numeric.py:905(outer)
+      661    1.490    0.002    3.163    0.005 D:\AiModel\train\phdnet\readout.py:30(learn_softmax)
+      661    0.362    0.001    4.419    0.007 D:\AiModel\train\phdnet\model.py:194(step)
+      661    0.344    0.001    0.344    0.001 D:\AiModel\train\phdnet\readout.py:18(__call__)
+      661    0.192    0.000    0.208    0.000 D:\AiModel\train\phdnet\pc.py:36(infer)
+      661    0.119    0.000    0.163    0.000 D:\AiModel\train\phdnet\sparse_encoder.py:20(encode)
+      661    0.033    0.000    0.033    0.000 D:\AiModel\train\phdnet\plasticity.py:64(step)
+       71    0.023    0.000    0.023    0.000 D:\AiModel\train\phdnet\ltm.py:44(recall)
+     4628    0.023    0.000    0.023    0.000 {method 'reduce' of 'numpy.ufunc' objects}
+      661    0.018    0.000    0.021    0.000 D:\AiModel\train\phdnet\word_encoder.py:95(encode_composite)
+      661    0.016    0.000    0.022    0.000 D:\AiModel\train\phdnet\wm.py:31(decay)
+      661    0.015    0.000    0.015    0.000 {method 'argpartition' of 'numpy.ndarray' objects}
+        1    0.014    0.014    4.460    4.460 D:\AiModel\train\phdnet\word_lm.py:39(_pass)
+      661    0.014    0.000    0.023    0.000 D:\AiModel\train\phdnet\model.py:123(_rate)
+     1322    0.014    0.000    0.024    0.000 D:\AiModel\train\phdnet\plasticity.py:53(predict)
+     2646    0.012    0.000    0.012    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\_methods.py:96(_clip)
+     1983    0.008    0.000    0.017    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\linalg\_linalg.py:2598(norm)
+      661    0.008    0.000    0.015    0.000 D:\AiModel\train\phdnet\wm.py:91(read)
+      661    0.007    0.000    0.009    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\numeric.py:97(zeros_like)
+     4642    0.007    0.000    0.050    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\fromnumeric.py:48(_wrapfunc)
+      661    0.006    0.000    0.006    0.000 {method 'argmax' of 'numpy.ndarray' objects}
+     1983    0.006    0.000    0.006    0.000 {built-in method numpy.zeros}
+         96184 function calls in 4.461 seconds
+   Ordered by: cumulative time
+   List reduced from 87 to 22 due to restriction <22>
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.000    0.000    4.461    4.461 D:\AiModel\train\phdnet\word_lm.py:83(train_stream)
+        1    0.014    0.014    4.460    4.460 D:\AiModel\train\phdnet\word_lm.py:39(_pass)
+      661    0.362    0.001    4.419    0.007 D:\AiModel\train\phdnet\model.py:194(step)
+      661    1.490    0.002    3.163    0.005 D:\AiModel\train\phdnet\readout.py:30(learn_softmax)
+      663    1.639    0.002    1.640    0.002 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\numeric.py:905(outer)
+      661    0.344    0.001    0.344    0.001 D:\AiModel\train\phdnet\readout.py:18(__call__)
+      661    0.192    0.000    0.208    0.000 D:\AiModel\train\phdnet\pc.py:36(infer)
+      661    0.119    0.000    0.163    0.000 D:\AiModel\train\phdnet\sparse_encoder.py:20(encode)
+     4642    0.007    0.000    0.050    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\fromnumeric.py:48(_wrapfunc)
+      661    0.033    0.000    0.033    0.000 D:\AiModel\train\phdnet\plasticity.py:64(step)
+     1322    0.014    0.000    0.024    0.000 D:\AiModel\train\phdnet\plasticity.py:53(predict)
+     2646    0.005    0.000    0.024    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\fromnumeric.py:2245(clip)
+       71    0.023    0.000    0.023    0.000 D:\AiModel\train\phdnet\ltm.py:44(recall)
+      661    0.014    0.000    0.023    0.000 D:\AiModel\train\phdnet\model.py:123(_rate)
+     4628    0.023    0.000    0.023    0.000 {method 'reduce' of 'numpy.ufunc' objects}
+      661    0.016    0.000    0.022    0.000 D:\AiModel\train\phdnet\wm.py:31(decay)
+      661    0.018    0.000    0.021    0.000 D:\AiModel\train\phdnet\word_encoder.py:95(encode_composite)
+      661    0.005    0.000    0.021    0.000 D:\AiModel\train\phdnet\model.py:163(_build_h)
+      661    0.002    0.000    0.020    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\fromnumeric.py:848(argpartition)
+     1983    0.008    0.000    0.017    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\linalg\_linalg.py:2598(norm)
+     1322    0.003    0.000    0.016    0.000 {method 'max' of 'numpy.ndarray' objects}
+      661    0.015    0.000    0.015    0.000 {method 'argpartition' of 'numpy.ndarray' objects}
+
+==============================================================================
+ cProfile — 评估 evaluate
+==============================================================================
+         107287 function calls in 0.914 seconds
+   Ordered by: internal time
+   List reduced from 58 to 22 due to restriction <22>
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+      941    0.341    0.000    0.341    0.000 D:\AiModel\train\phdnet\readout.py:18(__call__)
+      941    0.210    0.000    0.229    0.000 D:\AiModel\train\phdnet\pc.py:36(infer)
+      941    0.075    0.000    0.117    0.000 D:\AiModel\train\phdnet\sparse_encoder.py:20(encode)
+        1    0.041    0.041    0.914    0.914 D:\AiModel\train\phdnet\word_lm.py:111(evaluate)
+      941    0.035    0.000    0.837    0.001 D:\AiModel\train\phdnet\model.py:194(step)
+     6587    0.023    0.000    0.023    0.000 {method 'reduce' of 'numpy.ufunc' objects}
+     1882    0.019    0.000    0.033    0.000 D:\AiModel\train\phdnet\plasticity.py:53(predict)
+      941    0.017    0.000    0.028    0.000 D:\AiModel\train\phdnet\model.py:123(_rate)
+     3764    0.015    0.000    0.015    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\_methods.py:96(_clip)
+      941    0.013    0.000    0.013    0.000 {method 'argpartition' of 'numpy.ndarray' objects}
+      941    0.012    0.000    0.015    0.000 D:\AiModel\train\phdnet\word_encoder.py:95(encode_composite)
+     2823    0.012    0.000    0.026    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\linalg\_linalg.py:2598(norm)
+      941    0.012    0.000    0.021    0.000 D:\AiModel\train\phdnet\wm.py:91(read)
+     2823    0.007    0.000    0.007    0.000 {method 'dot' of 'numpy.ndarray' objects}
+      941    0.007    0.000    0.009    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\numeric.py:97(zeros_like)
+     3764    0.007    0.000    0.030    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\fromnumeric.py:2245(clip)
+      941    0.006    0.000    0.028    0.000 D:\AiModel\train\phdnet\model.py:163(_build_h)
+      941    0.006    0.000    0.006    0.000 {method 'partition' of 'numpy.ndarray' objects}
+     4705    0.005    0.000    0.038    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\fromnumeric.py:48(_wrapfunc)
+     1882    0.004    0.000    0.016    0.000 {method 'max' of 'numpy.ndarray' objects}
+     3764    0.003    0.000    0.018    0.000 {method 'clip' of 'numpy.ndarray' objects}
+     1882    0.003    0.000    0.003    0.000 {built-in method numpy.zeros}
+         107287 function calls in 0.914 seconds
+   Ordered by: cumulative time
+   List reduced from 58 to 22 due to restriction <22>
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.041    0.041    0.914    0.914 D:\AiModel\train\phdnet\word_lm.py:111(evaluate)
+      941    0.035    0.000    0.837    0.001 D:\AiModel\train\phdnet\model.py:194(step)
+      941    0.341    0.000    0.341    0.000 D:\AiModel\train\phdnet\readout.py:18(__call__)
+      941    0.210    0.000    0.229    0.000 D:\AiModel\train\phdnet\pc.py:36(infer)
+      941    0.075    0.000    0.117    0.000 D:\AiModel\train\phdnet\sparse_encoder.py:20(encode)
+     4705    0.005    0.000    0.038    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\fromnumeric.py:48(_wrapfunc)
+     1882    0.019    0.000    0.033    0.000 D:\AiModel\train\phdnet\plasticity.py:53(predict)
+     3764    0.007    0.000    0.030    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\fromnumeric.py:2245(clip)
+      941    0.006    0.000    0.028    0.000 D:\AiModel\train\phdnet\model.py:163(_build_h)
+      941    0.017    0.000    0.028    0.000 D:\AiModel\train\phdnet\model.py:123(_rate)
+     2823    0.012    0.000    0.026    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\linalg\_linalg.py:2598(norm)
+     6587    0.023    0.000    0.023    0.000 {method 'reduce' of 'numpy.ufunc' objects}
+      941    0.012    0.000    0.021    0.000 D:\AiModel\train\phdnet\wm.py:91(read)
+     3764    0.003    0.000    0.018    0.000 {method 'clip' of 'numpy.ndarray' objects}
+      941    0.002    0.000    0.018    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\fromnumeric.py:848(argpartition)
+     1882    0.004    0.000    0.016    0.000 {method 'max' of 'numpy.ndarray' objects}
+     3764    0.015    0.000    0.015    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\_methods.py:96(_clip)
+      941    0.012    0.000    0.015    0.000 D:\AiModel\train\phdnet\word_encoder.py:95(encode_composite)
+     2823    0.003    0.000    0.013    0.000 {method 'sum' of 'numpy.ndarray' objects}
+      941    0.013    0.000    0.013    0.000 {method 'argpartition' of 'numpy.ndarray' objects}
+     1882    0.001    0.000    0.012    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\_methods.py:39(_amax)
+     2823    0.001    0.000    0.010    0.000 C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\numpy\_core\_methods.py:47(_sum)
+
+==============================================================================
+ 分相计时（wrap 实测，训练 1000 tokens）
+==============================================================================
+net.step 总计: 5053.9 ms / 790 步 = 6.397 ms/token
+
+环节                         累计 ms        次数        us/次   占 step%
+learn_softmax             4005.2       790      5069.8     79.2%
+infer                      238.2       790       301.5      4.7%
+encode                     185.3       790       234.6      3.7%
+recall                      25.6        80       320.6      0.5%
+predict                     24.1      1580        15.2      0.5%
+encode_composite            23.9       790        30.3      0.5%
+decay                       23.8       790        30.2      0.5%
+read                        16.0       790        20.2      0.3%
+write                        9.7       870        11.2      0.2%
+onehot                       3.4       790         4.3      0.1%
+learn                        3.2       790         4.0      0.1%
+imprint                      1.9         9       208.9      0.0%
+__call__                     0.0         0         0.0      0.0%
+
+已覆盖环节合计: 4560.3 ms (90.2% of step) —— 差值为 step 内 Python 编排开销
+
+==============================================================================
+ 参数规模（float64 字节数）
+==============================================================================
+encoder.W    (256, 512)         1.05 MB
+pc.W_up0     (256, 256)         0.52 MB
+pc.W_up1     (256, 256)         0.52 MB
+pc.W_dn0     (256, 256)         0.52 MB
+pc.W_dn1     (256, 256)         0.52 MB
+stdp.W       (256, 16)          0.03 MB
+readout.W    (1540, 768)        9.46 MB

@@ -1,0 +1,77 @@
+# PHD-Net O6 模块消融  | 语料 23504 字符, 训练段 4000, 评估段 4701
+# 截断口径: 训练段截断到前 4000 字符
+# 配置总数: 14（含基线）
+
+[1/14] 运行 baseline ... (base)
+      -> ppl_char=97.2596  n_tok=3022  oov=0  耗时=67.8s  [完整配置（不消融），同脚本重跑作为参照]
+[2/14] 运行 A1_M1_k_sparse_256 ... (close)
+      -> ppl_char=178.9047  n_tok=3022  oov=0  耗时=44.1s  [k_sparse 32→256：等价取消 k-WTA 稀疏竞争，M1 稀疏编码失效]
+[3/14] 运行 A2_M2_n_infer_steps_0 ... (close)
+      -> ppl_char=96.9296  n_tok=3022  oov=0  耗时=42.7s  [n_infer_steps 1→0：关闭误差驱动精炼，M2 顶层表示退化为单次前向]
+[4/14] 运行 A3_M2_pred_in_readout_off ... (close)
+      -> ppl_char=97.4016  n_tok=3022  oov=0  耗时=28.1s  [pred_in_readout True→False：关闭读出三拼，M2/M3 预测特征不再进读出头]
+[5/14] 运行 A4_M3_eta_stdp_0 ... (close)
+      -> ppl_char=97.2560  n_tok=3022  oov=0  耗时=42.6s  [eta_stdp 0.02→0.0：关闭 M3 STDP 时序学习，时序关联核冻结]
+[6/14] 运行 A5_M4a_gamma_wm_0 ... (close)
+      -> ppl_char=98.4354  n_tok=3022  oov=0  耗时=52.3s  [gamma_wm 0.85→0.0：每步清空 WM，M4a 工作记忆退化为瞬时上下文（n_wm_slots=0 会崩，故用此等价削弱）]
+[7/14] 运行 A6_M4b_ltm_off ... (close)
+      -> ppl_char=97.2596  n_tok=3022  oov=0  耗时=32.0s  [eta_hip=eta_cortex=0.0：印迹/巩固无效，M4b 长期记忆为空（召回退化为常向量）]
+[8/14] 运行 A7_M5_mod_gain_0 ... (close)
+      -> ppl_char=93.1670  n_tok=3022  oov=0  耗时=53.6s  [mod_gain 1.5→0.0：调制器 gate≡σ(0)=0.5 恒定，M5 惊奇门控失效]
+[9/14] 运行 A8_M6_readout_softmax_off ... (close)
+      -> ppl_char=97.2596  n_tok=3022  oov=0  耗时=67.3s  [readout_softmax True→False：换回线性感知器读出。⚠ harness 覆盖——PHDWordLM 强制 readout_softmax=True，本项实为 no-op，0% 变化是脚本特性而非 M6 无贡献，解读时排除]
+[10/14] 运行 A9_M7_seg_max_len_1 ... (close)
+      -> ppl_char=269.9029  n_tok=4700  oov=0  耗时=71.4s  [seg max_len 6→1：不涌现多字词，退化为字符级（词表与 token 数改变，须看 n_tok）]
+[11/14] 运行 B1_multi_modulation ... (open)
+      -> ppl_char=94.9698  n_tok=3022  oov=0  耗时=75.5s  [multi_modulation=True：M5 升级为 ACh/NE/DA/5-HT 四通道调制，看是否增益]
+[12/14] 运行 B2_error_triggered_retrieval ... (open)
+      -> ppl_char=97.2596  n_tok=3022  oov=0  耗时=83.5s  [error_triggered_retrieval=True：任务误差高时额外检索（T3.2-lite），看是否增益]
+[13/14] 运行 B3_adaptive_lr ... (open)
+      -> ppl_char=96.2475  n_tok=3022  oov=0  耗时=84.1s  [adaptive_lr=True：STDP 逐突触自适应学习率（局部二阶矩归一），看是否增益]
+[14/14] 运行 B4_retrieval_topk_4 ... (open)
+      -> ppl_char=94.9565  n_tok=3022  oov=0  耗时=97.8s  [retrieval_topk=4：每步把 top-k 召回线索拼入读出（T3.2），看是否增益]
+
+# 基线 ppl_char（同脚本实测）: 97.2596
+
+# 逐项结果（按 |变化率| 降序）：
+# 配置                           组        ppl_char      变化率%   n_tok      耗时
+# baseline                     base      97.2596   +0.0000    3022   67.8s
+# A9_M7_seg_max_len_1          close    269.9029   +177.51    4700   71.4s
+# A1_M1_k_sparse_256           close    178.9047    +83.95    3022   44.1s
+# A7_M5_mod_gain_0             close     93.1670     -4.21    3022   53.6s
+# B4_retrieval_topk_4          open      94.9565     -2.37    3022   97.8s
+# B1_multi_modulation          open      94.9698     -2.35    3022   75.5s
+# A5_M4a_gamma_wm_0            close     98.4354     +1.21    3022   52.3s
+# B3_adaptive_lr               open      96.2475     -1.04    3022   84.1s
+# A2_M2_n_infer_steps_0        close     96.9296     -0.34    3022   42.7s
+# A3_M2_pred_in_readout_off    close     97.4016     +0.15    3022   28.1s
+# A4_M3_eta_stdp_0             close     97.2560   -0.0036    3022   42.6s
+# A6_M4b_ltm_off               close     97.2596   +0.0000    3022   32.0s
+# A8_M6_readout_softmax_off    close     97.2596   +0.0000    3022   67.3s
+# B2_error_triggered_retrieval open      97.2596   +0.0000    3022   83.5s
+
+# ════════════════════════════════════════════════════════════════
+# 敏感度排序（按 |变化率| 降序；关闭组上升=真贡献，打开组下降=真增益）
+# ════════════════════════════════════════════════════════════════
+#  1. baseline                         +0.000%  [base ] 中性（打开无明显变化）
+#  2. A9_M7_seg_max_len_1             +177.51%  [close] 真贡献（关闭后 PPL 上升）
+#  3. A1_M1_k_sparse_256               +83.95%  [close] 真贡献（关闭后 PPL 上升）
+#  4. A7_M5_mod_gain_0                  -4.21%  [close] 关闭后反而更好（疑似噪声/过拟合）
+#  5. B4_retrieval_topk_4               -2.37%  [open ] 有增益（打开后 PPL 下降）
+#  6. B1_multi_modulation               -2.35%  [open ] 有增益（打开后 PPL 下降）
+#  7. A5_M4a_gamma_wm_0                 +1.21%  [close] 真贡献（关闭后 PPL 上升）
+#  8. B3_adaptive_lr                    -1.04%  [open ] 有增益（打开后 PPL 下降）
+#  9. A2_M2_n_infer_steps_0             -0.34%  [close] 装饰/中性（关闭无影响）
+# 10. A3_M2_pred_in_readout_off         +0.15%  [close] 装饰/中性（关闭无影响）
+# 11. A4_M3_eta_stdp_0                 -0.004%  [close] 装饰/中性（关闭无影响）
+# 12. A6_M4b_ltm_off                   +0.000%  [close] 装饰/中性（关闭无影响）
+# 13. A8_M6_readout_softmax_off        +0.000%  [close] 装饰? 实为 harness no-op，排除
+# 14. B2_error_triggered_retrieval     +0.000%  [open ] 中性（打开无明显变化）
+
+# ── 结论速览 ──
+# 真贡献（关闭→PPL 升 >1%）: ['A9_M7_seg_max_len_1', 'A1_M1_k_sparse_256', 'A5_M4a_gamma_wm_0']
+# 装饰/中性（关闭→|Δ|≤1%）: ['A2_M2_n_infer_steps_0', 'A3_M2_pred_in_readout_off', 'A4_M3_eta_stdp_0', 'A6_M4b_ltm_off', 'A8_M6_readout_softmax_off']
+# 关闭后反而更好（疑似过拟合/噪声）: ['A7_M5_mod_gain_0']
+# 打开有增益（打开→PPL 降 >1%）: ['B4_retrieval_topk_4', 'B1_multi_modulation', 'B3_adaptive_lr']
+# 打开无增益: ['B2_error_triggered_retrieval']
+# 总耗时: 842.9s

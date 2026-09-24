@@ -1,0 +1,31 @@
+[PASS] A eta=0.05: W 逐位一致
+[PASS] A eta=0.05: NLL 逐位一致
+[PASS] A eta=0.0: W 逐位一致
+[PASS] A eta=0.0: NLL 逐位一致
+[PASS] A eta=0.3: W 逐位一致
+[PASS] A eta=0.3: NLL 逐位一致
+[PASS] B: W 逐位一致
+[PASS] B: NLL 逐位一致
+[PASS] B: y_pre 本体未被修改
+[PASS] C: W_up0 乘零更新后逐位不变（短路等价）
+[PASS] C: W_up1 乘零更新后逐位不变（短路等价）
+[PASS] C: W_dn0 乘零更新后逐位不变（短路等价）
+[PASS] C: W_dn1 乘零更新后逐位不变（短路等价）
+[PASS] D: 训练 NLL 序列逐位一致
+[PASS] D: 评估 ppl_char 逐位一致
+[PASS] D: 权重 enc.W 逐位一致
+[PASS] D: 权重 pc.W_up0 逐位一致
+[PASS] D: 权重 pc.W_up1 逐位一致
+[PASS] D: 权重 pc.W_dn0 逐位一致
+[PASS] D: 权重 pc.W_dn1 逐位一致
+[PASS] D: 权重 stdp.W 逐位一致
+[PASS] D: 权重 ro.W 逐位一致
+[PASS] D: 权重 wm.slots 逐位一致
+[PASS] D: 权重 wm.strength 逐位一致
+[PASS] D: 权重 ltm.W_fast 逐位一致
+[PASS] D: 权重 ltm.W_slow 逐位一致
+[PASS] D: 权重 prev_rate 逐位一致
+[PASS] D: 权重 last_rate 逐位一致
+    ppl_char: old=151.580664140212  new=151.580664140212
+
+=== 全部逐位等价 ===

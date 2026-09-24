@@ -1,0 +1,4 @@
+全语料口径复核（训练段 18803 字符，评估段 4701）
+历史权威基线: eta_readout=0.05 → 78.16
+  eta_readout=0.05  ppl_char= 78.4180  bpc=6.2931  (89s)
+  eta_readout=0.2   ppl_char= 74.9916  bpc=6.2287  (100s)

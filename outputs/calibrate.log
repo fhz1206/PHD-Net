@@ -1,0 +1,15 @@
+corpus=23504 train80%=18803 eval=4701 train_trunc=4000
+vocab_size(V)=1540
+=== 参数规模扫描（不训练）===
+D=(256,256,256) k=32 params=1,712,388 ms/tok=None
+D=(600,600,600) k=75 params=5,664,604 ms/tok=None
+D=(900,900,900) k=112 params=10,656,904 ms/tok=None
+D=(1200,1200,1200) k=150 params=17,089,204 ms/tok=None
+D=(1500,1500,1500) k=187 params=24,961,504 ms/tok=None
+D=(2000,2000,2000) k=250 params=41,282,004 ms/tok=None
+D=(3000,3000,3000) k=375 params=85,923,004 ms/tok=None
+D=(4350,4350,4350) k=543 params=171,568,354 ms/tok=None
+D=(5000,5000,5000) k=625 params=223,205,004 ms/tok=None
+=== 计时校准：BASE 在 4000 字符上的单遍耗时 ===
+  -> ppl_char=97.260 bpc=6.6038 n_tok=3022 oov=0
+D=(256,256,256) k=32 params=1,712,388 ms/tok=6.315

@@ -1,0 +1,4 @@
+边界探测（fp64 口径，基线 0.05 = 97.2596）
+  eta_readout=0.2   ppl_char=   90.2116  Δ=  -7.25%  (21s)
+  eta_readout=0.3   ppl_char=   92.5668  Δ=  -4.83%  (21s)
+  eta_readout=0.5   ppl_char=  104.2385  Δ=  +7.18%  (21s)

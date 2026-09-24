@@ -1,0 +1,4 @@
+rmtree __pycache__: 2
+removed stale logs: 22
+missing: []
+REMAIN: chat_openai.py | chat_r1sft.py | cleanup_scan.txt | compile_check.txt | demo_copy_m9.log | demo_m9.log | demo_m9_result.json | fast_test_m9.log | reval.py | reval_doc.py | reval_fast.py | run_demo.py | run_demo_external.py | smoke_m9.log | t52_control.txt | train_r1sft.py | websearch_tool.py

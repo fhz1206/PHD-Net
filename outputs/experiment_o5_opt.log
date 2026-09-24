@@ -1,0 +1,45 @@
+O5-opt | SDR 2048/32 | 训练 n=8 × 120 段 | 评估 n=4/8 × 20 段
+随机基线 8.3% | 上轮 baseline exact(n=4) = 5.0%
+============================================================================================
+
+--- κ=0.0 （训练 19s）---
+  base(cs1)    n=4:  43.8% / exact 10.0%  n=8:  30.0% / exact  0.0%
+  vote         n=4:  26.2% / exact  0.0%  n=8:  25.0% / exact  0.0%
+  cs2          n=4:  18.8% / exact  0.0%  n=8:  17.5% / exact  0.0%
+  vote+cs2     n=4:  12.5% / exact  0.0%  n=8:  16.2% / exact  0.0%
+  cs3          n=4:  25.0% / exact  0.0%  n=8:  19.4% / exact  0.0%
+  vote+cs3     n=4:  15.0% / exact  0.0%  n=8:  16.2% / exact  0.0%
+  vote+seg4    n=4:  26.2% / exact  0.0%  n=8:  25.0% / exact  0.0%
+
+--- κ=0.2 （训练 40s）---
+  base(cs1)    n=4:  46.2% / exact 15.0%  n=8:  33.1% / exact  0.0%
+  vote         n=4:  20.0% / exact  0.0%  n=8:  26.2% / exact  0.0%
+  cs2          n=4:  20.0% / exact  0.0%  n=8:  18.8% / exact  0.0%
+  vote+cs2     n=4:  11.2% / exact  0.0%  n=8:  15.6% / exact  0.0%
+  cs3          n=4:  22.5% / exact  0.0%  n=8:  21.2% / exact  0.0%
+  vote+cs3     n=4:  13.8% / exact  0.0%  n=8:  16.2% / exact  0.0%
+  vote+seg4    n=4:  20.0% / exact  0.0%  n=8:  26.2% / exact  0.0%
+
+--- κ=0.4 （训练 29s）---
+  base(cs1)    n=4:  46.2% / exact 10.0%  n=8:  31.2% / exact  0.0%
+  vote         n=4:  18.8% / exact  0.0%  n=8:  27.5% / exact  0.0%
+  cs2          n=4:  18.8% / exact  0.0%  n=8:  17.5% / exact  0.0%
+  vote+cs2     n=4:  11.2% / exact  0.0%  n=8:  17.5% / exact  0.0%
+  cs3          n=4:  21.2% / exact  0.0%  n=8:  20.0% / exact  0.0%
+  vote+cs3     n=4:  13.8% / exact  0.0%  n=8:  16.2% / exact  0.0%
+  vote+seg4    n=4:  18.8% / exact  0.0%  n=8:  27.5% / exact  0.0%
+
+--- κ=0.8 （训练 29s）---
+  base(cs1)    n=4:  38.8% / exact  5.0%  n=8:  28.7% / exact  0.0%
+  vote         n=4:  18.8% / exact  0.0%  n=8:  21.9% / exact  0.0%
+  cs2          n=4:  21.2% / exact  0.0%  n=8:  18.1% / exact  0.0%
+  vote+cs2     n=4:  13.8% / exact  0.0%  n=8:  16.9% / exact  0.0%
+  cs3          n=4:  23.8% / exact  0.0%  n=8:  21.9% / exact  0.0%
+  vote+cs3     n=4:  13.8% / exact  0.0%  n=8:  15.6% / exact  0.0%
+  vote+seg4    n=4:  18.8% / exact  0.0%  n=8:  21.9% / exact  0.0%
+
+============================================================================================
+最优：κ=0.2 base(cs1)
+  n=4: pos 46.2% / exact 15.0%
+  n=8: pos 33.1% / exact 0.0%
+（对照：上轮 baseline n=4 exact 5.0% / n=8 0.0%）

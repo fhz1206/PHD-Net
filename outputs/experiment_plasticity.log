@@ -1,0 +1,55 @@
+
+=== O2 实验开始 2026-09-23 21:23:00 配置数=4 only='freeze,plastic_naive,plastic_homeo,plastic_homeo_dev' ===
+2026-09-23 21:23:00 freeze               ppl_char=97.26        OK   Δfreeze=—        t=41.5s oov=0.0% 
+2026-09-23 21:23:00 plastic_naive        ppl_char=1540.45      OK   Δfreeze=+1483.9% t=70.0s oov=0.0% 
+2026-09-23 21:23:00 plastic_homeo        ppl_char=2687.87      OK   Δfreeze=+2663.6% t=84.3s oov=0.0% 
+2026-09-23 21:23:00 plastic_homeo_dev    ppl_char=1642.68      OK   Δfreeze=+1589.0% t=66.4s oov=0.0% 
+配置                  ppl_char      状态    Δfreeze   耗时      oov
+freeze              97.26         OK    —         41.5s   0.0%
+plastic_naive       1540.45       OK    +1483.9%  70.0s   0.0%
+plastic_homeo       2687.87       OK    +2663.6%  84.3s   0.0%
+plastic_homeo_dev   1642.68       OK    +1589.0%  66.4s   0.0%
+
+结论:
+freeze 自检 ppl_char=97.26（参照 ~97.26，口径一致）。
+【仍不可行】本批所有 eta_pc>0 配置要么发散（ppl>1e4/NaN）、要么 ppl 远超 freeze 2× 以上。说明仅靠本批机制不足以解锁表征可塑——根因「表征漂移 × 读出率」未被充分压制。
+可行方向（待剩余配置验证）：发育期彻底巩固后冻结 + 读出退火下限 （plastic_full）、生成式回放（sleep n_replay）+ 自动发育门控 （auto_development）等组合。
+
+=== O2 实验开始 2026-09-23 21:27:38 配置数=2 only='plastic_replay,plastic_dev_replay' ===
+2026-09-23 21:27:38 plastic_replay       ppl_char=1409.62      OK   Δfreeze=—        t=84.3s oov=0.0% 
+2026-09-23 21:27:38 plastic_dev_replay   ppl_char=4452.29      OK   Δfreeze=—        t=55.7s oov=0.0% 
+配置                  ppl_char      状态    Δfreeze   耗时      oov
+plastic_replay      1409.62       OK    —         84.3s   0.0%
+plastic_dev_replay  4452.29       OK    —         55.7s   0.0%
+
+结论:
+freeze 自检未得到有限值，脚本口径需检查。
+【仍不可行】本批所有 eta_pc>0 配置要么发散（ppl>1e4/NaN）、要么 ppl 远超 freeze 2× 以上。说明仅靠本批机制不足以解锁表征可塑——根因「表征漂移 × 读出率」未被充分压制。
+可行方向（待剩余配置验证）：发育期彻底巩固后冻结 + 读出退火下限 （plastic_full）、生成式回放（sleep n_replay）+ 自动发育门控 （auto_development）等组合。
+[O2] 语料 23504 字符 | 训练 4000 | 评估 4701
+[O2] 运行 plastic_full ... plastic_full         ppl_char=247.71       OK   Δfreeze=—        t=81.4s oov=0.0%
+[O2] 运行 plastic_auto_dev ... plastic_auto_dev     ppl_char=1970.55      OK   Δfreeze=—        t=63.0s oov=0.0%
+[O2] 运行 plastic_target_rate ... plastic_target_rate  ppl_char=2615.74      OK   Δfreeze=—        t=30.7s oov=0.0%
+[O2] 运行 plastic_stdp_homeo ... plastic_stdp_homeo   ppl_char=3.87e+04     发散   Δfreeze=—        t=54.3s oov=0.0%
+
+===== 汇总表 =====
+配置                  ppl_char      状态    Δfreeze   耗时      oov
+plastic_full        247.71        OK    —         81.4s   0.0%
+plastic_auto_dev    1970.55       OK    —         63.0s   0.0%
+plastic_target_rate 2615.74       OK    —         30.7s   0.0%
+plastic_stdp_homeo  3.87e+04      发散    —         54.3s   0.0%
+
+===== 结论 =====
+freeze 自检未得到有限值，脚本口径需检查。
+【仍不可行】本批所有 eta_pc>0 配置要么发散（ppl>1e4/NaN）、要么 ppl 远超 freeze 2× 以上。说明仅靠本批机制不足以解锁表征可塑——根因「表征漂移 × 读出率」未被充分压制。
+可行方向（待剩余配置验证）：发育期彻底巩固后冻结 + 读出退火下限 （plastic_full）、生成式回放（sleep n_replay）+ 自动发育门控 （auto_development）等组合。
+配置                  ppl_char      状态    Δfreeze   耗时      oov
+plastic_full        247.71        OK    —         81.4s   0.0%
+plastic_auto_dev    1970.55       OK    —         63.0s   0.0%
+plastic_target_rate 2615.74       OK    —         30.7s   0.0%
+plastic_stdp_homeo  3.87e+04      发散    —         54.3s   0.0%
+
+结论:
+freeze 自检未得到有限值，脚本口径需检查。
+【仍不可行】本批所有 eta_pc>0 配置要么发散（ppl>1e4/NaN）、要么 ppl 远超 freeze 2× 以上。说明仅靠本批机制不足以解锁表征可塑——根因「表征漂移 × 读出率」未被充分压制。
+可行方向（待剩余配置验证）：发育期彻底巩固后冻结 + 读出退火下限 （plastic_full）、生成式回放（sleep n_replay）+ 自动发育门控 （auto_development）等组合。
