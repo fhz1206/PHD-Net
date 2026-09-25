@@ -1,8 +1,27 @@
-# train_1b —— PHD-Net 1B 参数模型训练
+# train_1b —— PHD-Net 1B 参数模型训练与推理
 
-PHD-Net 的 1B 档训练子项目：在**事件驱动稀疏类脑语义**下，训练总突触参数
-容量 ≥ 1×10^9 的词级语言模型。不依赖 GPU 也能在小预算内真实训练与续训
-（每步成本只正比于活跃神经元数，与 1B 总容量无关——这是架构使然，见下）。
+PHD-Net 的 1B 档训练**与推理**子项目：在**事件驱动稀疏类脑语义**下，训练总突触参数
+容量 ≥ 1×10^9 的词级语言模型。**训练数据无论多长不截断**（字符级流式，内存与语料
+总长无关），**context 无硬窗口**（状态全程不重置，目标 ≥1M 连续 tokens）。不依赖
+GPU 也能在小预算内真实训练与续训（每步成本只正比于活跃神经元数，与 1B 总容量无关）。
+
+## 1M context 与「不截断」（2026-09-25）
+
+- **流式训练**：语料按 `concat(样本_i + "\n\n")` 字符流逐样本流过，token 边产边训
+  （`corpus_stream.py::StreamingTokenizer`，与全量贪心分词**逐位等价**，
+  `verify_stream_tokenize.py` 四用例对拍 PASS）。4.6 GB pretrain 分片与 23 KB
+  内置语料走同一条路，`--max-chars` 截断参数已废除。
+- **context 语义**：PHD-Net 无位置编码/注意力窗口，context = 记忆机制的有效范围。
+  训练循环保证 WM/STDP/LTM 状态**全程不重置**（跨样本、跨分片、跨 epoch 连续）；
+  长程依赖由 big_ltm 事件驱动印迹（1B 突触容量）承载。每跨过
+  `--context-milestone`（默认 1,000,000）token 打一行里程碑。
+- **词表**：涌现词表来自采样文本（默认前 `--vocab-sample-chars 4M` 字符——只影响
+  分词能力，训练数据本身全量流过）；`--vocab-scan full` 全量扫一遍构建零 OOV 词表
+  （大语料需数小时）。训练流中 OOV token 跳过该步并计数（进 [METRIC] 的 oov_rate）。
+- **中断续训**：检查点完整保存运行时状态（STDP 迹/调制器/step_count 等），
+  resume 快进至断点——1M+ 连续训练可中断恢复。
+
+## 容量口径（1B 在哪里）
 
 ## 容量口径（1B 在哪里）
 
@@ -25,9 +44,13 @@ PHD-Net 的 1B 档训练子项目：在**事件驱动稀疏类脑语义**下，�
 
 | 文件 | 职责 |
 |---|---|
-| `train.py` | 主入口：CLI、容量验算打印、训练循环、日志、检查点 |
+| `train.py` | 主入口：流式训练循环、容量验算、日志、检查点、1M 里程碑 |
+| `corpus_stream.py` | 字符流 + StreamingTokenizer（与全量分词逐位等价） |
 | `config_1b.py` | 档位预设（smoke / 1b / 1b_max）、构建配置、容量验算 |
 | `ckpt_1b.py` | 完整检查点：大空间表（CSR 快照 + 迹/时间戳）+ 词表 + 权重 |
+| `infer.py` | 推理 / 对话：检查点自包含加载（不需要语料）、流式长 prompt、τ+top-k |
+| `verify_stream_tokenize.py` | 对拍：流式分词 vs 全量分词逐位一致 |
+| `verify_ckpt_roundtrip.py` | 对拍：保存→恢复→续训逐位等价 |
 
 ## 用法
 
@@ -35,14 +58,16 @@ PHD-Net 的 1B 档训练子项目：在**事件驱动稀疏类脑语义**下，�
 # 冒烟：分钟级验证全管线（容量 <1B，仅功能验证）
 python train_1b/train.py --preset smoke --data sft --tokens 2000
 
-# 标准 1B 档（本机 CPU ≈0.1–0.5 s/token，适合小预算/验证）
-python train_1b/train.py --preset 1b --data sft --tokens 100000
+# 标准 1B 档，全量流式训练（任意长度不截断；1M context 里程碑自动打点）
+python train_1b/train.py --preset 1b --data pretrain_zh --tokens 1000000
 
-# 生产长跑（大内存机器；1e9 token 级；断点续训）
-python train_1b/train.py --preset 1b --data pretrain_zh --resume
+# 生产长跑（零 OOV 词表 + 断点续训）
+python train_1b/train.py --preset 1b --data pretrain_zh --vocab-scan full --resume
 
-# 查看大空间表实时利用率
-python train_1b/train.py --preset 1b --data sft --report
+# 推理 / 对话（检查点自包含加载，不需要语料）
+python train_1b/infer.py --model models/phdnet1b_1b_sft_final.npz \
+    --prompt "用户：什么是机器学习？\n助手：" --n 200
+python train_1b/infer.py --model models/phdnet1b_1b_sft_final.npz --chat
 ```
 
 产物位置（fhz 2026-09-25 指令：**模型统一存 `models/`**）：
@@ -59,9 +84,12 @@ python train_1b/train.py --preset 1b --data sft --report
 1. 大空间表邻接结构（`compact_csr` 快照，dict 版与在线 CSR 版均支持）
 2. 突触迹与时间戳（t_pre/t_post/stamp_pre/stamp_post）+ 步数 + 入度
 3. 词表与分词器（seg.vocab / max_len / tokens；SDR 哈希确定性重建）
-4. 主干 CSR 四权重、编码器、STDP、WM、读出（稠密 W 或稀疏 CSR 三元组）
+4. 运行时状态：STDP 内部迹 / 调制器 Welford 统计 / net.step_count / 上一时刻
+   发放率 / 任务门控（对拍 `verify_ckpt_roundtrip.py` 抓出的路径分叉缺口，已修复）
+5. 主干 CSR 四权重、编码器、STDP、WM、读出（稠密 W 或稀疏 CSR 三元组）
 
-续训要求 `--data` 与 `--max-chars` 与原训练一致（词表大小 fail-fast 校验）。
+续训要求 `--data` 与 `--vocab-sample-chars`（或 `--vocab-scan`）与原训练一致
+（词表大小 fail-fast 校验）；**推理不需要语料**——检查点自包含（`infer.py`）。
 
 ## 硬件需求（`--preset 1b`，fp64）
 

@@ -1,33 +1,39 @@
-"""PHD-Net 1B 参数模型训练脚本（train_1b 子项目主入口）。
+"""PHD-Net 1B 参数模型训练脚本（train_1b 子项目主入口，流式版）。
 
-定位
-----
-在**事件驱动稀疏类脑语义**下训练总突触参数容量 ≥ 1×10^9 的 PHD-Net 词级 LM：
-  - 1B 主体 = 大空间事件驱动长期记忆（big_ltm：2^24 × 60 ≈ 1.0066×10^9 突触容量，
-    结构可塑性随经验生长，每步计算量只正比于活跃神经元数）；
-  - 固定突触 = 稀疏主干 CSR（M2）+ STDP 侧向核（M3）+ 编码器（M1）+ 读出（M6）。
-容量验算启动时自动打印（config_1b.capacity_report，1B 口径透明化）。
+2026-09-25 流式改造（fhz 指令：「训练的1B模型要支持1M context，
+训练数据无论多长不要截断」）
+----------------------------------------------------------------
+- **训练数据永不截断**：语料按字符流逐样本流过（`corpus_stream.py`），
+  token 边产边训，内存占用与语料总长无关——4.6 GB pretrain 分片与
+  23 KB 内置语料走同一条路。废除 `--max-chars` 截断参数。
+- **1M context**：PHD-Net 无位置编码/注意力窗口，context = 记忆机制的有效
+  范围。本脚本保证**状态全程不重置**（WM/STDP/LTM 连续携带，跨样本、
+  跨分片、跨 epoch 连续），长程依赖由 big_ltm 事件驱动印迹（1B 突触容量）
+  承载；每跨过 `--context-milestone`（默认 1,000,000）token 打一行里程碑，
+  显式证明连续 context 达标。检查点完整保存运行时状态 → 1M+ 训练可中断续训。
+- **词表**：涌现词表来自采样文本（`--vocab-sample-chars`，默认 4M），
+  `--vocab-scan full` 可全量扫一遍构建零 OOV 词表；训练流中 OOV token
+  跳过该训练步并计数（永不崩溃、永不截断），OOV 率进 [METRIC] 尾行。
+- **流式分词逐位等价**：StreamingTokenizer 与全量贪心匹配逐位一致，
+  `verify_stream_tokenize.py` 四用例对拍 PASS。
 
-与 tools/train_production.py 的关系
-------------------------------------
-同一训练语义（词级 LM、表征冻结、结构性稀疏主干、pred_in_readout），
-差异：① 1B 档预设与容量验算；② **完整检查点**（大空间表 + 迹/时间戳 +
-词表 + 稀疏读出 CSR，生产版不保存这些）；③ 模型产物统一保存到
-`models/` 目录（fhz 2026-09-25 指令）。
+定位（同 config_1b.py）
+--------------------
+总突触参数容量 ≥ 1×10^9：1B 主体 = 大空间事件驱动长期记忆
+（big_ltm：2^24 × 60 ≈ 1.0066×10^9 突触容量，随经验生长，每步计算量只
+正比于活跃神经元数）；固定突触 = 稀疏主干 CSR + STDP + 编码器 + 读出。
 
 用法
 ----
-# 冒烟（分钟级，验证管线；容量 <1B，仅功能验证）
+# 冒烟（分钟级，验证管线）
 python train_1b/train.py --preset smoke --data sft --tokens 2000
 
-# 标准 1B 档（容量 ≈1.01–1.07×10^9；本机 CPU 每步约 0.1–0.5 s，小预算可跑）
-python train_1b/train.py --preset 1b --data sft --tokens 100000
+# 标准 1B 档，全量流式训练 pretrain 分片（任意长度不截断）
+python train_1b/train.py --preset 1b --data pretrain_zh --tokens 1000000
 
-# 生产长跑（大内存/GPU 机器；断点续训）
-python train_1b/train.py --preset 1b --data pretrain_zh --tokens 1000000000 --resume
-
-# 查看当前检查点的大空间表利用率
-python train_1b/train.py --preset 1b --data sft --report
+# 生产长跑（零 OOV 词表 + 1M context 里程碑；断点续训）
+python train_1b/train.py --preset 1b --data pretrain_zh \
+    --vocab-scan full --context-milestone 1000000 --resume
 """
 
 from __future__ import annotations
@@ -47,12 +53,14 @@ for p in (str(_HERE), str(_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from ckpt_1b import load_model, save_model                       # noqa: E402
-from config_1b import PRESETS, SEG_KWARGS, build_cfg             # noqa: E402
-from config_1b import capacity_report, print_capacity_report     # noqa: E402
-from phdnet.corpus import expand_paths, load_text                # noqa: E402
-from phdnet.model import count_params                            # noqa: E402
-from phdnet.word_lm import PHDWordLM                             # noqa: E402
+from ckpt_1b import _rebuild_sdrs, load_model, save_model            # noqa: E402
+from config_1b import PRESETS, SEG_KWARGS, build_cfg                 # noqa: E402
+from config_1b import capacity_report, print_capacity_report         # noqa: E402
+from corpus_stream import SEP, StreamingTokenizer, build_vocab_text  # noqa: E402
+from corpus_stream import char_chunks                                # noqa: E402
+from phdnet.corpus import expand_paths                               # noqa: E402
+from phdnet.model import count_params                                # noqa: E402
+from phdnet.word_encoder import WordSegmenter, WordTokenizer         # noqa: E402
 
 SAVE_DIR = _ROOT / "models"          # fhz 2026-09-25：训练模型统一存 models/
 LOG_DIR = _ROOT / "outputs" / "train_logs"
@@ -90,48 +98,65 @@ def _on_sigint(signum, frame):        # pragma: no cover
     print("\n[收到中断信号] 将保存检查点后退出…", flush=True)
 
 
-def _resolve_corpus(p: Path) -> Path:
-    s = str(p)
-    return p if any(c in s for c in "*?[") else p
+def _make_tokenizer(seg: WordSegmenter, tokens: list[str], cfg) -> WordTokenizer:
+    """由 (seg, tokens) 注入式构造 WordTokenizer（SDR 哈希与旧路径逐位一致）。"""
+    tok = WordTokenizer.__new__(WordTokenizer)
+    tok.seg = seg
+    tok.tokens = tokens
+    tok.stoi = {t: i for i, t in enumerate(tokens)}
+    tok.n_sdr, tok.n_active, tok.seed = cfg.n_sdr, cfg.k_sparse, cfg.seed
+    _rebuild_sdrs(tok, tokens)
+    return tok
 
 
 def _print_table_stats(lm) -> None:
-    """打印大空间事件驱动表实时利用率（1B 主体的生长进度）。"""
+    """打印大空间事件驱动表实时利用率 + 内存护栏（长跑增长有界性）。"""
     if not hasattr(lm.net.ltm, "table"):
         return
     st = lm.net.ltm.table.stats()
+    per = 10 if st.get("row_slots_allocated") else 100      # CSR 版 ≈10B/条，dict 版 ≈100B/条
+    mb = st["grown_synapses"] * per / 1e6
     print(f"  [大空间表] 已生长 {st['grown_synapses']:,} / 容量 {st['capacity']:,}"
-          f"（利用率 {st['utilization']:.3%}，触碰神经元 {st['touched_neurons']:,}）",
+          f"（利用率 {st['utilization']:.3%}）| 内存 ≈{mb:.0f} MB"
+          + ("  ⚠ dict 版长跑建议 --csr-online（≈10×省内存）"
+             if (not getattr(lm.net.ltm.table, "csr_online", False)
+                 and st["grown_synapses"] > 50_000_000) else ""),
           flush=True)
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="PHD-Net 1B 档训练（事件驱动稀疏类脑）")
+    ap = argparse.ArgumentParser(description="PHD-Net 1B 档流式训练（事件驱动稀疏类脑）")
     ap.add_argument("--preset", choices=list(PRESETS), default="1b",
                     help="smoke=管线验证 / 1b=标准档(容量≥1B) / 1b_max=大主干档")
     ap.add_argument("--data", choices=list(DATA_FILES), default="sft")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
     ap.add_argument("--big-n", type=int, default=0, help="覆盖大空间神经元数（0=用预设）")
     ap.add_argument("--csr-online", action="store_true",
-                    help="大空间表切换在线可写 CSR（内存更优，与 dict 版逐位等价）")
+                    help="大空间表切换在线可写 CSR（长跑内存 ≈10×省，逐位等价已验证）")
     ap.add_argument("--readout-conn-k", type=int, default=0,
                     help="稀疏读出每输出单元入边数（0=稠密；大词表时建议 512–2048）")
     ap.add_argument("--seed", type=int, default=11)
-    ap.add_argument("--tokens", type=int, default=0, help="token 预算（0=不限）")
+    ap.add_argument("--epochs", type=int, default=1,
+                    help="语料流过遍数（状态跨 epoch 连续不重置）")
+    ap.add_argument("--tokens", type=int, default=0, help="训练步预算（0=不限）")
     ap.add_argument("--minutes", type=float, default=0.0, help="时间预算分钟（0=不限）")
+    ap.add_argument("--vocab-scan", choices=["head", "full"], default="head",
+                    help="head=采样文本构建词表(快, OOV 由回退兜底) / "
+                         "full=全量流式扫一遍(零 OOV, 大语料需数小时)")
+    ap.add_argument("--vocab-sample-chars", type=int, default=4_000_000,
+                    help="head 模式词表采样字符数（只影响词表，训练数据本身不截断）")
+    ap.add_argument("--context-milestone", type=int, default=1_000_000,
+                    help="context 里程碑间隔 tokens（0=关闭；默认 1M）")
     ap.add_argument("--ckpt-every", type=int, default=10000)
     ap.add_argument("--log-every", type=int, default=500)
-    ap.add_argument("--max-chars", type=int, default=4_000_000, help="语料载入上限")
     ap.add_argument("--resume", action="store_true",
-                    help="从 models/ 下最近检查点续训（需与原训练同 --data/--max-chars）")
-    ap.add_argument("--save-dir", type=Path, default=SAVE_DIR,
-                    help=f"模型保存目录（默认 {SAVE_DIR}）")
+                    help="从 models/ 检查点续训（快进至断点，状态由检查点恢复）")
+    ap.add_argument("--save-dir", type=Path, default=SAVE_DIR)
     ap.add_argument("--log-file", type=Path, default=None)
     ap.add_argument("--report", action="store_true",
                     help="只打印检查点的大空间表统计后退出")
     args = ap.parse_args()
 
-    # ── 日志落盘 ──
     if args.log_file is not None:
         log_path = args.log_file
     else:
@@ -151,37 +176,65 @@ def main() -> None:
     cfg = build_cfg(args.preset, args.width, args.big_n,
                     args.csr_online, args.readout_conn_k, args.seed)
 
-    # ── 语料（parquet 分片优先，glob 多分片顺序拼接；不触碰 raw/）──
-    data_path = _resolve_corpus(DATA_FILES[args.data])
+    data_path = DATA_FILES[args.data]
     try:
         data_files = expand_paths(data_path)
     except FileNotFoundError as e:
         print(f"数据文件不存在: {e}")
         sys.exit(1)
     total_mb = sum(p.stat().st_size for p in data_files) / 1e6
-    text = load_text(data_path, limit_chars=args.max_chars)
 
+    # ── 词表构建（采样 or 全量扫描；训练数据本身永不截断）──
+    vocab_text = build_vocab_text(data_path, args.vocab_sample_chars, SEP)
+    seg = WordSegmenter(vocab_text, **SEG_KWARGS)
+    if args.vocab_scan == "full":
+        print(f"[词表] full 扫描：全量流式分词一遍（大语料需较久，进度按 100 万 token 打点）…",
+              flush=True)
+        seen: set[str] = set()
+        n_seen = 0
+        t_v = time.perf_counter()
+        for tk in StreamingTokenizer(seg, char_chunks(data_path, SEP)):
+            seen.add(tk)
+            n_seen += 1
+            if n_seen % 1_000_000 == 0:
+                print(f"  [词表扫描] 已流过 {n_seen:>12,} tokens，"
+                      f"当前词表 {len(seen):,}（{time.perf_counter() - t_v:.0f}s）",
+                      flush=True)
+        tokens = sorted(seen)
+        print(f"[词表] full 扫描完成：全语料 {n_seen:,} tokens → 词表 {len(tokens):,}"
+              f"（{time.perf_counter() - t_v:.0f}s），零 OOV", flush=True)
+    else:
+        tokens = sorted(set(seg.tokenize(vocab_text)))
+        print(f"[词表] head 模式：采样前 {len(vocab_text):,} 字符构建"
+              f"（涌现词表 {len(seg.vocab):,}，token 词表 {len(tokens):,}）；"
+              f"训练流 OOV 步将跳过并统计", flush=True)
+
+    # ── 构建 LM（注入式 tokenizer；n_readout = 词表大小）──
     t0 = time.perf_counter()
-    lm = PHDWordLM(text, cfg, seg_kwargs=SEG_KWARGS)
+    tok = _make_tokenizer(seg, tokens, cfg)
+    from phdnet.word_lm import PHDWordLM
+    lm = PHDWordLM(vocab_text, cfg, seg_kwargs=SEG_KWARGS, tokenizer=tok)
     vocab = len(lm.tok)
 
     print("=" * 76)
-    print(f"PHD-Net 1B 训练 | preset={args.preset} data={args.data} "
+    print(f"PHD-Net 1B 流式训练 | preset={args.preset} data={args.data} "
           f"width={cfg.n_sdr} conn_k={cfg.conn_k}")
     print(f"大空间表 N={cfg.big_ltm_N:,} × m={cfg.big_ltm_m}"
           f"（容量 {cfg.big_ltm_N * cfg.big_ltm_m:,}）| 词表 {vocab:,}"
-          f" | 语料 {len(text):,} 字符 × {len(data_files)} 分片（{total_mb:.0f} MB）")
-    print(f"预算 tokens={args.tokens or '∞'} minutes={args.minutes or '∞'}"
+          f" | 分片 {len(data_files)} 个（{total_mb:.0f} MB，流式不截断）")
+    print(f"epochs={args.epochs} | 预算 tokens={args.tokens or '∞'} "
+          f"minutes={args.minutes or '∞'} | 里程碑={args.context_milestone or '∞'}"
           f" | 构建耗时 {time.perf_counter() - t0:.1f}s")
     print_capacity_report(capacity_report(cfg, vocab))
-    print(f"可塑参数（当前实际，count_params 口径）: {count_params(lm.net):,}")
+    print(f"可塑参数（构建时实际，count_params 口径）: {count_params(lm.net):,}")
+    print("[context] 状态全程不重置（WM/STDP/LTM 跨样本/分片/epoch 连续携带）；"
+          "长程依赖由 big_ltm 印迹承载 → 支持任意长连续序列（目标 ≥1M tokens）")
 
     done = 0
     if args.resume and ckpt.exists():
         meta = load_model(ckpt, lm)
         done = int(meta["done"])
         print(f"[续训] 已恢复 {done:,} tokens（检查点 {meta['when']}）")
-        _print_table_stats(lm)
     elif args.resume:
         print(f"[续训] 未找到检查点 {ckpt}，从头开始")
 
@@ -190,37 +243,62 @@ def main() -> None:
         print(f"[log] 日志已保存：{log_path}")
         return
 
-    toks = lm.tokenize(text)
-    print(f"数据集 token 数 {len(toks):,} | 开始训练", flush=True)
-
-    n_total = len(toks) - 1
+    # ── 流式训练主循环（1M context：状态永不重置）──
     seg_nll: list[float] = []
+    oov_skipped = 0
     t_start = time.perf_counter()
-    i = done
-    while i < n_total:
-        if _STOP["flag"]:
+    i = done                       # 全局训练步（= 已处理的 token 流位置）
+    last_mile = done // args.context_milestone if args.context_milestone else 0
+
+    for ep in range(args.epochs):
+        if _STOP["flag"] or (args.tokens and i - done >= args.tokens):
             break
-        if args.tokens and (i - done) >= args.tokens:
+        stream = StreamingTokenizer(lm.tok.seg, char_chunks(data_path, SEP))
+        it = iter(stream)
+        p2 = None                                          # t_{i-1}（epoch 首步 prev 断开）
+        p1 = next(it, None)                                # t_i
+        t0 = next(it, None) if p1 is not None else None    # t_{i+1}（训练目标）
+        if args.epochs > 1 and ep > 0 and i > 0:
+            print(f"[epoch {ep + 1}/{args.epochs}] 跨 epoch 续流：状态连续"
+                  f"（net 不重置），首步 prev 断开", flush=True)
+        while t0 is not None:
+            if _STOP["flag"]:
+                break
+            if args.tokens and i - done >= args.tokens:
+                break
+            if args.minutes and (time.perf_counter() - t_start) / 60.0 >= args.minutes:
+                break
+            if p1 in lm.tok.stoi and t0 in lm.tok.stoi:
+                x = lm.tok.encode_composite(p1, p2)
+                tgt = lm.tok.onehot(lm.tok.stoi[t0])
+                d = lm.net.step(x, target=tgt, learn=True)
+                seg_nll.append(d["nll"])
+            else:
+                oov_skipped += 1                          # OOV：跳过该步，流不断
+            i += 1
+            p2, p1, t0 = p1, t0, next(it, None)
+
+            if args.context_milestone and i // args.context_milestone > last_mile:
+                last_mile = i // args.context_milestone
+                ppl_ms = f"滑动 PPL {float(np.exp(np.mean(seg_nll[-args.log_every:]))):.3f}" \
+                    if seg_nll else ""
+                print(f"[context 里程碑] 已连续处理 {last_mile * args.context_milestone:,} "
+                      f"tokens（状态无重置；≥1M context 达标 ×{last_mile}）{ppl_ms}",
+                      flush=True)
+                _print_table_stats(lm)
+            if (i - done) % args.log_every == 0 and seg_nll:
+                k = min(args.log_every, len(seg_nll))
+                ppl = float(np.exp(np.mean(seg_nll[-k:])))
+                spent = time.perf_counter() - t_start
+                ms = spent / max(1, i - done) * 1000
+                print(f"  token {i:>12,}  滑动 PPL {ppl:>9.3f}  {ms:>8.2f} ms/tok"
+                      f"  已用 {spent / 60:.1f} min", flush=True)
+            if args.ckpt_every and (i - done) and (i - done) % args.ckpt_every == 0:
+                save_model(ckpt, lm, cfg, i)
+                print(f"  [检查点] 已保存 {i:,} tokens → {ckpt}", flush=True)
+                _print_table_stats(lm)
+        if _STOP["flag"] or (args.tokens and i - done >= args.tokens):
             break
-        if args.minutes and (time.perf_counter() - t_start) / 60.0 >= args.minutes:
-            break
-        prev = toks[i - 1] if i > 0 else None
-        x = lm.tok.encode_composite(toks[i], prev)
-        tgt = lm.tok.onehot(lm.tok.stoi[toks[i + 1]])
-        d = lm.net.step(x, target=tgt, learn=True)
-        seg_nll.append(d["nll"])
-        i += 1
-        if (i - done) % args.log_every == 0:
-            k = min(args.log_every, len(seg_nll))
-            ppl = float(np.exp(np.mean(seg_nll[-k:])))
-            spent = time.perf_counter() - t_start
-            ms = spent / max(1, i - done) * 1000
-            print(f"  token {i:>11,}  滑动 PPL {ppl:>9.3f}  {ms:>8.2f} ms/tok"
-                  f"  已用 {spent / 60:.1f} min", flush=True)
-            _print_table_stats(lm)
-        if args.ckpt_every and (i - done) % args.ckpt_every == 0:
-            save_model(ckpt, lm, cfg, i)
-            print(f"  [检查点] 已保存 {i:,} tokens → {ckpt}", flush=True)
 
     # ── 收尾：滚动检查点 + final 模型 ──
     save_model(ckpt, lm, cfg, i)
@@ -228,16 +306,18 @@ def main() -> None:
     save_model(final, lm, cfg, i, extra={"final": True})
 
     spent = time.perf_counter() - t_start
+    oov_rate = oov_skipped / max(1, i - done)
     print("-" * 76)
     print(f"本次训练 {i - done:,} tokens，用时 {spent / 60:.1f} min"
-          f"（{spent / max(1, i - done) * 1000:.2f} ms/token）")
+          f"（{spent / max(1, i - done) * 1000:.2f} ms/token）| "
+          f"OOV 跳过 {oov_skipped:,}（{oov_rate:.4%}）")
     _print_table_stats(lm)
     if seg_nll:
         final_ppl = float(np.exp(np.mean(seg_nll[-min(2000, len(seg_nll)):])))
         print(f"末段滑动 PPL ≈ {final_ppl:.3f}")
         print(f"[METRIC] preset={args.preset} data={args.data} tokens={i:,} "
               f"ms_per_token={spent / max(1, i - done) * 1000:.2f} "
-              f"final_ppl={final_ppl:.3f}")
+              f"final_ppl={final_ppl:.3f} oov_rate={oov_rate:.5f}")
     print(f"模型：{final}")
     print(f"检查点：{ckpt}")
     print(f"[log] 日志已保存：{log_path}")

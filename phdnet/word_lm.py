@@ -21,11 +21,19 @@ class PHDWordLM:
     """PHD-Net 词级语言模型（T2.1 + T2.3；M1 三开关经 cfg 透传）。"""
 
     def __init__(self, vocab_text: str, cfg: PHDNetConfig | None = None,
-                 seg_kwargs: dict | None = None):
+                 seg_kwargs: dict | None = None,
+                 tokenizer: "WordTokenizer | None" = None):
+        """`tokenizer` 可选注入（2026-09-25，train_1b 流式词表扫描用）：
+        传入时跳过由 vocab_text 构建 WordTokenizer（调用方保证其 seg/tokens/sdrs
+        已就绪且 n_active/seed 与 cfg 一致），n_readout 按注入词表大小取。
+        默认 None = 旧行为逐位不变。"""
         cfg = cfg or PHDNetConfig()
-        self.tok = WordTokenizer(vocab_text, n_sdr=cfg.n_sdr,
-                                 n_active=cfg.k_sparse, seed=cfg.seed,
-                                 seg_kwargs=seg_kwargs)
+        if tokenizer is not None:
+            self.tok = tokenizer
+        else:
+            self.tok = WordTokenizer(vocab_text, n_sdr=cfg.n_sdr,
+                                     n_active=cfg.k_sparse, seed=cfg.seed,
+                                     seg_kwargs=seg_kwargs)
         self.n_sdr = cfg.n_sdr
         cfg = PHDNetConfig(**{**cfg.__dict__,
                               "n_input": 2 * cfg.n_sdr,     # T2.3 组合输入
