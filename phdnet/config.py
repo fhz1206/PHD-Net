@@ -59,8 +59,11 @@ class PHDNetConfig:
     readout_w_clip: float = 0.0 # C8：读出权重范数上限（0=关闭，保持旧行为）
 
     # 路线图 M1 升级（2026-09-18，三项开关默认关闭 = 旧行为，非破坏）
-    task_modulation: bool = False    # T1.1 误差广播调制：读出 NLL z 分数门控 PC/STDP 学习率
+    task_modulation: bool = False    # T1.3 误差广播调制：读出 NLL z 分数门控 PC/STDP 学习率
     error_gated_memory: bool = False # T1.3 错误驱动写入：WM 写入/LTM 印迹门控改用任务误差（滞后一步）
+    ltm_imprint_gate: float = 0.8    # LTM 印迹的 mem_gate 阈值（2026-09-25 审计：默认 0.8 下
+                                     #   调制器 z 分布 std≈0.32 → gate>0.8 仅 ~0.4% 触发，
+                                     #   big_ltm 容量栈在 LM 训练中几乎从不印迹；调低以激活）
     pred_in_readout: bool = False    # T3.1 预测通路三拼：h = [r2 ; WM ; STDP 时序预测]
                                      #   （首版用 LTM 原始召回向量，实测噪声压垮读出头，已修订）
     task_mod_gain: float = 2.0       # 任务误差 z → 门控的 sigmoid 增益

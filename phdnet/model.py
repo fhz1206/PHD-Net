@@ -275,7 +275,7 @@ class PHDNet:
                             and self.step_count % retrieve_interval == 0) or (
                 cfg.error_triggered_retrieval and mem_gate > 0.8
                 and self.step_count % 4 == 0)
-            if learn and mode == "encode" and mem_gate > 0.8:
+            if learn and mode == "encode" and mem_gate > cfg.ltm_imprint_gate:
                 p = np.sign(rate); p[p == 0] = 1.0
                 # 大容量表按**稀疏率**印迹：±1 稠密码会激活全部维度，破坏事件驱动稀疏性
                 self.ltm.imprint(rate if cfg.big_ltm else p)     # 预测失败/极新颖 → 快速印迹

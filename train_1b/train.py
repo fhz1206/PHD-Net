@@ -308,7 +308,10 @@ def main() -> None:
                 break
             if args.minutes and (time.perf_counter() - t_start) / 60.0 >= args.minutes:
                 break
-            if p1 in lm.tok.stoi and t0 in lm.tok.stoi:
+            p2_in = p2 is None or p2 in lm.tok.stoi
+            if p2_in and p1 in lm.tok.stoi and t0 in lm.tok.stoi:
+                # p2 为 OOV 时按 None 处理（组合编码退化为无前词上下文）——
+                # 2026-09-25 审计修复：原条件漏查 p2，OOV 落在 p2 位会 KeyError 崩溃
                 x = lm.tok.encode_composite(p1, p2)
                 tgt = lm.tok.onehot(lm.tok.stoi[t0])
                 d = lm.net.step(x, target=tgt, learn=True)
