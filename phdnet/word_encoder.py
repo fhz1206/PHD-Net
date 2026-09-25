@@ -8,6 +8,83 @@ import numpy as np
 from .tokenizer import U64, _mix64
 
 
+def _induce_length(codes, inv_codes, n: int, L: int, min_count: int,
+                   min_entropy: float) -> set[str]:
+    """单层 L-gram 词涌现（__init__ 主循环的 per-L 体，供串行/多核共用）。
+
+    输入为**全文级**统计量（字符表 codes、位置编码 inv_codes、全文长度 n），
+    输出该 L 接受的词集合。与串行版逐位一致：同一 numpy 运算序列，
+    只是执行位置不同——各 L 相互独立，因此可安全并行（train_1b/vocab_parallel.py）。
+    """
+    out: set[str] = set()
+    B = int(codes.shape[0])
+    codes_list = [c for c in codes]              # list[str]，单个字符，id→字符反查
+    m = n - L + 1
+    if m <= 0:
+        return out
+    # 滑窗矩阵 W[i, j] = 第 i 个窗口第 j 个位置的字符 id
+    W = np.empty((m, L), dtype=np.int64)
+    for j in range(L):
+        W[:, j] = inv_codes[j:j + m]
+    uniq, inv, counts = np.unique(W, axis=0, return_inverse=True,
+                                 return_counts=True)
+    K = int(uniq.shape[0])
+    cand = np.where(counts >= min_count)[0]
+    if cand.size == 0:
+        return out
+    Kc = int(cand.shape[0])
+    # 候选 → 紧凑局部 id（仅候选行参与后续聚合）
+    local = np.full(K, -1, dtype=np.int64)
+    local[cand] = np.arange(Kc, dtype=np.int64)
+
+    # 左邻：窗口位置 i 有左邻 iff i > 0（左邻字符 = codes[i-1]）
+    posL = np.arange(1, m)
+    keep = local[inv[posL]] >= 0
+    posL = posL[keep]
+    cl = local[inv[posL]]
+    lc = inv_codes[posL - 1]
+    idxL = cl * B + lc
+    left_counts = np.bincount(idxL, minlength=Kc * B).reshape(Kc, B)
+
+    # 右邻：窗口位置 i 有右邻 iff i + L < n（右邻字符 = codes[i+L]）
+    posR = np.arange(0, m - 1)
+    keep = local[inv[posR]] >= 0
+    posR = posR[keep]
+    cr = local[inv[posR]]
+    rc = inv_codes[posR + L]
+    idxR = cr * B + rc
+    right_counts = np.bincount(idxR, minlength=Kc * B).reshape(Kc, B)
+
+    for k in range(Kc):
+        c = int(cand[k])
+        total = int(counts[c])
+        if total < min_count:
+            continue
+        # 左邻熵（空计数 → 0.0，与原 _entropy 语义一致）
+        lv = left_counts[k]
+        lt = int(lv.sum())
+        if lt > 0:
+            nz = lv[lv > 0].astype(np.float64)
+            p = nz / lt
+            h_l = -float(np.sum(p * np.log(p)))
+        else:
+            h_l = 0.0
+        # 右邻熵
+        rv = right_counts[k]
+        rt = int(rv.sum())
+        if rt > 0:
+            nz = rv[rv > 0].astype(np.float64)
+            p = nz / rt
+            h_r = -float(np.sum(p * np.log(p)))
+        else:
+            h_r = 0.0
+        if min(h_l, h_r) >= min_entropy:
+            ids = [int(d) for d in uniq[c]]
+            w = ''.join(codes_list[i] for i in ids)
+            out.add(w)
+    return out
+
+
 class WordSegmenter:
     """T2.1 词涌现：无词典的统计分词。
 
@@ -26,6 +103,8 @@ class WordSegmenter:
           的 int64 溢出，对任意 max_len 安全）；
         - 用 np.bincount 在「候选 × 字符表」展平索引上批量累加左/右邻字符计数；
         - 自然对数 Shannon 熵按候选向量化计算，阈值比较用掩码。
+      2026-09-25 重构：per-L 体抽为模块级 `_induce_length`（串行/多核共用一份
+      实现，各 L 相互独立可安全并行）；串行路径运算序列逐位不变。
       详见 tools/verify_seg_equiv.py 的对拍验证。
     """
 
@@ -38,74 +117,11 @@ class WordSegmenter:
             return
         chars_list = list(text)
         codes, inv_codes = np.unique(chars_list, return_inverse=True)
-        codes_list = [c for c in codes]              # list[str]，单个字符，id→字符反查
-        B = int(codes.shape[0])
         inv_codes = inv_codes.astype(np.int64)
 
         for L in range(2, max_len + 1):
-            m = n - L + 1
-            if m <= 0:
-                continue
-            # 滑窗矩阵 W[i, j] = 第 i 个窗口第 j 个位置的字符 id
-            W = np.empty((m, L), dtype=np.int64)
-            for j in range(L):
-                W[:, j] = inv_codes[j:j + m]
-            uniq, inv, counts = np.unique(W, axis=0, return_inverse=True,
-                                         return_counts=True)
-            K = int(uniq.shape[0])
-            cand = np.where(counts >= min_count)[0]
-            if cand.size == 0:
-                continue
-            Kc = int(cand.shape[0])
-            # 候选 → 紧凑局部 id（仅候选行参与后续聚合）
-            local = np.full(K, -1, dtype=np.int64)
-            local[cand] = np.arange(Kc, dtype=np.int64)
-
-            # 左邻：窗口位置 i 有左邻 iff i > 0（左邻字符 = codes[i-1]）
-            posL = np.arange(1, m)
-            keep = local[inv[posL]] >= 0
-            posL = posL[keep]
-            cl = local[inv[posL]]
-            lc = inv_codes[posL - 1]
-            idxL = cl * B + lc
-            left_counts = np.bincount(idxL, minlength=Kc * B).reshape(Kc, B)
-
-            # 右邻：窗口位置 i 有右邻 iff i + L < n（右邻字符 = codes[i+L]）
-            posR = np.arange(0, m - 1)
-            keep = local[inv[posR]] >= 0
-            posR = posR[keep]
-            cr = local[inv[posR]]
-            rc = inv_codes[posR + L]
-            idxR = cr * B + rc
-            right_counts = np.bincount(idxR, minlength=Kc * B).reshape(Kc, B)
-
-            for k in range(Kc):
-                c = int(cand[k])
-                total = int(counts[c])
-                if total < min_count:
-                    continue
-                # 左邻熵（空计数 → 0.0，与原 _entropy 语义一致）
-                lv = left_counts[k]
-                lt = int(lv.sum())
-                if lt > 0:
-                    nz = lv[lv > 0].astype(np.float64)
-                    p = nz / lt
-                    h_l = -float(np.sum(p * np.log(p)))
-                else:
-                    h_l = 0.0
-                # 右邻熵
-                rv = right_counts[k]
-                rt = int(rv.sum())
-                if rt > 0:
-                    nz = rv[rv > 0].astype(np.float64)
-                    p = nz / rt
-                    h_r = -float(np.sum(p * np.log(p)))
-                else:
-                    h_r = 0.0
-                if min(h_l, h_r) >= min_entropy:
-                    ids = [int(d) for d in uniq[c]]
-                    w = ''.join(codes_list[i] for i in ids)
-                    self.vocab.add(w)
+            self.vocab |= _induce_length(codes, inv_codes, n, L,
+                                         min_count, min_entropy)
 
     def tokenize(self, text: str) -> list[str]:
         """贪心最长匹配；词表外字符回退为单字符 token。"""

@@ -16,6 +16,11 @@
   跳过该训练步并计数（永不崩溃、永不截断），OOV 率进 [METRIC] 尾行。
 - **流式分词逐位等价**：StreamingTokenizer 与全量贪心匹配逐位一致，
   `verify_stream_tokenize.py` 四用例对拍 PASS。
+- **多核词表与数据加载（fhz 2026-09-25 指令）**：词涌现按 L 层并行；
+  全量扫描/head token 收集按批走锚点链并行（`--vocab-workers`，
+  默认 = 核心数×0.8）；训练流由生产者进程预取（`PrefetchChars`），
+  主循环零等待代码（无 sleep/轮询/忙等）。全部逐位等价，
+  `verify_vocab_parallel.py` 对拍 PASS。
 
 定位（同 config_1b.py）
 --------------------
@@ -56,11 +61,13 @@ for p in (str(_HERE), str(_ROOT)):
 from ckpt_1b import _rebuild_sdrs, load_model, save_model            # noqa: E402
 from config_1b import PRESETS, SEG_KWARGS, build_cfg                 # noqa: E402
 from config_1b import capacity_report, print_capacity_report         # noqa: E402
-from corpus_stream import SEP, StreamingTokenizer, build_vocab_text  # noqa: E402
-from corpus_stream import char_chunks                                # noqa: E402
+from corpus_stream import PrefetchChars, SEP, StreamingTokenizer     # noqa: E402
+from corpus_stream import build_vocab_text, char_chunks              # noqa: E402
 from phdnet.corpus import expand_paths                               # noqa: E402
 from phdnet.model import count_params                                # noqa: E402
-from phdnet.word_encoder import WordSegmenter, WordTokenizer         # noqa: E402
+from phdnet.word_encoder import WordTokenizer                         # noqa: E402
+from vocab_parallel import auto_workers, build_segmenter_parallel    # noqa: E402
+from vocab_parallel import parallel_head_tokens, scan_vocab_parallel # noqa: E402
 
 SAVE_DIR = _ROOT / "models"          # fhz 2026-09-25：训练模型统一存 models/
 LOG_DIR = _ROOT / "outputs" / "train_logs"
@@ -145,6 +152,9 @@ def main() -> None:
                          "full=全量流式扫一遍(零 OOV, 大语料需数小时)")
     ap.add_argument("--vocab-sample-chars", type=int, default=4_000_000,
                     help="head 模式词表采样字符数（只影响词表，训练数据本身不截断）")
+    ap.add_argument("--vocab-workers", type=int, default=0,
+                    help="词表构建/全量扫描并行进程数（0=自动=核心数×0.8，1=串行；"
+                         "fhz 2026-09-25 指令）")
     ap.add_argument("--context-milestone", type=int, default=1_000_000,
                     help="context 里程碑间隔 tokens（0=关闭；默认 1M）")
     ap.add_argument("--ckpt-every", type=int, default=10000)
@@ -156,6 +166,7 @@ def main() -> None:
     ap.add_argument("--report", action="store_true",
                     help="只打印检查点的大空间表统计后退出")
     args = ap.parse_args()
+    vw = args.vocab_workers if args.vocab_workers > 0 else auto_workers()
 
     if args.log_file is not None:
         log_path = args.log_file
@@ -185,29 +196,55 @@ def main() -> None:
     total_mb = sum(p.stat().st_size for p in data_files) / 1e6
 
     # ── 词表构建（采样 or 全量扫描；训练数据本身永不截断）──
+    # 词涌现 + token 收集均多核（fhz 2026-09-25：核心数×0.8；=1 时走串行原路径）
     vocab_text = build_vocab_text(data_path, args.vocab_sample_chars, SEP)
-    seg = WordSegmenter(vocab_text, **SEG_KWARGS)
+    t_v0 = time.perf_counter()
+    seg = build_segmenter_parallel(vocab_text, SEG_KWARGS, args.vocab_workers)
+    if vw > 1:
+        print(f"[词表] 词涌现多核构建：L=2..{SEG_KWARGS['max_len']} × {vw} 进程，"
+              f"涌现词表 {len(seg.vocab):,}（{time.perf_counter() - t_v0:.1f}s）",
+              flush=True)
     if args.vocab_scan == "full":
-        print(f"[词表] full 扫描：全量流式分词一遍（大语料需较久，进度按 100 万 token 打点）…",
+        print(f"[词表] full 扫描：全量流式分词一遍"
+              f"（{'多核锚点链 ×' + str(vw) if vw > 1 else '串行'}；大语料需较久）…",
               flush=True)
         seen: set[str] = set()
         n_seen = 0
         t_v = time.perf_counter()
-        for tk in StreamingTokenizer(seg, char_chunks(data_path, SEP)):
-            seen.add(tk)
-            n_seen += 1
-            if n_seen % 1_000_000 == 0:
-                print(f"  [词表扫描] 已流过 {n_seen:>12,} tokens，"
-                      f"当前词表 {len(seen):,}（{time.perf_counter() - t_v:.0f}s）",
-                      flush=True)
+        if vw > 1:
+            def _scan_prog(n_total, n_distinct):
+                print(f"  [词表扫描] 累计 {n_total:>12,} tokens，"
+                      f"当前词表 {n_distinct:,}"
+                      f"（{time.perf_counter() - t_v:.0f}s）", flush=True)
+
+            seen, n_seen = scan_vocab_parallel(seg.vocab, seg.max_len,
+                                               char_chunks(data_path, SEP), vw,
+                                               progress=_scan_prog)
+        else:
+            for tk in StreamingTokenizer(seg, char_chunks(data_path, SEP)):
+                seen.add(tk)
+                n_seen += 1
+                if n_seen % 1_000_000 == 0:
+                    print(f"  [词表扫描] 已流过 {n_seen:>12,} tokens，"
+                          f"当前词表 {len(seen):,}（{time.perf_counter() - t_v:.0f}s）",
+                          flush=True)
         tokens = sorted(seen)
         print(f"[词表] full 扫描完成：全语料 {n_seen:,} tokens → 词表 {len(tokens):,}"
-              f"（{time.perf_counter() - t_v:.0f}s），零 OOV", flush=True)
+              f"（{time.perf_counter() - t_v:.0f}s，{'多核 ×' + str(vw) if vw > 1 else '串行'}），"
+              f"零 OOV", flush=True)
     else:
-        tokens = sorted(set(seg.tokenize(vocab_text)))
-        print(f"[词表] head 模式：采样前 {len(vocab_text):,} 字符构建"
-              f"（涌现词表 {len(seg.vocab):,}，token 词表 {len(tokens):,}）；"
-              f"训练流 OOV 步将跳过并统计", flush=True)
+        if vw > 1:
+            t_h = time.perf_counter()
+            tokens = sorted(parallel_head_tokens(seg, vocab_text, vw))
+            print(f"[词表] head 模式（多核 token 收集 ×{vw}，"
+                  f"{time.perf_counter() - t_h:.1f}s）：采样前 {len(vocab_text):,} 字符构建"
+                  f"（涌现词表 {len(seg.vocab):,}，token 词表 {len(tokens):,}）；"
+                  f"训练流 OOV 步将跳过并统计", flush=True)
+        else:
+            tokens = sorted(set(seg.tokenize(vocab_text)))
+            print(f"[词表] head 模式：采样前 {len(vocab_text):,} 字符构建"
+                  f"（涌现词表 {len(seg.vocab):,}，token 词表 {len(tokens):,}）；"
+                  f"训练流 OOV 步将跳过并统计", flush=True)
 
     # ── 构建 LM（注入式 tokenizer；n_readout = 词表大小）──
     t0 = time.perf_counter()
@@ -224,6 +261,7 @@ def main() -> None:
           f" | 分片 {len(data_files)} 个（{total_mb:.0f} MB，流式不截断）")
     print(f"epochs={args.epochs} | 预算 tokens={args.tokens or '∞'} "
           f"minutes={args.minutes or '∞'} | 里程碑={args.context_milestone or '∞'}"
+          f" | 词表并行={vw} | 数据预取=生产者进程"
           f" | 构建耗时 {time.perf_counter() - t0:.1f}s")
     print_capacity_report(capacity_report(cfg, vocab))
     print(f"可塑参数（构建时实际，count_params 口径）: {count_params(lm.net):,}")
@@ -253,7 +291,8 @@ def main() -> None:
     for ep in range(args.epochs):
         if _STOP["flag"] or (args.tokens and i - done >= args.tokens):
             break
-        stream = StreamingTokenizer(lm.tok.seg, char_chunks(data_path, SEP))
+        # 多核数据加载：生产者进程预取（与 char_chunks 产出逐位一致）
+        stream = StreamingTokenizer(lm.tok.seg, PrefetchChars(data_path, SEP))
         it = iter(stream)
         p2 = None                                          # t_{i-1}（epoch 首步 prev 断开）
         p1 = next(it, None)                                # t_i

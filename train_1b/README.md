@@ -21,7 +21,23 @@ GPU 也能在小预算内真实训练与续训（每步成本只正比于活跃�
 - **中断续训**：检查点完整保存运行时状态（STDP 迹/调制器/step_count 等），
   resume 快进至断点——1M+ 连续训练可中断恢复。
 
-## 容量口径（1B 在哪里）
+## 多核词表构建与数据加载（2026-09-25，fhz 指令）
+
+- **`--vocab-workers`**：词表构建并行进程数，**默认自动 = 核心数 × 0.8**（向下取整）；
+  `1` = 串行原路径。两条并行化，均逐位等价（`verify_vocab_parallel.py` 对拍 PASS）：
+  - **词涌现按 L 层并行**：`WordSegmenter` 各 L（2..max_len）统计相互独立，
+    per-L 体抽为 `_induce_length`（串行/多核同一份实现、同一 numpy 运算序列），
+    词集合完全一致；
+  - **全量扫描 / head token 收集按批并行（锚点链）**：贪心最长匹配是无状态位置轨道，
+    语料切批（缺省 32M 字符/批，各带 2×max_len 前视）并行送 worker，worker 以
+    δ=0 主链因子化各候选入口的轨道，编排器按锚点链接链——并行 token 流与
+    串行 `StreamingTokenizer` **逐位一致**（含跨批/跨样本 token；对拍含
+    强制注入跨样本 token 的压力用例）。适用大语料 `--vocab-scan full`
+    （数小时级 → ≈多核加速）；小语料进程启动开销占优时可用 `--vocab-workers 1`。
+- **数据加载多核**：训练流由独立生产者进程预取（`corpus_stream.py::PrefetchChars`），
+  parquet 解码与训练计算在两个核心上重叠，与 `char_chunks` 产出逐位一致。
+- **零等待代码**：训练主循环无 sleep/轮询/忙等——仅有界队列与 Future 的
+  OS 级阻塞；队列 maxsize=2048 样本（背压限内存 ≈ 数十 MB）。
 
 ## 容量口径（1B 在哪里）
 
@@ -45,12 +61,14 @@ GPU 也能在小预算内真实训练与续训（每步成本只正比于活跃�
 | 文件 | 职责 |
 |---|---|
 | `train.py` | 主入口：流式训练循环、容量验算、日志、检查点、1M 里程碑 |
-| `corpus_stream.py` | 字符流 + StreamingTokenizer（与全量分词逐位等价） |
+| `corpus_stream.py` | 字符流 + StreamingTokenizer（逐位等价）+ PrefetchChars 多核预取 |
+| `vocab_parallel.py` | 多核词表构建：词涌现按 L 并行 + 全量扫描锚点链并行（默认核心数×0.8） |
 | `config_1b.py` | 档位预设（smoke / 1b / 1b_max）、构建配置、容量验算 |
 | `ckpt_1b.py` | 完整检查点：大空间表（CSR 快照 + 迹/时间戳）+ 词表 + 权重 |
 | `infer.py` | 推理 / 对话：检查点自包含加载（不需要语料）、流式长 prompt、τ+top-k |
 | `verify_stream_tokenize.py` | 对拍：流式分词 vs 全量分词逐位一致 |
 | `verify_ckpt_roundtrip.py` | 对拍：保存→恢复→续训逐位等价 |
+| `verify_vocab_parallel.py` | 对拍：多核词表/扫描 vs 串行逐位一致（含跨样本 token 压力用例） |
 
 ## 用法
 

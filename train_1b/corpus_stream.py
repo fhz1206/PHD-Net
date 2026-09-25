@@ -43,6 +43,52 @@ def char_chunks(path, sep: str = SEP) -> Iterator[str]:
         yield t + sep
 
 
+def _prefetch_producer(path, sep: str, q) -> None:
+    """生产者进程体：把样本字符块推入有界队列（数据加载多核，fhz 2026-09-25）。"""
+    try:
+        for t in char_chunks(path, sep):
+            q.put(t)
+        q.put(None)
+    except BaseException as e:                   # 生产者异常透传给消费者
+        try:
+            q.put(e)
+        except Exception:
+            pass
+
+
+class PrefetchChars:
+    """多核数据加载：独立生产者进程预取样本字符块（iterable，可直接喂给
+    StreamingTokenizer，与 char_chunks 产出逐位一致——同一来源同一顺序）。
+
+    「训练过程不要存在等待代码」实现方式：主进程训练循环只做 queue.get()
+    （OS 级阻塞，无 sleep/轮询/忙等代码）；parquet 解码与训练计算在两个
+    核心上重叠。队列有界（maxsize=depth）→ 背压自动限内存
+    （内存上界 ≈ depth × 平均样本长度，缺省 2048 × 数 KB ≈ 数十 MB）。
+    """
+
+    def __init__(self, path, sep: str = SEP, depth: int = 2048):
+        import multiprocessing as mp
+        self._q: "mp.Queue" = mp.Queue(maxsize=depth)
+        self._proc = mp.Process(target=_prefetch_producer, args=(path, sep, self._q),
+                                daemon=True)
+        self._proc.start()
+
+    def __iter__(self) -> "PrefetchChars":
+        return self
+
+    def __next__(self) -> str:
+        item = self._q.get()
+        if item is None:
+            raise StopIteration
+        if isinstance(item, BaseException):
+            if isinstance(item, KeyboardInterrupt):
+                # 生产者进程被 Ctrl+C 打断：按流结束处理（主循环 _STOP 已置位，
+                # 收尾仍会保存检查点）
+                raise StopIteration
+            raise item                            # 真实异常必须浮出
+        return item
+
+
 def build_vocab_text(path, max_chars: int, sep: str = SEP) -> str:
     """取语料流前 max_chars 字符（与训练流的**开头逐字符一致**）供词表构建。"""
     parts: list[str] = []
