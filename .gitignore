@@ -1,11 +1,20 @@
 # ── 数据（体积过大，不入库；由 tools/ 下的转换脚本从公开数据集生成）──
 datasets/pretrain/
 datasets/sft/
-# 注：datasets/eval/（冻结语料 + OOD 探针，43 KB）**保留入库**——评测基线必需
+# datasets/ 自身是一个**独立仓库**（远端 gitcode.com/fhz1206/Mixture-General-Mini），
+# 其 .git 不参与 PHD-Net 仓库；内置语料 eval/ 按 fhz 要求不随数据集仓库外发。
+datasets/.git/
+# 注：datasets/eval/（冻结语料 + OOD 探针，43 KB）**保留在 PHD-Net 仓库**——评测基线必需
 
 # ── 训练产物与检查点 ──
 outputs/ckpt/
+outputs/train_logs/
+datasets/.ms_upload_cache
 *.npz
+
+# ── 临时诊断脚本 / 日志（下划线前缀 = 临时，不入库）──
+tools/_*.py
+outputs/_*
 
 # ── Python / numba 缓存 ──
 __pycache__/

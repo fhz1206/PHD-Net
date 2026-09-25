@@ -10,7 +10,9 @@
 3. 预算控制：`--tokens N` 与 `--minutes M`（任一到达即收尾）
 4. 断点续训：`--resume` 从最近检查点继续（含模型权重 + 已训 token 数 + 日志）
 5. 检查点：每 `--ckpt-every` tokens 保存一次（npz，含配置与进度）
-6. 日志：每 `--log-every` tokens 打印滑动 PPL / ms per token / 剩余时间估计
+6. 日志：每 `--log-every` tokens 打印滑动 PPL / ms per token / 剩余时间估计，
+   **同时落盘**到 `outputs/train_logs/train_{scale}_{data}_{时间戳}.log`（`--log-file` 可指定；
+   收尾附一行 `[METRIC] …` 便于脚本化汇总），控制台输出全程双写
 7. 优雅退出：收到 SIGINT 先保存检查点再退出
 
 用法示例
@@ -39,6 +41,7 @@ import json
 import signal
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -48,11 +51,35 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from phdnet.config import PHDNetConfig          # noqa: E402
+from phdnet.corpus import expand_paths, load_text   # noqa: E402
 from phdnet.model import count_params           # noqa: E402
 from phdnet.word_lm import PHDWordLM            # noqa: E402
 
 CKPT_DIR = _ROOT / "outputs" / "ckpt"
+LOG_DIR = _ROOT / "outputs" / "train_logs"
 SEG = dict(max_len=6, min_count=5, min_entropy=1.0)
+
+
+class TeeLogger:
+    """控制台 + 日志文件**双写**（替换 sys.stdout，现有 print 全部自动落盘）。
+
+    - 行缓冲写文件（`buffering=1`），异常中断也最多丢当前行；
+    - 进程生命周期内不恢复 stdout（脚本存活期 = 训练期，退出由解释器收尾）；
+    - 文件头部自动记录启动时间与命令行参数，便于多轮实验回溯比对。
+    """
+
+    def __init__(self, path: Path):
+        self.terminal = sys.stdout
+        self.file = open(path, "w", encoding="utf-8", buffering=1)
+        self.path = path
+
+    def write(self, msg: str) -> None:
+        self.terminal.write(msg)
+        self.file.write(msg)
+
+    def flush(self) -> None:
+        self.terminal.flush()
+        self.file.flush()
 
 SCALES = {
     # name      宽度   conn_k  词表(0=语料全词表)  备注
@@ -64,13 +91,25 @@ SCALES = {
 }
 
 DATA_FILES = {
-    "sft": _ROOT / "datasets" / "sft" / "ultrainteract_sft.txt",
-    "infinity_zh": _ROOT / "datasets" / "pretrain" / "infinity_m7core.txt",
-    "infinity": _ROOT / "datasets" / "pretrain" / "infinity_m7core.txt",
+    # fhz 2026-09-25「训练的时候 raw 目录记得不要用」：训练数据一律用**上传分片
+    # parquet**（sft/ pretrain/ 根），raw/ 仅作原始归档，训练不触碰。
+    # eval 是内置语料锚点（本地评测基线必需，不在数据集仓库外发范围）。
+    "sft": _ROOT / "datasets" / "sft" / "sft_000.*.parquet",
+    "infinity_zh": _ROOT / "datasets" / "pretrain" / "pretrain_*.parquet",
+    "infinity": _ROOT / "datasets" / "pretrain" / "pretrain_*.parquet",
     "eval": _ROOT / "datasets" / "eval" / "internal_corpus.txt",
 }
 
 _STOP = {"flag": False}
+
+
+def _resolve_corpus(txt_path: Path) -> Path:
+    """同名 .parquet 优先（列式 + 压缩），否则回退原 .txt；glob 模式直接返回。"""
+    s = str(txt_path)
+    if any(c in s for c in "*?["):
+        return txt_path
+    pq = txt_path.with_suffix(".parquet")
+    return pq if pq.exists() else txt_path
 
 
 def _on_sigint(signum, frame):        # pragma: no cover
@@ -157,17 +196,38 @@ def main() -> None:
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--big-ltm", action="store_true", help="启用 1B 事件驱动容量栈")
     ap.add_argument("--max-chars", type=int, default=4_000_000, help="语料载入上限")
+    ap.add_argument("--log-file", type=Path, default=None,
+                    help="日志文件路径（默认 outputs/train_logs/train_{scale}_{data}_{时间戳}.log）")
     args = ap.parse_args()
+
+    # ── 日志落盘（控制台 + 文件双写；此后所有 print 自动进日志文件）──
+    if args.log_file is not None:
+        log_path = args.log_file
+    else:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_path = LOG_DIR / f"train_{args.scale}_{args.data}_{stamp}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    tee = TeeLogger(log_path)
+    sys.stdout = tee
+    print(f"[log] 日志文件：{log_path}")
+    print(f"[log] 启动：{datetime.now().isoformat(timespec='seconds')}  "
+          f"argv：{' '.join(sys.argv[1:]) or '(默认参数)'}")
 
     signal.signal(signal.SIGINT, _on_sigint)
     CKPT_DIR.mkdir(parents=True, exist_ok=True)
     ckpt = CKPT_DIR / f"phdnet_{args.scale}_{args.data}.npz"
 
-    data_path = DATA_FILES[args.data]
-    if not data_path.exists():
-        print(f"数据文件不存在: {data_path}")
+    # 训练数据 = 上传分片 parquet（支持 glob 多分片顺序拼接；不触碰 raw/）
+    data_path = _resolve_corpus(DATA_FILES[args.data])
+    try:
+        data_files = expand_paths(data_path)
+    except FileNotFoundError as e:
+        print(f"数据文件不存在: {e}")
         sys.exit(1)
-    text = data_path.read_text(encoding="utf-8")[: args.max_chars]
+    total_mb = sum(p.stat().st_size for p in data_files) / 1e6
+    text = load_text(data_path, limit_chars=args.max_chars)
+    print(f"语料源 {data_path.name} × {len(data_files)} 文件（{total_mb:.1f} MB，"
+          f"{'parquet 列式' if data_files[0].suffix == '.parquet' else '纯文本'}）")
     cfg = build_cfg(args.scale, args.big_ltm)
     print("=" * 92)
     print(f"PHD-Net 生产级训练 | scale={args.scale} data={args.data} "
@@ -227,8 +287,12 @@ def main() -> None:
     print(f"本次训练 {i - done:,} tokens，用时 {spent / 60:.1f} min"
           f"（{spent / max(1, i - done) * 1000:.2f} ms/token）")
     if seg_nll:
-        print(f"末段滑动 PPL ≈ {float(np.exp(np.mean(seg_nll[-min(2000, len(seg_nll)):]))):.3f}")
+        final_ppl = float(np.exp(np.mean(seg_nll[-min(2000, len(seg_nll)):])))
+        print(f"末段滑动 PPL ≈ {final_ppl:.3f}")
+        print(f"[METRIC] scale={args.scale} data={args.data} tokens={i:,} "
+              f"ms_per_token={spent / max(1, i - done) * 1000:.2f} final_ppl={final_ppl:.3f}")
     print(f"检查点：{ckpt}")
+    print(f"[log] 日志已保存：{tee.path}")
 
 
 if __name__ == "__main__":

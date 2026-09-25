@@ -13,6 +13,64 @@ import numpy as np
 
 from .sparse_pc import (_csr_add_outer, _csr_clip, _csr_matvec, _csr_oja_up,
                         _random_csr)
+from .plasticity import NUMBA_OK
+
+# ---------------------------------------------------------------------------
+# P7 性能（2026-09-24）：稠密读出的**融合并行更新核**。
+#
+# 实测（tools/_prof_step.py，256 维栈 / k_sparse=32 / 词级 LM）：读出学习占
+# **78.9%**（8.97 ms/token，总计 11.37）。根因不是 FLOPs 而是**内存流量**：
+# 旧路径 `tmp = outer(dp,h)`（分配 ~12.6 MB）→ `tmp *= eta` → `W -= tmp`，
+# 每 token 触达约 3×12.6 MB 读 + 2×12.6 MB 写 ≈ 75 MB，单核带宽被吃满。
+#
+# 本核把三步融合为**一次对 W 的遍历**（读+写 25 MB），并按输出行并行：
+#   - 元素级独立（`W[i,j] -= (dp[i]·h[j])·eta`），无跨行归约 → prange 安全；
+#   - 运算顺序与 numpy 路径**逐位相同**（先 dp[i]*h[j]，再乘 eta，最后减）；
+#   - 行梯度为 0 时整行短路（减 0 不改变任何值，含 ±0.0）。
+# 因此是**纯性能改动、数值逐位等价**，不引入行为开关（同 P6 的处置）。
+# ---------------------------------------------------------------------------
+if NUMBA_OK:                                        # pragma: no cover
+    from numba import njit, prange
+
+    @njit(cache=True, parallel=True, fastmath=False)
+    def _ro_dense_update(W, dp, h, eta):
+        """W -= (dp ⊗ h) · eta —— 融合、按行并行；与 numpy 三步路径逐位等价。"""
+        n_out, n_in = W.shape
+        for i in prange(n_out):
+            e = dp[i]
+            if e == 0.0:
+                continue
+            for j in range(n_in):
+                W[i, j] -= (e * h[j]) * eta
+
+    # 注：`y = W·h` **没有**换成 numba 并行核——实测它比 OpenBLAS 的 dgemv
+    # 慢 0.68×（1540×768）且**不逐位等价**（BLAS 的分块求和顺序不同，最大偏差
+    # 1.4e-14）。故前向仍走 BLAS，融合核只用于更新（tools/verify_readout_fused.py）。
+else:                                               # pragma: no cover
+    _ro_dense_update = None
+
+_RO_STATE = {"ok": None}      # None=未探测 / True=可用 / False=回退 numpy
+
+
+def _ro_fused(W: np.ndarray, dp: np.ndarray, h: np.ndarray, eta: float,
+              allow: bool = True) -> bool:
+    """尝试用融合核更新；返回是否真的用了融合核（False = 调用方回退）。"""
+    if not allow or _ro_dense_update is None or W.dtype != np.float64:
+        return False
+    st = _RO_STATE["ok"]
+    if st is None:                       # 惰性探测（首次调用触发编译，失败即永久回退）
+        try:
+            probe = np.zeros((2, 3))
+            _ro_dense_update(probe, np.full(2, 0.5), np.full(3, 0.25), 0.1)
+            _RO_STATE["ok"] = True
+        except Exception:
+            _RO_STATE["ok"] = False
+    if not _RO_STATE["ok"]:
+        return False
+    if eta == 0.0:
+        return True                      # 零学习率：与 numpy 路径同为空操作
+    _ro_dense_update(W, dp, h, eta)
+    return True
 
 
 class Readout:
@@ -203,7 +261,9 @@ class Readout:
         y = self.__call__(h)
         if self.conn_k > 0:                     # ΔW = η·(t − y) ⊗ h（只更新存在的边）
             _csr_add_outer(*self._csr, target - y, h, eta)
-        else:
+        elif not _ro_fused(self.W, y - target, h, eta, allow=not self.fp32):
+            # 融合核做 `W -= dp⊗h·eta`；取 dp = y − t 即等价于 `W += (t−y)⊗h·eta`
+            # （IEEE 下 −(a·b) 与 (−a)·b 逐位相同）。
             self.W += self._to_w(eta * np.outer(target - y, h))
         self._clip()
 
@@ -285,8 +345,10 @@ class Readout:
         elif self.conn_k > 0:                           # 稀疏梯度下降（存在的边）
             _csr_add_outer(*self._csr, p - target, h, -eta)
         else:
-            tmp = self._to_w(np.outer(p - target, h))
-            tmp *= eta                                  # 原地缩放（逐位等价）
-            self.W -= tmp                               # 梯度下降（末端局部）
+            # P7：融合并行核（逐位等价，省掉 ~12.6 MB 临时数组的两趟往返）
+            if not _ro_fused(self.W, p - target, h, eta, allow=not self.fp32):
+                tmp = self._to_w(np.outer(p - target, h))
+                tmp *= eta                              # 原地缩放（逐位等价）
+                self.W -= tmp                           # 梯度下降（末端局部）
         self._clip()
         return nll

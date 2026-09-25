@@ -11,6 +11,15 @@
 > **SFT 语料已就位（2026-09-23）**：OpenBMB `UltraInteract_sft`（fhz 指定）——288,579 条 / **0.603 GB 文本**，
 > 77,023 条唯一指令（平均 3.75 响应/指令，含偏好树 `parent_id`）；任务构成 Coding 39.8% / Math 56.2% / Logic 4.0%；
 > `tools/convert_ultrainteract.py` 转换落 `datasets/sft/ultrainteract_sft.txt`（flat / grouped 两模式）。
+>
+> **2026-09-24 三条更新**：① **性能 P7**——稠密读出更新改为 numba 融合并行核，
+> `tools/_prof_step.py` 实测 11.373 → 5.053 ms/token（**2.25×**），三层对拍**逐位等价**
+> （`tools/verify_readout_fused.py`），基线 96.7241 / 77.5261 **一字未变**，fast 11/11；
+> ② **新增两个数据集**——匠数 `deepctrl-sft-data`（中文 SFT，流式过滤后 150 MB）
+> 与 `Magpie-Reasoning-V1-150K-CoT-Deepseek-R1-Llama-70B`（R1 长链 CoT 300 MB，
+> 结构判定归到预训练）；叠加 `Ultra-FineWeb-L3` 中文采样（8 万条 / 102 MB parquet）；
+> ③ **语料导入改为 parquet**（`phdnet/corpus.py` 统一 txt/parquet/jsonl 读取入口），
+> 压缩 1.91–6.26×，且都 <100 MiB 可直接入库。
 
 ---
 
@@ -41,12 +50,14 @@ train/
 │   ├── context_memory.py       M13 上下文漂移情景记忆（TCM/CMR 式长程复制）
 │   ├── device.py               硬件后端探测（昇腾 NPU / ROCm / CUDA / DirectML / CPU）
 │   └── torch_backend.py        torch 版 STDP 算子（同一份代码覆盖各加速器）
-├── datasets/                   语料（2026-09-21 起 data/ 更名并分子目录）
-│   ├── eval/
+├── datasets/                   语料（**自身是独立仓库** → atomgit.com/fhz1206/Mixture-General-Mini）
+│   ├── eval/                   内置语料（仅本地评测用，按 fhz 要求不随数据集仓库外发）
 │   │   ├── internal_corpus.txt 内置冻结语料（23,504 字符，逐字复制自架构设计文档）
 │   │   └── ood_wiki.txt        远域泛化探针语料（中文维基 26 篇 / 20,188 字符）
-│   ├── sft/                    SFT 语料 = UltraInteract_sft（OpenBMB，已就位：288,579 条 / 0.603 GB，见 tools/convert_ultrainteract.py）
-│   └── pretrain/               预训练语料 = Infinity-Instruct 7M_core（M7_Core 已就位：7,449,106 条 / 10.07 GB 文本，见 tools/convert_infinity.py）
+│   ├── sft/merged/split/       SFT 合并语料 parquet 分片（≤90 MiB，UltraInteract 英文 + deepctrl 中文，331.9 万条）
+│   ├── pretrain/merged/split/  预训练合并语料 parquet 分片（≤90 MiB；= M7_Core 10.84 GB + Magpie-R1 CoT + Ultra-FineWeb-L3 中文采样）
+│   └── （散装原始件在本地保留：infinity_m7core.txt 10.84 GB 等；读取统一走 phdnet/corpus.py）
+│   ⚠ 远端单文件 ≤100 MiB 且 LFS 配额满 ⇒ 交付形态 = 按大小切分的 **parquet 分片**（tools/split_parquet.py，每片可直接 pyarrow 读取）
 ├── tests/                      回归入口与全部验收脚本
 │   ├── run_tests.py            分层回归入口（fast 11 项 / --full）
 │   ├── checks_common.py        检查项共享件（常量/断言/结果收集）

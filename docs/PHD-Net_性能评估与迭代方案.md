@@ -612,6 +612,52 @@ bug 猎手 **45 项 / 0 bug**。证据：`outputs/audit_round3_final.log`、
 
 ---
 
+### 6.12 P7：稠密读出更新的融合并行核（2026-09-24 · 2.25× 加速 · 逐位等价）
+
+**动机**：模块级耗时分解（`tools/_prof_step.py`，256 维栈 / k_sparse=32 / 词级 LM）显示
+**单步 11.373 ms 中 `readout.learn_softmax` 独占 8.970 ms（78.9%）**，热点高度集中：
+
+| 模块 | ms/token | 占比 |
+|---|---|---|
+| M6 readout.learn_softmax | 8.970 | 78.9% |
+| M6 readout.fwd | 0.804 | 7.1% |
+| M2 pc.infer | 0.411 | 3.6% |
+| M1 encoder.encode | 0.366 | 3.2% |
+| 其余（STDP/WM/LTM/M5/胶水） | 0.822 | 7.2% |
+
+**根因不是 FLOPs 而是内存流量**：旧路径 `tmp = outer(dp,h)`（分配 ~12.6 MB）
+→ `tmp *= eta` → `W -= tmp`，每 token 触达约 3×12.6 MB 读 + 2×12.6 MB 写 ≈ **75 MB**，
+单核带宽被吃满（实测 ~8.4 GB/s，已是单核上限）。
+
+**改法**（`phdnet/readout.py` 的 `_ro_dense_update`，numba `parallel=True` + `prange`）：
+三步融合为**一次对 W 的遍历**，按输出行并行、行梯度为 0 时整行短路。
+元素级独立、无跨行归约 ⇒ prange 安全；运算顺序与 numpy 路径**逐位相同**
+（先 `dp[i]*h[j]`，再乘 `eta`，最后减）⇒ 不引入行为开关（同 P6 处置）。
+
+**实测**：
+
+| 指标 | 优化前 | 优化后 | 变化 |
+|---|---|---|---|
+| 单步分解（prof_step 口径） | 11.373 ms/token | **5.053 ms/token** | **2.25×** |
+| 端到端对拍（verify_readout_fused） | 13.003 ms/token | **5.425 ms/token** | **2.40×** |
+| 基线 4,000 字符 ppl_char | 96.7241 | **96.7241** | **逐位不变** |
+| 基线 全语料 ppl_char | 77.5261 | **77.5261** | **逐位不变** |
+| 基线 4,000 字符 ms/token | 7.207 | **4.030** | 1.79× |
+| 基线 全语料 ms/token | 9.516 | **4.836** | 1.97× |
+| readout.learn_softmax 占比 | 78.9% | 38.1% | 8.970 → 1.924 ms |
+
+**对拍门禁**（`tools/verify_readout_fused.py`，四层全 PASS）：
+L1 单元（同一输入、两条路径 → 权重逐位相同）／L2 序列 500 步（含零学习率、全零输入、
+大幅值、重复 h）／L3 端到端 1500 步（PPL 与权重比特级摘要相同）／L4 吞吐。
+`run_tests.py` fast **11/11**。证据：`outputs/verify_readout_fused.log`、
+`outputs/rebaseline_p7.log`、`outputs/run_tests_p7.log`。
+
+**一项尝试后放弃**：前向 `y = W·h` 也试过 numba 并行 matvec，实测比 OpenBLAS 的 dgemv
+**慢 0.68×**（1540×768）且**不逐位等价**（BLAS 分块求和顺序不同，最大偏差 1.4e-14）⇒
+前向仍走 BLAS，融合核只用于更新（该结论已写入代码注释，避免重复踩坑）。
+
+---
+
 ## 七、复现入口
 
 ```bash
