@@ -25,7 +25,8 @@ for p in (str(_HERE), str(_ROOT)):
         sys.path.insert(0, p)
 
 from config_1b import SEG_KWARGS                                        # noqa: E402
-from corpus_stream import SEP, StreamingTokenizer, char_chunks          # noqa: E402
+from corpus_stream import PrefetchChars, SEP, StreamingTokenizer       # noqa: E402
+from corpus_stream import char_chunks                                   # noqa: E402
 from phdnet.word_encoder import WordSegmenter                           # noqa: E402
 from vocab_parallel import build_segmenter_parallel                     # noqa: E402
 from vocab_parallel import iter_tokens_parallel, parallel_head_tokens   # noqa: E402
@@ -125,6 +126,24 @@ def main() -> None:
                                       char_chunks(EVAL), workers=3,
                                       group_chars=4096))
     check(f"C eval 流一致（{len(ref_c):,} tokens）", par_c == ref_c)
+
+    # ── D：多进程数据加载 vs 串行（多文件语料，reorder 归并顺序验证）──
+    print("[D] 多进程数据加载（PrefetchChars）vs 串行 char_chunks")
+    import shutil as _shutil
+    import tempfile
+    tmpd = Path(tempfile.mkdtemp(prefix="vp_d_"))
+    try:
+        per = (len(samples) + 4) // 5
+        for i in range(5):
+            part = "".join(samples[i * per:(i + 1) * per])
+            (tmpd / f"part_{i}.txt").write_text(part, encoding="utf-8")
+        glob_path = tmpd / "part_*.txt"
+        ref_d = list(char_chunks(glob_path))
+        for dw in (1, 3):
+            got = list(PrefetchChars(glob_path, workers=dw))
+            check(f"D w={dw} 流一致（{len(ref_d):,} 样本 / 5 文件）", got == ref_d)
+    finally:
+        _shutil.rmtree(tmpd, ignore_errors=True)
 
     print("-" * 76)
     if _FAILURES:

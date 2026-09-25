@@ -194,6 +194,7 @@ def main() -> None:
         print(f"数据文件不存在: {e}")
         sys.exit(1)
     total_mb = sum(p.stat().st_size for p in data_files) / 1e6
+    dl_w = max(1, min(vw, len(data_files)))    # 数据加载进程数（≤文件数）
 
     # ── 词表构建（采样 or 全量扫描；训练数据本身永不截断）──
     # 词涌现 + token 收集均多核（fhz 2026-09-25：核心数×0.8；=1 时走串行原路径）
@@ -218,7 +219,7 @@ def main() -> None:
                       f"（{time.perf_counter() - t_v:.0f}s）", flush=True)
 
             seen, n_seen = scan_vocab_parallel(seg.vocab, seg.max_len,
-                                               char_chunks(data_path, SEP), vw,
+                                               PrefetchChars(data_path, SEP), vw,
                                                progress=_scan_prog)
         else:
             for tk in StreamingTokenizer(seg, char_chunks(data_path, SEP)):
@@ -261,7 +262,7 @@ def main() -> None:
           f" | 分片 {len(data_files)} 个（{total_mb:.0f} MB，流式不截断）")
     print(f"epochs={args.epochs} | 预算 tokens={args.tokens or '∞'} "
           f"minutes={args.minutes or '∞'} | 里程碑={args.context_milestone or '∞'}"
-          f" | 词表并行={vw} | 数据预取=生产者进程"
+          f" | 词表并行={vw} | 数据预取=多进程×{dl_w}"
           f" | 构建耗时 {time.perf_counter() - t0:.1f}s")
     print_capacity_report(capacity_report(cfg, vocab))
     print(f"可塑参数（构建时实际，count_params 口径）: {count_params(lm.net):,}")

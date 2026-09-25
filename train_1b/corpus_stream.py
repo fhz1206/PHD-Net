@@ -43,50 +43,118 @@ def char_chunks(path, sep: str = SEP) -> Iterator[str]:
         yield t + sep
 
 
-def _prefetch_producer(path, sep: str, q) -> None:
-    """生产者进程体：把样本字符块推入有界队列（数据加载多核，fhz 2026-09-25）。"""
+def _prefetch_producer(tasks, sep: str, batch_samples: int, q) -> None:
+    """生产者进程体：顺序读取分派给本进程的文件，按批推入有界队列。
+
+    tasks = [(全局文件序号 gfi, 路径)]（连续片段）；
+    每批推送 (gfi, [样本+sep, ...])；文件读完推 (gfi, None)（文件耗尽标记）；
+    进程结束推 None（退出哨兵）。异常透传给消费者（Ctrl+C 按流结束处理）。
+    """
+    from phdnet.corpus import iter_texts
     try:
-        for t in char_chunks(path, sep):
-            q.put(t)
+        for gfi, path in tasks:
+            buf: list[str] = []
+            for t in iter_texts(path):
+                buf.append(t + sep)
+                if len(buf) >= batch_samples:
+                    q.put((gfi, buf))
+                    buf = []
+            if buf:
+                q.put((gfi, buf))
+            q.put((gfi, None))
         q.put(None)
-    except BaseException as e:                   # 生产者异常透传给消费者
+    except BaseException as e:
         try:
-            q.put(e)
+            q.put(("__err__", e))
         except Exception:
             pass
 
 
 class PrefetchChars:
-    """多核数据加载：独立生产者进程预取样本字符块（iterable，可直接喂给
-    StreamingTokenizer，与 char_chunks 产出逐位一致——同一来源同一顺序）。
+    """多进程数据加载（fhz 2026-09-25：「数据加载也用多核」「能不能多进程」）。
 
-    「训练过程不要存在等待代码」实现方式：主进程训练循环只做 queue.get()
-    （OS 级阻塞，无 sleep/轮询/忙等代码）；parquet 解码与训练计算在两个
-    核心上重叠。队列有界（maxsize=depth）→ 背压自动限内存
-    （内存上界 ≈ depth × 平均样本长度，缺省 2048 × 数 KB ≈ 数十 MB）。
+    W 个生产者进程（默认 = 核心数×0.8，按文件数封顶）按**连续文件片段**并行
+    解码 parquet/txt，各批带全局文件序号推入有界队列；主进程按文件顺序
+    reorder 归并 → 产出与 char_chunks **逐位一致**（同一 iter_texts、同一
+    文件顺序、批内同序）。
+
+    「训练过程不要存在等待代码」：主进程只做 queue.get()（OS 级阻塞，
+    无 sleep/轮询/忙等）；队列有界（depth 批 × batch_samples 样本）→
+    背压自动限内存（缺省 ≈ 64×64×样本均长 ≈ 数十 MB）。
+    单文件语料自动退化为 1 个生产者（与旧单进程版等价）。
     """
 
-    def __init__(self, path, sep: str = SEP, depth: int = 2048):
+    def __init__(self, path, sep: str = SEP, depth: int = 64,
+                 batch_samples: int = 64, workers: int = 0):
         import multiprocessing as mp
+        from phdnet.corpus import expand_paths
+
+        from vocab_parallel import auto_workers
+        files = [str(p) for p in expand_paths(path)]
+        w = auto_workers() if workers in (0, None) else int(workers)
+        w = max(1, min(w, len(files)))
+        self._n_files = len(files)
+        self._n_workers = w
+
         self._q: "mp.Queue" = mp.Queue(maxsize=depth)
-        self._proc = mp.Process(target=_prefetch_producer, args=(path, sep, self._q),
-                                daemon=True)
-        self._proc.start()
+        self._procs = []
+        bounds = [self._n_files * i // w for i in range(w + 1)]   # 连续均分
+        for i in range(w):
+            tasks = [(gfi, files[gfi]) for gfi in range(bounds[i], bounds[i + 1])]
+            p = mp.Process(target=_prefetch_producer,
+                           args=(tasks, sep, batch_samples, self._q),
+                           daemon=True)
+            p.start()
+            self._procs.append(p)
+
+        # 归并状态（按文件顺序消费）
+        self._expect = 0               # 期待的文件序号
+        self._buffer: dict = {}        # gfi -> deque[批样本列表]
+        self._file_done: set = set()   # 已耗尽文件
+        self._done_workers = 0
+        self._cur: list = []
+        self._cur_i = 0
+
+    def _refill(self) -> bool:
+        """装下一批到 self._cur；语料流结束返回 False（OS 级阻塞，无忙等）。"""
+        from collections import deque
+        while True:
+            if self._expect >= self._n_files:
+                return False
+            file_q = self._buffer.get(self._expect)
+            if file_q:
+                self._cur = file_q.popleft()
+                self._cur_i = 0
+                return True
+            if self._expect in self._file_done:
+                self._expect += 1                  # 该文件完 → 期待下一文件
+                continue
+            item = self._q.get()
+            if item is None:
+                self._done_workers += 1
+                continue
+            head = item[0]
+            if isinstance(head, str) and head == "__err__":
+                e = item[1]
+                if isinstance(e, KeyboardInterrupt):
+                    return False                   # 生产者被 Ctrl+C：按流结束
+                raise e
+            gfi, buf = item
+            if buf is None:
+                self._file_done.add(gfi)
+            else:
+                self._buffer.setdefault(gfi, deque()).append(buf)
 
     def __iter__(self) -> "PrefetchChars":
         return self
 
     def __next__(self) -> str:
-        item = self._q.get()
-        if item is None:
-            raise StopIteration
-        if isinstance(item, BaseException):
-            if isinstance(item, KeyboardInterrupt):
-                # 生产者进程被 Ctrl+C 打断：按流结束处理（主循环 _STOP 已置位，
-                # 收尾仍会保存检查点）
+        while self._cur_i >= len(self._cur):
+            if not self._refill():
                 raise StopIteration
-            raise item                            # 真实异常必须浮出
-        return item
+        t = self._cur[self._cur_i]
+        self._cur_i += 1
+        return t
 
 
 def build_vocab_text(path, max_chars: int, sep: str = SEP) -> str:

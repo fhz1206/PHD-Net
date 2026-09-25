@@ -34,10 +34,12 @@ GPU 也能在小预算内真实训练与续训（每步成本只正比于活跃�
     串行 `StreamingTokenizer` **逐位一致**（含跨批/跨样本 token；对拍含
     强制注入跨样本 token 的压力用例）。适用大语料 `--vocab-scan full`
     （数小时级 → ≈多核加速）；小语料进程启动开销占优时可用 `--vocab-workers 1`。
-- **数据加载多核**：训练流由独立生产者进程预取（`corpus_stream.py::PrefetchChars`），
-  parquet 解码与训练计算在两个核心上重叠，与 `char_chunks` 产出逐位一致。
+- **数据加载多核（多进程）**：训练流由 **W 个生产者进程**（默认 = 核心数×0.8，按
+  文件数封顶）按连续文件片段并行解码 parquet/txt，各批带全局文件序号推入有界队列，
+  主进程按文件顺序 reorder 归并——与 `char_chunks` 产出逐位一致（`verify_vocab_parallel.py`
+  用例 D 对拍）；单文件语料自动退化为 1 进程。`--vocab-scan full` 的喂料同样走该通道。
 - **零等待代码**：训练主循环无 sleep/轮询/忙等——仅有界队列与 Future 的
-  OS 级阻塞；队列 maxsize=2048 样本（背压限内存 ≈ 数十 MB）。
+  OS 级阻塞；队列有界（64 批 × 64 样本，背压限内存 ≈ 数十 MB）。
 
 ## 容量口径（1B 在哪里）
 
@@ -61,7 +63,7 @@ GPU 也能在小预算内真实训练与续训（每步成本只正比于活跃�
 | 文件 | 职责 |
 |---|---|
 | `train.py` | 主入口：流式训练循环、容量验算、日志、检查点、1M 里程碑 |
-| `corpus_stream.py` | 字符流 + StreamingTokenizer（逐位等价）+ PrefetchChars 多核预取 |
+| `corpus_stream.py` | 字符流 + StreamingTokenizer（逐位等价）+ PrefetchChars 多进程加载（按文件分片并行解码 + 顺序归并） |
 | `vocab_parallel.py` | 多核词表构建：词涌现按 L 并行 + 全量扫描锚点链并行（默认核心数×0.8） |
 | `config_1b.py` | 档位预设（smoke / 1b / 1b_max）、构建配置、容量验算 |
 | `ckpt_1b.py` | 完整检查点：大空间表（CSR 快照 + 迹/时间戳）+ 词表 + 权重 |
