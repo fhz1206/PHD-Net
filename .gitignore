@@ -9,6 +9,7 @@ datasets/.git/
 # ── 训练产物与检查点 ──
 outputs/ckpt/
 outputs/train_logs/
+models/                     # fhz 2026-09-25：1B 训练产物目录（大文件不入库）
 datasets/.ms_upload_cache
 *.npz
 
