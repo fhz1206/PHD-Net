@@ -29,7 +29,7 @@ from phdnet.config import PHDNetConfig          # noqa: E402
 from phdnet.model import count_params           # noqa: E402
 from phdnet.word_lm import PHDWordLM            # noqa: E402
 
-CORPUS = _ROOT / "datasets" / "eval" / "internal_corpus.txt"
+CORPUS = _ROOT / "eval_corpus" / "internal_corpus.txt"
 LOG = _ROOT / "outputs" / "scaling_data_axis.log"
 JSON = _ROOT / "outputs" / "scaling_data_axis.json"
 BASE = dict(n_sdr=256, k_sparse=32, n_mid=256, n_top=256,

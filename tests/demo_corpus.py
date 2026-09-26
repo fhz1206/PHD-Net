@@ -4,7 +4,7 @@
 本脚本暂停使用——运行会以明确报错退出；新语料就位后按下列路径放置即可复用：
 语料：`datasets/pretrain/wiki_train.txt` / `datasets/pretrain/wiki_eval.txt`（由 `tools/prepare_wikicn.py` 从
 中文维基百科 dump 抽取清洗生成，**页面级**确定性划分，CC BY-SA 3.0）。
-与文档语料（`datasets/eval/internal_corpus.txt`）不同，这是**固定外部语料**——
+与文档语料（`eval_corpus/internal_corpus.txt`）不同，这是**固定外部语料**——
 不随项目文档编辑而漂移，适合作为跨轮比较的稳定锚点。
 
 默认截取 train 60,000 / eval 8,000 字符以控制 CPU 预算；80/20 比例是按字符数

@@ -29,7 +29,7 @@ from pathlib import Path as _Path
 _ROOT = _Path(__file__).resolve().parents[1]
 if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))
-_DOC = _ROOT / "datasets" / "eval" / "internal_corpus.txt"
+_DOC = _ROOT / "eval_corpus" / "internal_corpus.txt"
 # --- 引导结束 ---
 
 import numpy as np

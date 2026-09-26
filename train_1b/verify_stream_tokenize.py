@@ -42,11 +42,11 @@ def check(tag: str, text: str, chunks: list[str], seg: WordSegmenter) -> bool:
 
 def main() -> None:
     seg = WordSegmenter(" ".join(char_chunks(
-        _ROOT / "datasets" / "eval" / "internal_corpus.txt")), **SEG_KWARGS)
+        _ROOT / "eval_corpus" / "internal_corpus.txt")), **SEG_KWARGS)
     print(f"词表 {len(seg.vocab):,} 涌现词 | max_len={seg.max_len}")
 
     # ── 用例 1：真实语料，按既有样本分块（流式定义）──
-    chunks = list(char_chunks(_ROOT / "datasets" / "eval" / "internal_corpus.txt"))
+    chunks = list(char_chunks(_ROOT / "eval_corpus" / "internal_corpus.txt"))
     text1 = "".join(chunks)
     check("用例1 真实语料（样本分块）", text1, chunks, seg)
 

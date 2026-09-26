@@ -278,4 +278,7 @@ class PHDNetConfig:
     # 矩阵的稠密更新），其耗时受内存带宽支配 —— float32 使带宽减半。
     # 数值影响：读出前向/更新的浮点精度由 fp64 降为 fp32（属数值变化行为，
     # 故默认关闭；默认路径逐位不变）。预计训练加速 ~1.3–1.5×。
-    readout_fp32: bool = False
+    readout_dtype: str = "fp32"     # P9 精度体系（fhz 2026-09-26：停止 fp64；默认 fp32）
+                                    #   可选 fp32 / fp16 / bf16 / fp8 / fp4
+                                    #   低精度 = 原生位型码本存储 + 查表反量化计算
+                                    #   （softmax/NLL 保持 fp64 主回路）

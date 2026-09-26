@@ -6,7 +6,7 @@
 学习规则全部局部化（无反向传播），计算事件驱动稀疏（只触碰活跃通路）。
 
 > 2026-09-20 终态：五轨道 M1–M9 全部收官（每项都有实测结论，含负结果）；四份文档与介绍网页已按最终状态重写。
-> 2026-09-21：**内置语料冻结**为 `datasets/eval/internal_corpus.txt`（23,504 字符，逐字复制自架构设计文档）——编辑文档不再改变基线；
+> 2026-09-21：**内置语料冻结**为 `eval_corpus/internal_corpus.txt`（23,504 字符，逐字复制自架构设计文档）——编辑文档不再改变基线；
 > `data/` 更名 `datasets/`（下分 `eval/ sft/ pretrain/`）；中文维基预训练语料按指令删除（外部锚点暂停）。**预训练语料已拍板（2026-09-22）：Infinity-Instruct `7M_core`**（M7_Core，atomgit `BAAI/Infinity-Instruct`；75 parquet 分片 6.1 GB，实测 750 万条对话 / 全量文本 ~10.2 GB；`tools/convert_infinity.py` 流式转换落 `datasets/pretrain/infinity_m7core.txt`）——已就位：7,449,106 条 / 10.07 GB 文本；语言分布 en 89.9% / zh-cn 10.1%（约 75 万条中文），中文子集经 `langdetect` 字段筛出（约 1 GB 文本，为原维基语料的 ~19 倍）。
 > **SFT 语料已就位（2026-09-23）**：OpenBMB `UltraInteract_sft`（fhz 指定）——288,579 条 / **0.603 GB 文本**，
 > 77,023 条唯一指令（平均 3.75 响应/指令，含偏好树 `parent_id`）；任务构成 Coding 39.8% / Math 56.2% / Logic 4.0%；
@@ -118,9 +118,9 @@ python tests/demo_gen.py --strength         # 加强组（T3.4 内容寻址 + �
 ```
 
 子目录脚本自带 `sys.path` 引导，**从任意工作目录运行都可**；内置语料为冻结副本
-`datasets/eval/internal_corpus.txt`（23,504 字符，逐字复制自架构设计文档 2026-09-21 版）。
+`eval_corpus/internal_corpus.txt`（23,504 字符，逐字复制自架构设计文档 2026-09-21 版）。
 
-> ✅ **语料已与文档解耦（2026-09-21）**：全部评测一律读 `datasets/eval/internal_corpus.txt`，
+> ✅ **语料已与文档解耦（2026-09-21）**：全部评测一律读 `eval_corpus/internal_corpus.txt`，
 > 编辑 `docs/PHD-Net_架构设计.md` **不再**改变语料与基线（原「语料即文档，编辑即漂移」条款作废）。
 > 若有意更换语料：更新冻结副本 → 重跑 `eval_suite.py` + `demo_m9.py` → 回填全部文档数字。
 >
@@ -130,7 +130,7 @@ python tests/demo_gen.py --strength         # 加强组（T3.4 内容寻址 + �
 ## 关键实测（v0.0.0，2026-09-21 重测）
 
 > ⚠ **两组数字不可混用**：`eval_suite`（默认 **256 维栈**）与 `demo_m9`（**128 维小栈**）网络宽度与分词粒度都不同。
-> 下面按口径分开列。所有数值在冻结语料 `datasets/eval/internal_corpus.txt`（**23,504 字符**）上测得——编辑文档不再影响基线。
+> 下面按口径分开列。所有数值在冻结语料 `eval_corpus/internal_corpus.txt`（**23,504 字符**）上测得——编辑文档不再影响基线。
 
 **A 组 · 评测套件口径（默认 256 维栈，训练 18,803 / 评估 4,701 字符，冻结语料 23,504 字符）**
 
@@ -184,3 +184,15 @@ python tests/demo_gen.py --strength         # 加强组（T3.4 内容寻址 + �
 - 与 LLM 的竞争力 / 100B 预估 / 与人脑的同构性 → `docs/PHD-Net_竞争力与脑同构性评估.md`
 - CPU/RAM 量化与迭代结果账 → `docs/PHD-Net_性能评估与迭代方案.md`
 - 一页式介绍 → `docs/index.html`
+
+## CI/CD 与硬件后端
+
+- **测试流水线**：`ci/run_tests.py`（fast 回归 + 逐位对拍 + 精度验证）；
+  GitHub Actions：`.github/workflows/ci.yml`；GitCode：`Jenkinsfile`（控制台启用 Jenkins 流水线指向该文件）。
+- **硬件后端**：CUDA / ROCm / CANN·NPU / CPU 适配与基准见《docs/PHD-Net_硬件后端适配报告》；
+  探针与基准入口 `tools/bench_accel.py`。
+- **读出精度**：`--readout-dtype`（fp32 默认 / fp16 / bf16 / fp8 / fp4；fp64 已停止支持）；
+  逐位与质量验证 `tools/audit_precision.py`。
+- **泛化评测**：`tools/audit_gen_eval.py`（域内 held-out / 近域 / 远域三域 + 2-gram 无泄漏基线）；
+  混合域训练 `--data mix`（sft + pretrain 中文子集样本级轮转）。
+- **治理约定**：架构介绍文档（docs/*.md）不是数据集；冻结评测基准位于 `eval_corpus/`。

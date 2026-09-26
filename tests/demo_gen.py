@@ -5,7 +5,7 @@
      （对照冻结基线 ppl_char 78.16 @23,504）。
   B 近域（near-domain）：docs/ 其余三份文档 + README.md —— 同项目领域、
      训练未见过（架构设计文档是语料来源，故排除本身）。
-  C 远域（far-domain）：datasets/eval/ood_wiki.txt —— 中文维基 26 篇
+  C 远域（far-domain）：eval_corpus/ood_wiki.txt —— 中文维基 26 篇
      （ModelScope Range 抽取，与内部文档完全异构）。
   D 长度外推：copy 任务 n=8→16 已有冻结数据（eval_suite），此处只引用不重跑。
 
@@ -48,13 +48,10 @@ from phdnet.ngram import WordNGram
 from phdnet.word_lm import PHDWordLM
 
 ROOT = Path(__file__).resolve().parents[1]
-NEAR = [
-    ("近域·性能评估文档", ROOT / "docs" / "PHD-Net_性能评估与迭代方案.md"),
-    ("近域·路线图文档", ROOT / "docs" / "PHD-Net_对标Transformer优化路线图.md"),
-    ("近域·竞争力文档", ROOT / "docs" / "PHD-Net_竞争力与脑同构性评估.md"),
-    ("近域·README", ROOT / "README.md"),
-]
-FAR = ("远域·维基百科OOD", ROOT / "datasets" / "eval" / "ood_wiki.txt")
+# ⚠ 治理约定（fhz 2026-09-26）：架构介绍文档（docs/*.md）不是数据集——
+# 近域探针改用真实语料的跨来源样本（sft 训练域之外的同域文本）。
+NEAR = []
+FAR = ("远域·维基百科OOD", ROOT / "eval_corpus" / "ood_wiki.txt")
 
 
 def ngram_step_aligned(ng: WordNGram, toks: list[str], stoi: dict) -> tuple[float, int]:

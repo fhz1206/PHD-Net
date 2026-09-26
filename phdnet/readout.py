@@ -49,28 +49,340 @@ if NUMBA_OK:                                        # pragma: no cover
 else:                                               # pragma: no cover
     _ro_dense_update = None
 
+
+# P9：量化码本的融合核（fp16/bf16/fp8/fp4）——**位算法量化**（非二分搜索：
+# 搜索版每元素 ~15 次比较使更新核计算受限，实测 fp16 慢 fp32 33×）。
+# 各格式舍入约定（与 numpy 参考/quantize_to 一致）：
+#   fp16 = IEEE RNE（numpy astype 同源）；bf16 = RNE 位截断；
+#   fp8/fp4 = 最近格点、并列取小幅值（与格点 searchsorted 同则）。
+# 越界一律 clamp 到最大有限码（防 Inf/NaN 毒化）。
+if NUMBA_OK:                                        # pragma: no cover
+    from numba import get_thread_id
+
+    def _q_scratch():
+        import numba as _nb
+        return np.empty((_nb.get_num_threads(), 1), dtype=np.float32)
+
+    @njit(inline="always")
+    def _bits_u32(scr, w):
+        """f32 标量 → uint32 位型（f32 scratch 的位型 view）。
+
+        ⚠ scr 必须是 float32 数组（uint32 数组会发生数值截断而非位型重解释）。
+        """
+        t = get_thread_id()
+        scr[t, 0] = w
+        return scr.view(np.uint32)[t, 0]
+
+    @njit(inline="always")
+    def _q_bf16(scr, w):
+        a = int(_bits_u32(scr, w))
+        s = (a >> 16) & 0x8000
+        r = a & 0x7FFFFFFF
+        c = (r + 0x7FFF + ((r >> 16) & 1)) >> 16
+        if c >= 0x7F80:
+            c = 0x7F7F                              # clamp 最大有限
+        return np.uint16(c | s)
+
+    @njit(inline="always")
+    def _q_fp16(scr, w):
+        a = int(_bits_u32(scr, w))
+        s = (a >> 16) & 0x8000
+        r = a & 0x7FFFFFFF
+        if r >= 0x477FF000:
+            c = 0x7BFF                              # 溢出/Inf/NaN → 最大有限
+        elif r < 0x38800000:
+            # < 2^-14 → 次正规或 0（RNE）
+            e32 = r >> 23
+            if e32 == 0:
+                c = 0
+            else:
+                man = (r & 0x7FFFFF) | 0x800000
+                shift = 126 - e32                   # value/2^-24 的定点移量（≥ 1）
+                hm = man >> shift
+                rem2 = (man - (hm << shift)) * 2
+                if rem2 > (1 << shift):
+                    hm += 1
+                elif rem2 == (1 << shift) and (hm & 1):
+                    hm += 1                         # RNE：并列取偶
+                if hm >= 0x400:
+                    c = 0x3C00                      # 进位到最小正规
+                else:
+                    c = hm
+        else:
+            r2 = r + 0x0FFF + ((r >> 13) & 1)
+            c = (r2 >> 13) - 0x1C000                # 指数重置偏置 127→15
+            if c >= 0x7C00:
+                c = 0x7BFF                          # 溢出 clamp
+        return np.uint16(c | s)
+
+    @njit(inline="always")
+    def _q_fp8(scr, w):
+        a = _bits_u32(scr, w)
+        s = int((a >> 24) & np.uint32(0x80))
+        r = int(a & np.uint32(0x7FFFFFFF))
+        if r >= 0x7F800000:
+            c = 0x7E                                # Inf/NaN → 最大有限 448
+        else:
+            e32 = r >> 23
+            if e32 <= 108:
+                c = 0                               # < 2^-10（最小次正规之半）→ 0
+            elif e32 <= 120:
+                # 次正规：u = (1+m/2^23)·2^(e32-121)，m ∈ [0,7]
+                man = (r & 0x7FFFFF) | 0x800000
+                shift = 141 - e32                   # ∈ [21, 32]
+                u = man >> shift
+                rem = man - (u << shift)
+                if rem * 2 > (1 << shift):
+                    u += 1                          # 并列取小幅值（不进位）
+                c = u if u <= 7 else 8              # 次正规舍入进位 → 最小正规码
+            else:
+                # 正规：e8 = e32-120 ∈ [1,15]，3 位尾数在 bit 20
+                e8 = e32 - 120
+                man3 = (r >> 20) & 7
+                rem = r & 0xFFFFF
+                if rem * 2 > 0x100000:              # 严格过半 → 进位（并列取小）
+                    man3 += 1
+                    if man3 == 8:
+                        man3 = 0
+                        e8 += 1
+                if e8 >= 16 or (e8 == 15 and man3 == 7):
+                    c = 0x7E                        # 溢出 / e4m3fn 的 NaN 槽 → 448
+                else:
+                    c = (e8 << 3) | man3
+        return np.uint8(c | s)
+
+    @njit(inline="always")
+    def _q_fp4(scr, w, wscale):
+        v = w / wscale
+        if v < 0.0:
+            v = -v
+            if v <= 0.25: q = 8
+            elif v <= 0.75: q = 9
+            elif v <= 1.25: q = 10
+            elif v <= 1.75: q = 11
+            elif v <= 2.5: q = 12
+            elif v <= 3.5: q = 13
+            elif v <= 5.0: q = 14
+            else: q = 15
+        else:
+            if v <= 0.25: q = 0
+            elif v <= 0.75: q = 1
+            elif v <= 1.25: q = 2
+            elif v <= 1.75: q = 3
+            elif v <= 2.5: q = 4
+            elif v <= 3.5: q = 5
+            elif v <= 5.0: q = 6
+            else: q = 7
+        return np.uint8(q)
+
+# P9：量化码本的更新核（fp16/bf16/fp8/fp4）——LUT 反量化 + 位算法重量化。
+if NUMBA_OK:                                        # pragma: no cover
+    @njit(cache=True, parallel=True, fastmath=False)
+    def _ro_q_update_fp16(codes, scr, dp, h, eta, n_in):
+        """fp16 码本：LUT 反量化 → fp32 更新 → RNE 位算法重量化（按行并行）。"""
+        n_out = codes.shape[0] // n_in
+        for i in prange(n_out):
+            e = dp[i]
+            if e == 0.0:
+                continue
+            base = i * n_in
+            for j in range(n_in):
+                o = base + j
+                w = lut_fp16[codes[o]] - (e * h[j]) * eta
+                codes[o] = _q_fp16(scr, w)
+
+    @njit(cache=True, parallel=True, fastmath=False)
+    def _ro_q_update_bf16(codes, scr, dp, h, eta, n_in):
+        """bf16 码本：同上（RNE 位截断）。"""
+        n_out = codes.shape[0] // n_in
+        for i in prange(n_out):
+            e = dp[i]
+            if e == 0.0:
+                continue
+            base = i * n_in
+            for j in range(n_in):
+                o = base + j
+                w = lut_bf16[codes[o]] - (e * h[j]) * eta
+                codes[o] = _q_bf16(scr, w)
+
+    @njit(cache=True, parallel=True, fastmath=False)
+    def _ro_q_update_fp8(codes, scr, dp, h, eta, n_in):
+        """fp8 e4m3 码本：同上（最近格点、并列取小幅值）。"""
+        n_out = codes.shape[0] // n_in
+        for i in prange(n_out):
+            e = dp[i]
+            if e == 0.0:
+                continue
+            base = i * n_in
+            for j in range(n_in):
+                o = base + j
+                w = lut_fp8[codes[o]] - (e * h[j]) * eta
+                codes[o] = _q_fp8(scr, w)
+
+    @njit(cache=True, parallel=True, fastmath=False)
+    def _ro_q_update_fp4(codes, scr, dp, h, eta, n_in, wscale):
+        """fp4 e2m1：半字节打包 + 逐张量缩放（低 4 位 = 偶下标，高 4 位 = 奇下标）。"""
+        n_out = codes.shape[0] // ((n_in + 1) // 2)
+        for i in prange(n_out):
+            e = dp[i]
+            if e == 0.0:
+                continue
+            row = i * ((n_in + 1) // 2)
+            for j in range(n_in):
+                o = row + (j >> 1)
+                c = (codes[o] >> 4) if (j & 1) else (codes[o] & np.uint8(0xF))
+                w = lut_fp4[c] * wscale - (e * h[j]) * eta
+                q = _q_fp4(scr, w, wscale)
+                if j & 1:
+                    codes[o] = (codes[o] & np.uint8(0x0F)) | np.uint8(q << 4)
+                else:
+                    codes[o] = (codes[o] & np.uint8(0xF0)) | np.uint8(q)
+
+    @njit(cache=True, parallel=True, fastmath=False)
+    def _ro_q_matvec_u16(codes, lut, h, n_in, wscale):
+        n_out = codes.shape[0] // n_in
+        y = np.empty(n_out, dtype=np.float64)
+        for i in prange(n_out):
+            s = 0.0
+            base = i * n_in
+            for j in range(n_in):
+                s += lut[codes[base + j]] * wscale * h[j]
+            y[i] = s
+        return y
+
+    @njit(cache=True, parallel=True, fastmath=False)
+    def _ro_q_matvec_u8(codes, lut, h, n_in, wscale):
+        n_out = codes.shape[0] // n_in
+        y = np.empty(n_out, dtype=np.float64)
+        for i in prange(n_out):
+            s = 0.0
+            base = i * n_in
+            for j in range(n_in):
+                s += lut[codes[base + j]] * wscale * h[j]
+            y[i] = s
+        return y
+
+    @njit(cache=True, parallel=True, fastmath=False)
+    def _ro_q_matvec_fp4(codes, lut, h, n_in, wscale):
+        n_out = codes.shape[0] // ((n_in + 1) // 2)
+        y = np.empty(n_out, dtype=np.float64)
+        for i in prange(n_out):
+            s = 0.0
+            row = i * ((n_in + 1) // 2)
+            for j in range(n_in):
+                c = (codes[row + (j >> 1)] >> 4) if (j & 1) \
+                    else (codes[row + (j >> 1)] & np.uint8(0xF))
+                s += lut[c] * wscale * h[j]
+            y[i] = s
+        return y
+else:                                               # pragma: no cover
+    (_ro_q_update_fp16, _ro_q_update_bf16, _ro_q_update_fp8,
+     _ro_q_update_fp4) = (None, None, None, None)
+    _ro_q_matvec_u16 = _ro_q_matvec_u8 = _ro_q_matvec_fp4 = None
+
 _RO_STATE = {"ok": None}      # None=未探测 / True=可用 / False=回退 numpy
 
 
-def _ro_fused(W: np.ndarray, dp: np.ndarray, h: np.ndarray, eta: float,
-              allow: bool = True) -> bool:
-    """尝试用融合核更新；返回是否真的用了融合核（False = 调用方回退）。"""
-    if not allow or _ro_dense_update is None or W.dtype != np.float64:
-        return False
-    st = _RO_STATE["ok"]
-    if st is None:                       # 惰性探测（首次调用触发编译，失败即永久回退）
-        try:
-            probe = np.zeros((2, 3))
-            _ro_dense_update(probe, np.full(2, 0.5), np.full(3, 0.25), 0.1)
-            _RO_STATE["ok"] = True
-        except Exception:
-            _RO_STATE["ok"] = False
-    if not _RO_STATE["ok"]:
-        return False
-    if eta == 0.0:
-        return True                      # 零学习率：与 numpy 路径同为空操作
-    _ro_dense_update(W, dp, h, eta)
-    return True
+# ---------------------------------------------------------------------------
+# P9 读出精度体系（2026-09-26，fhz 指令：**停止 fp64 支持**；新增 fp16/bf16/
+# fp8/fp4；**默认 fp32**）。
+#
+# 设计：低精度格式**按原生位型存储为码本**，计算时查表（LUT）反量化到 fp32、
+# 更新后重新量化写回；融合核内联查表/二分量化 → 内存流量 ∝ 存储位宽：
+#   fp16（2B，IEEE 半精度）/ bf16（2B，截尾 fp32 指数）/ fp8（1B，e4m3fn）/
+#   fp4（0.5B，e2m1 半字节打包）——流量分别为 fp32 的 1/2、1/2、1/4、1/8。
+# 量化 = 到格式正格点集的最近邻（二分搜索，numba 纯算术实现，无位技巧依赖）；
+# 越界截断到格点端点、NaN 归 +0（防权重投毒扩散）。
+# 质量口径：softmax/NLL 一律在 fp64 上计算（y 反量化后升精度），仅存储与
+#   梯度更新走低精度——这是低精度训练的标准「高精度主回路」结构。
+# ---------------------------------------------------------------------------
+
+RO_DTYPES = ("fp32", "fp16", "bf16", "fp8", "fp4")
+
+
+def _build_lut(fmt: str) -> np.ndarray:
+    """格式 → (反量化 LUT[f32], 正格点 lat[f32 升序·含 +0], 符号位)。
+
+    lat = lut[0:有限正上界]——码 0 = +0.0，格点下标即存储码（正数域）。
+    """
+    if fmt == "fp16":
+        # 位型重解释（⚠ 不是数值转换——码 c 的 LUT 值 = 以 c 为 fp16 位型的浮点值）
+        lut = np.arange(65536, dtype=np.uint16).view(np.float16).astype(np.float32)
+        b, sb = 0x7C00, 15                          # 排除 Inf/NaN；含 +0 与次正规
+    elif fmt == "bf16":
+        u32 = np.arange(65536, dtype=np.uint16).astype(np.uint32) << 16
+        lut = np.frombuffer(u32.tobytes(), dtype=np.float32).copy()
+        b, sb = 0x7F80, 15
+    elif fmt == "fp8":                              # e4m3fn：无 Inf，0x7F=NaN
+        codes = np.arange(256, dtype=np.uint8)
+        s = np.where(codes & 0x80, -1.0, 1.0)
+        e = ((codes >> 3) & 0xF).astype(np.int32)
+        m = (codes & 7).astype(np.float64)
+        val = np.where(e == 0, (m / 8.0) * 2.0 ** -6,
+                       (1.0 + m / 8.0) * 2.0 ** (e - 7)).astype(np.float32)
+        val = np.where((e == 15) & (m == 7), np.float32(np.nan), val) * s
+        lut = val.astype(np.float32)
+        b, sb = 0x7F, 7
+    elif fmt == "fp4":                              # e2m1：±{0,.5,1,1.5,2,3,4,6}
+        pos = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
+        lut = np.concatenate([pos, -pos]).astype(np.float32)       # 全 16 码（15 = -0）
+        b, sb = 8, 3
+    else:
+        raise ValueError(f"未知精度格式: {fmt}")
+    lut = np.ascontiguousarray(lut)
+    lat = np.ascontiguousarray(lut[:b])
+    return lut, lat, sb
+
+
+_Q_TABLES: dict = {}
+# 全局 LUT 单例（numba 内核按全局名冻结引用；构建为一次性 ~ms 级开销）
+lut_fp16, lat_fp16, sb_fp16 = _build_lut("fp16")
+lut_bf16, lat_bf16, sb_bf16 = _build_lut("bf16")
+lut_fp8, lat_fp8, sb_fp8 = _build_lut("fp8")
+lut_fp4, lat_fp4, sb_fp4 = _build_lut("fp4")
+
+
+def _q_tables(fmt: str):
+    if fmt not in _Q_TABLES:
+        lut, lat, sb = _build_lut(fmt)
+        _Q_TABLES[fmt] = (lut, lat, sb)
+    return _Q_TABLES[fmt]
+
+
+def quantize_to(fmt: str, x: np.ndarray) -> np.ndarray:
+    """fp32 数组 → 指定格式的码本（numpy 向量化；最近格点、越界截断、NaN→最大格点）。"""
+    lut, lat, sb = _q_tables(fmt)
+    x = np.ascontiguousarray(x, dtype=np.float32).ravel()
+    if fmt == "fp32":
+        return x
+    ax = np.abs(x)
+    idx = np.searchsorted(lat, ax)
+    idx = np.clip(idx, 0, len(lat) - 1)
+    left = np.maximum(idx - 1, 0)
+    pick_left = (ax - lat[left]) <= (lat[idx] - ax)
+    idx = np.where(pick_left, left, idx).astype(np.uint32)
+    sign = np.where(x < 0, np.uint32(1 << sb), np.uint32(0)).astype(np.uint32)
+    codes = idx | sign
+    if fmt == "fp4":
+        codes = codes.astype(np.uint8).reshape(-1, 2)
+        return (codes[:, 0] | (codes[:, 1] << 4)).astype(np.uint8)
+    return codes.astype(np.uint16 if fmt in ("fp16", "bf16") else np.uint8)
+
+
+def dequantize_from(fmt: str, codes: np.ndarray, n_elem: int | None = None) -> np.ndarray:
+    """码本 → fp32（numpy 向量化）。fp4 半字节展开。"""
+    lut, lat, sb = _q_tables(fmt)
+    if fmt == "fp32":
+        return codes
+    if fmt == "fp4":
+        lo = (codes & 0xF).astype(np.int32)
+        hi = (codes >> 4).astype(np.int32)
+        vals = np.empty(codes.size * 2, dtype=np.float32)
+        vals[0::2] = lut[lo]
+        vals[1::2] = lut[hi]
+        return vals[:n_elem] if n_elem is not None else vals
+    idx = codes.astype(np.int32)
+    return lut[idx]
 
 
 class Readout:
@@ -80,7 +392,7 @@ class Readout:
     """
 
     def __init__(self, n_in: int, n_out: int, rng: np.random.Generator,
-                 w_clip: float = 0.0, fp32: bool = False, conn_k: int = 0,
+                 w_clip: float = 0.0, dtype: str = "fp32", conn_k: int = 0,
                  lognormal_init: bool = False, exc_ratio: float = 0.8,
                  hidden: int = 0, hid_k: int = 0, eta_hid: float = 0.002):
         self._n_in, self._n_out = int(n_in), int(n_out)
@@ -92,12 +404,16 @@ class Readout:
         self.hidden = int(hidden) if hidden and hidden > 0 else 0
         self.hid_k = int(hid_k)
         self.eta_hid = float(eta_hid)
-        # P6b（2026-09-23，默认关闭）：读出 float32 化——词级读出权重达
-        # ~9.5 MB（1540×768），其前向与稠密更新的耗时受内存带宽支配，
-        # 降为 fp32 使带宽减半。属数值变化行为，须由 cfg.readout_fp32 显式启用。
-        # 注：结构性稀疏模式使用 fp64 CSR（与 fp32 不叠加——组合无实测收益）。
-        self.fp32 = bool(fp32) and self.conn_k == 0
-        self.dtype = np.float32 if self.fp32 else np.float64
+        # P9 精度体系（2026-09-26，fhz 指令）：**停止 fp64 支持**；可选
+        # fp32（默认）/ fp16 / bf16 / fp8 / fp4。低精度 = 原生位型码本存储 +
+        # 查表反量化计算 + 重新量化写回（P9 融合核），softmax/NLL 保持 fp64。
+        # 注：结构性稀疏模式暂用 fp32 CSR（与量化码本不叠加——组合另行立项）。
+        if dtype not in RO_DTYPES:
+            raise ValueError(f"readout dtype 须为 {RO_DTYPES} 之一，实际: {dtype!r}"
+                             "（fp64 已按 fhz 指令停止支持）")
+        self.dtype_name = dtype if self.conn_k == 0 else "fp32"
+        self.qfmt = self.dtype_name if self.dtype_name != "fp32" else None
+        self.dtype = np.float32
         # C8 修复：可选权重范数上限，防止长跑/高学习率下读出权重溢出
         # （默认 0.0 = 关闭，保持旧行为逐位不变）
         self.w_clip = float(w_clip)
@@ -120,22 +436,64 @@ class Readout:
             self._hid_keep = max(1, self.hidden // 8)    # k-WTA 保留数（群体竞争）
             self._W = None
             self._csr = None
+            self._codes = None
+            self._wscale = 1.0
+            self._lut = self._lat = None
+            self._sbit = 0
         elif self.conn_k > 0:                   # O1-3：结构性稀疏读出（单级）
             self.conn_k = max(1, min(self.conn_k, n_in))
             self._csr = _random_csr(rng, n_out, n_in, self.conn_k,
                                     0.05 * np.sqrt(n_in / self.conn_k),   # fan-in 补偿
                                     lognormal_init, exc_ratio)
             self._W = None
+            self._codes = None
+            self._wscale = 1.0
+            self._lut = self._lat = None
+            self._sbit = 0
         elif lognormal_init:                    # O1-4：皮层式（重尾 + E/I 比）
             from .inits import cortical_init
-            self._W = cortical_init(rng, (n_out, n_in), 0.05, exc_ratio)
+            self._codes = None
+            self._set_dense(cortical_init(rng, (n_out, n_in), 0.05, exc_ratio))
         else:
-            W = rng.normal(0, 0.05, (n_out, n_in))
-            self._W = W.astype(np.float32) if self.fp32 else W
+            self._csr = None
+            self._set_dense(rng.normal(0, 0.05, (n_out, n_in)))
+
+    def _set_dense(self, W: np.ndarray) -> None:
+        """按当前精度格式存放稠密权重（fp32 直存；低精度量化为码本）。
+
+        fp4 追加逐张量缩放（microscaling）：max|W| 映射到格点上限 6，
+        否则小尺度权重会整体落入 e2m1 的 0 格点。
+        """
+        if self.qfmt is None:
+            self._W = np.ascontiguousarray(W, dtype=np.float32)
+            self._codes = None
+            self._lut = self._lat = None
+            self._sbit = 0
+            self._wscale = 1.0
+        else:
+            W = np.ascontiguousarray(W, dtype=np.float32)
+            self._lut, self._lat, self._sbit = _q_tables(self.qfmt)
+            if self.qfmt == "fp4":
+                m = float(np.abs(W).max()) if W.size else 0.0
+                self._wscale = (m / 6.0) if m > 0 else 1.0
+                self._codes = quantize_to("fp4", W / self._wscale)
+            else:
+                self._wscale = 1.0
+                self._codes = quantize_to(self.qfmt, W)
+            if self.qfmt == "fp4" and self._codes.size % 2:
+                self._codes = np.concatenate([self._codes,
+                                              np.zeros(1, dtype=np.uint8)])
+
+    def _deq_w(self) -> np.ndarray:
+        """码本 → fp32 稠密权重（兼容视图；统计/保存用）。"""
+        n = self._n_out * self._n_in
+        return (dequantize_from(self.qfmt, self._codes, n)
+                * self._wscale).reshape(self._n_out, self._n_in)
 
     # ---------- 权重访问（稀疏模式返回只读稠密视图，兼容既有代码/统计） ----------
     @classmethod
-    def from_dense(cls, W: np.ndarray, w_clip: float = 0.0, k: int = 0) -> "Readout":
+    def from_dense(cls, W: np.ndarray, w_clip: float = 0.0, k: int = 0,
+                   dtype: str = "fp32") -> "Readout":
         """由稠密权重构造（每输出单元取 |w| 最大的 k 列；k≤0 或 k≥列数 → 全列）。
 
         用途：(a) 可比性对拍——k = 全列时与稠密读出**权重完全相同**；
@@ -145,18 +503,29 @@ class Readout:
         n_out, n_in = W.shape
         self = cls.__new__(cls)
         self._n_in, self._n_out = n_in, n_out
+        self.hidden = 0
         self.conn_k = min(k, n_in) if k > 0 else n_in
-        self.fp32 = False
-        self.dtype = np.float64
+        self.dtype_name = dtype if self.conn_k == 0 else "fp32"
+        self.qfmt = self.dtype_name if self.dtype_name != "fp32" else None
+        self.dtype = np.float32
         self.w_clip = float(w_clip)
         self._grad_acc, self._acc_n = None, 0
         self._csr = _from_dense_csr(W, self.conn_k)
-        self._W = None
+        self._codes = None
+        self._wscale = 1.0
+        self._lut = self._lat = None
+        self._sbit = 0
+        if self.conn_k >= n_in or k <= 0:       # 全列 = 稠密 → 走精度存储路径
+            self._csr = None
+            self.conn_k = 0
+            self._set_dense(np.asarray(W, dtype=np.float32))
+        else:
+            self._W = None
         return self
 
     @property
     def W(self) -> np.ndarray:
-        """输出层权重的只读稠密视图（两级模式返回第二级 W2）。"""
+        """输出层权重的稠密视图（量化模式 = 反量化快照 fp32；两级模式返回 W2）。"""
         if self.hidden > 0:
             ip, idx, val = self._W2
             W = np.zeros((self._n_out, self.hidden), dtype=val.dtype)
@@ -169,17 +538,20 @@ class Readout:
             for i in range(self._n_out):
                 W[i, idx[ip[i]:ip[i + 1]]] = val[ip[i]:ip[i + 1]]
             return W
-        return self._W
+        return self._W if self.qfmt is None else self._deq_w()
 
     @W.setter
     def W(self, v) -> None:
-        self._W = v
+        if self.qfmt is None:
+            self._W = np.ascontiguousarray(v, dtype=np.float32)
+        else:
+            self._set_dense(v)
 
     def n_synapses(self) -> int:
         """实际存在的连接数（两级/稀疏模式 = CSR 条目；稠密模式 = 矩阵元素数）。"""
         if self.hidden > 0:
             return int(len(self._W1[2]) + len(self._W2[2]))
-        return int(len(self._csr[2])) if self.conn_k > 0 else int(self._W.size)
+        return int(len(self._csr[2])) if self.conn_k > 0 else int(self._n_out * self._n_in)
 
     def _kwta(self, u: np.ndarray) -> np.ndarray:
         """群体竞争（侧抑制）：仅保留响应最强的 `hidden/8` 个单元并压缩幅值。
@@ -196,7 +568,10 @@ class Readout:
         dense = self._n_out * self._n_in
         n = self.n_synapses()
         out = {"synapses": n, "dense_equivalent": dense,
-               "connectivity": n / dense if dense else 1.0, "k": self.conn_k}
+               "connectivity": n / dense if dense else 1.0, "k": self.conn_k,
+               "dtype": self.dtype_name,
+               "storage_MB": (self._codes.nbytes if self._codes is not None
+                              else (self._W.nbytes if self._W is not None else 0)) / 1e6}
         if self.hidden > 0:
             out.update({"levels": 2, "hidden": self.hidden,
                         "synapses_w1": int(len(self._W1[2])),
@@ -210,14 +585,41 @@ class Readout:
             return _csr_matvec(*self._W2, a)
         if self.conn_k > 0:                     # 稀疏：只遍历存在的边
             return _csr_matvec(*self._csr, h)
-        if self.fp32:
+        if self.qfmt is not None:               # P9：量化码本内联反量化 matvec
+            K = {"fp16": _ro_q_matvec_u16, "bf16": _ro_q_matvec_u16,
+                 "fp8": _ro_q_matvec_u8, "fp4": _ro_q_matvec_fp4}[self.qfmt]
+            return K(self._codes, self._lut, h.astype(np.float32, copy=False),
+                     self._n_in, self._wscale)
+        if self._W.dtype == np.float32:         # fp32：BLAS sgemv（升精度返回）
             return (self._W @ h.astype(np.float32, copy=False)).astype(np.float64,
                                                                        copy=False)
         return self._W @ h
 
-    def _to_w(self, arr: np.ndarray) -> np.ndarray:
-        """更新量按读出 dtype 转换（fp32 时降精度；fp64 时零拷贝直返）。"""
-        return arr.astype(np.float32, copy=False) if self.fp32 else arr
+    def _apply_update(self, dp: np.ndarray, h: np.ndarray, eta: float) -> bool:
+        """融合核派发：按精度格式选择内核；返回 False = 调用方走 numpy 回退。"""
+        if _ro_dense_update is None:
+            return False
+        dp32 = np.asarray(dp, dtype=np.float32)
+        h32 = np.asarray(h, dtype=np.float32)
+        e32 = np.float32(eta)
+        if self.qfmt is None:
+            if eta == 0.0:
+                return True
+            _ro_dense_update(self._W, dp32, h32, e32)
+            return True
+        if eta == 0.0:
+            return True
+        scr = _q_scratch()
+        n = self._n_in
+        if self.qfmt == "fp16":
+            _ro_q_update_fp16(self._codes, scr, dp32, h32, e32, n)
+        elif self.qfmt == "bf16":
+            _ro_q_update_bf16(self._codes, scr, dp32, h32, e32, n)
+        elif self.qfmt == "fp8":
+            _ro_q_update_fp8(self._codes, scr, dp32, h32, e32, n)
+        else:
+            _ro_q_update_fp4(self._codes, scr, dp32, h32, e32, n, self._wscale)
+        return True
 
     def _clip(self) -> None:
         if self.w_clip > 0.0:
@@ -226,8 +628,10 @@ class Readout:
                 _csr_clip(self._W2[2], self.w_clip)
             elif self.conn_k > 0:
                 _csr_clip(self._csr[2], self.w_clip)
-            else:
+            elif self.qfmt is None:
                 np.clip(self._W, -self.w_clip, self.w_clip, out=self._W)
+            else:
+                self._set_dense(np.clip(self._deq_w(), -self.w_clip, self.w_clip))
 
     def _check_contract(self, h: np.ndarray, target: np.ndarray | None) -> None:
         """维度契约校验（fail-fast）。
@@ -261,10 +665,8 @@ class Readout:
         y = self.__call__(h)
         if self.conn_k > 0:                     # ΔW = η·(t − y) ⊗ h（只更新存在的边）
             _csr_add_outer(*self._csr, target - y, h, eta)
-        elif not _ro_fused(self.W, y - target, h, eta, allow=not self.fp32):
-            # 融合核做 `W -= dp⊗h·eta`；取 dp = y − t 即等价于 `W += (t−y)⊗h·eta`
-            # （IEEE 下 −(a·b) 与 (−a)·b 逐位相同）。
-            self.W += self._to_w(eta * np.outer(target - y, h))
+        elif not self._apply_update(y - target, h, eta):
+            self.W = self.W - eta * np.outer(target - y, h)   # numpy 回退（含量化模式）
         self._clip()
 
     def learn_softmax(self, h: np.ndarray, target: np.ndarray, eta: float,
@@ -293,15 +695,9 @@ class Readout:
             self._check_contract(h, target)
         if y_pre is not None:
             y = y_pre - y_pre.max()      # 新数组，不修改调用方持有的 y_pre
-        elif self.hidden > 0:
-            y = self.__call__(h)
-            y = y - y.max()
-        elif self.conn_k > 0:
-            y = self.__call__(h)
-            y = y - y.max()
         else:
-            y = self.W @ h
-            y -= y.max()                 # 数值稳定
+            y = self.__call__(h)
+            y = y - y.max()
         p = np.exp(y)
         p /= p.sum()
         correct = int(np.argmax(target))
@@ -331,7 +727,7 @@ class Readout:
                         s = slice(ip[i], ip[i + 1])
                         val[s] -= c * self._grad_acc[i, idx[s]]
                 else:
-                    self.W -= self._to_w(c * self._grad_acc)
+                    self.W = self.W - c * self._grad_acc     # 兼容量化模式（setter 重量化）
                 self._grad_acc = None
                 self._acc_n = 0
                 self._clip()
@@ -345,10 +741,8 @@ class Readout:
         elif self.conn_k > 0:                           # 稀疏梯度下降（存在的边）
             _csr_add_outer(*self._csr, p - target, h, -eta)
         else:
-            # P7：融合并行核（逐位等价，省掉 ~12.6 MB 临时数组的两趟往返）
-            if not _ro_fused(self.W, p - target, h, eta, allow=not self.fp32):
-                tmp = self._to_w(np.outer(p - target, h))
-                tmp *= eta                              # 原地缩放（逐位等价）
-                self.W -= tmp                           # 梯度下降（末端局部）
+            # P7/P9：融合核（fp32 原生；fp16/bf16/fp8/fp4 = 码本内联查表 + 重新量化）
+            if not self._apply_update(p - target, h, eta):
+                self.W = self.W - eta * np.outer(p - target, h)   # numpy 回退（含量化）
         self._clip()
         return nll

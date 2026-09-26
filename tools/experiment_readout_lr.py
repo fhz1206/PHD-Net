@@ -24,7 +24,7 @@ if str(_ROOT) not in sys.path:
 from phdnet.config import PHDNetConfig          # noqa: E402
 from phdnet.word_lm import PHDWordLM            # noqa: E402
 
-CORPUS = _ROOT / "datasets" / "eval" / "internal_corpus.txt"
+CORPUS = _ROOT / "eval_corpus" / "internal_corpus.txt"
 BASE = dict(n_sdr=256, k_sparse=32, n_mid=256, n_top=256,
             eta_pc=0.0, eta_oja=0.0, eta_stdp=0.02, seed=11, pred_in_readout=True)
 SEG = dict(max_len=6, min_count=5, min_entropy=1.0)

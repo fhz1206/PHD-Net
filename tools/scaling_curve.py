@@ -5,7 +5,7 @@
 
 ============================================================================
 训练口径（重要，务必先读）：
-  - 词表由【全语料】(datasets/eval/internal_corpus.txt, 23,504 字符) 构建，
+  - 词表由【全语料】(eval_corpus/internal_corpus.txt, 23,504 字符) 构建，
     三点共用同一 SEG（max_len=6, min_count=5, min_entropy=1.0）→ 词表大小
     对三点为共同项（不计入口径差异），符合"固定配方"。
   - 评测段 = 冻结语料后 20%（4,701 字符），三点共用、不变。
@@ -40,7 +40,7 @@ from phdnet.config import PHDNetConfig
 from phdnet.word_lm import PHDWordLM
 from phdnet.model import count_params
 
-DOC = str(ROOT / "datasets" / "eval" / "internal_corpus.txt")
+DOC = str(ROOT / "eval_corpus" / "internal_corpus.txt")
 SEG = dict(max_len=6, min_count=5, min_entropy=1.0)
 BASE = dict(n_sdr=256, k_sparse=32, n_mid=256, n_top=256,
             eta_pc=0.0, eta_oja=0.0, eta_stdp=0.02, seed=11,

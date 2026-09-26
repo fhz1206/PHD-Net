@@ -81,7 +81,7 @@ def main() -> None:
     cfg = PHDNetConfig(**cfg_d)
     rng = np.random.default_rng(11)
     net = PHDNet(cfg)
-    text = (_ROOT / "datasets" / "eval" / "internal_corpus.txt").read_text(encoding="utf-8")
+    text = (_ROOT / "eval_corpus" / "internal_corpus.txt").read_text(encoding="utf-8")
     # 触发一次前向以便测量激活稀疏度（x 维度 = cfg.n_input，不是 k_sparse）
     x_in = np.zeros(cfg.n_input)
     x_in[: max(1, cfg.n_input // 4)] = 1.0

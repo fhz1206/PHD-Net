@@ -9,7 +9,7 @@
                 eta_pc=0.0, eta_oja=0.0, eta_stdp=0.02, seed=11,
                 pred_in_readout=True)
     SEG  = dict(max_len=6, min_count=5, min_entropy=1.0)
-  冻结语料 datasets/eval/internal_corpus.txt（23,504 字符），训练段=前 80%，评估段=后 20%。
+  冻结语料 eval_corpus/internal_corpus.txt（23,504 字符），训练段=前 80%，评估段=后 20%。
 - 词级 LM 用法（tests/eval_tasks_lm.py 的 task1_lm）：
     lm = PHDWordLM(full_text, PHDNetConfig(**BASE), seg_kwargs=SEG)
     lm.train_stream(train_txt);  m = lm.evaluate(eval_txt)  # m["ppl_char"]
@@ -42,7 +42,7 @@ if str(_ROOT) not in sys.path:
 from phdnet.config import PHDNetConfig          # noqa: E402
 from phdnet.word_lm import PHDWordLM            # noqa: E402
 
-CORPUS = _ROOT / "datasets" / "eval" / "internal_corpus.txt"
+CORPUS = _ROOT / "eval_corpus" / "internal_corpus.txt"
 LOG = _ROOT / "outputs" / "ablation_modules.log"
 
 # ── 评测口径（严格照 tests/eval_common.py）─────────────────────────────

@@ -22,7 +22,7 @@ from phdnet.corpus import load_text
 from phdnet.word_lm import PHDWordLM
 
 TMP = _HERE / "_ckpt_roundtrip.npz"
-text = load_text(_ROOT / "datasets" / "eval" / "internal_corpus.txt", limit_chars=200000)
+text = load_text(_ROOT / "eval_corpus" / "internal_corpus.txt", limit_chars=200000)
 
 
 def build():

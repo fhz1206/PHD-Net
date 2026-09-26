@@ -8,7 +8,7 @@
   ① 生成式回放稳定读出（readout_replay / sleep 生成式回放）；
   ② 发育期表征巩固后彻底冻结读出并重训练（pc_dev_steps + eta_readout_anneal/floor）。
 
-评测口径（严格照用）：冻结语料 datasets/eval/internal_corpus.txt（23,504 字符），
+评测口径（严格照用）：冻结语料 eval_corpus/internal_corpus.txt（23,504 字符），
 训练段 = 前 80% 的**前 4000 字符**，评估段 = 后 20%（4,701 字符）。
 词级 LM：PHDWordLM，BASE + SEG 同 eval_common.py / 任务说明。
 
@@ -37,7 +37,7 @@ if str(_ROOT) not in sys.path:
 from phdnet.config import PHDNetConfig
 from phdnet.word_lm import PHDWordLM
 
-CORPUS = _ROOT / "datasets" / "eval" / "internal_corpus.txt"
+CORPUS = _ROOT / "eval_corpus" / "internal_corpus.txt"
 LOG = _ROOT / "outputs" / "experiment_plasticity.log"
 
 # 与 eval_common.BASE / 任务说明完全一致

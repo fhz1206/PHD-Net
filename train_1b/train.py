@@ -63,6 +63,7 @@ from config_1b import PRESETS, SEG_KWARGS, build_cfg                 # noqa: E40
 from config_1b import capacity_report, print_capacity_report         # noqa: E402
 from corpus_stream import PrefetchChars, SEP, StreamingTokenizer     # noqa: E402
 from corpus_stream import build_vocab_text, char_chunks              # noqa: E402
+from corpus_stream import mix_chunks, zh_char_chunks                 # noqa: E402
 from phdnet.corpus import expand_paths                               # noqa: E402
 from phdnet.model import count_params                                # noqa: E402
 from phdnet.word_encoder import WordTokenizer                         # noqa: E402
@@ -77,8 +78,18 @@ DATA_FILES = {
     # （fhz 2026-09-25 指令，与 tools/train_production.py 同步）。
     "sft": _ROOT / "datasets" / "sft" / "sft_000.*.parquet",
     "pretrain_zh": _ROOT / "datasets" / "pretrain" / "pretrain_*.parquet",
-    "eval": _ROOT / "datasets" / "eval" / "internal_corpus.txt",
+    "eval": _ROOT / "eval_corpus" / "internal_corpus.txt",
+    # 泛化优化 P0（2026-09-25 审计）：sft 与 pretrain 中文子集样本级轮转混合
+    "mix": None,
 }
+
+
+def stream_factory(data: str):
+    """返回 () -> 新的独立样本字符块流（mix = sft 与 pretrain 中文源轮转交错）。"""
+    if data == "mix":
+        return lambda: mix_chunks([char_chunks(DATA_FILES["sft"]),
+                                   zh_char_chunks(DATA_FILES["pretrain_zh"])])
+    return lambda: char_chunks(DATA_FILES[data])
 
 _STOP = {"flag": False}
 
@@ -137,6 +148,9 @@ def main() -> None:
                     help="smoke=管线验证 / 1b=标准档(容量≥1B) / 1b_max=大主干档")
     ap.add_argument("--data", choices=list(DATA_FILES), default="sft")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
+    ap.add_argument("--readout-dtype", default="fp32",
+                    choices=["fp32", "fp16", "bf16", "fp8", "fp4"],
+                    help="读出精度（P9：默认 fp32；fp64 已停止支持）")
     ap.add_argument("--big-n", type=int, default=0, help="覆盖大空间神经元数（0=用预设）")
     ap.add_argument("--csr-online", action="store_true",
                     help="大空间表切换在线可写 CSR（长跑内存 ≈10×省，逐位等价已验证）")
@@ -186,19 +200,38 @@ def main() -> None:
 
     cfg = build_cfg(args.preset, args.width, args.big_n,
                     args.csr_online, args.readout_conn_k, args.seed)
+    cfg.readout_dtype = args.readout_dtype            # P9 精度（默认 fp32）
 
-    data_path = DATA_FILES[args.data]
-    try:
-        data_files = expand_paths(data_path)
-    except FileNotFoundError as e:
-        print(f"数据文件不存在: {e}")
-        sys.exit(1)
+    if args.data == "mix":
+        try:
+            data_files = (expand_paths(DATA_FILES["sft"])
+                          + expand_paths(DATA_FILES["pretrain_zh"]))
+        except FileNotFoundError as e:
+            print(f"数据文件不存在: {e}")
+            sys.exit(1)
+    else:
+        data_path = DATA_FILES[args.data]
+        try:
+            data_files = expand_paths(data_path)
+        except FileNotFoundError as e:
+            print(f"数据文件不存在: {e}")
+            sys.exit(1)
     total_mb = sum(p.stat().st_size for p in data_files) / 1e6
     dl_w = max(1, min(vw, len(data_files)))    # 数据加载进程数（≤文件数）
 
     # ── 词表构建（采样 or 全量扫描；训练数据本身永不截断）──
     # 词涌现 + token 收集均多核（fhz 2026-09-25：核心数×0.8；=1 时走串行原路径）
-    vocab_text = build_vocab_text(data_path, args.vocab_sample_chars, SEP)
+    if args.data == "mix":
+        parts: list[str] = []
+        nvc = 0
+        for c in stream_factory("mix")():
+            parts.append(c)
+            nvc += len(c)
+            if nvc >= args.vocab_sample_chars:
+                break
+        vocab_text = "".join(parts)[:args.vocab_sample_chars]
+    else:
+        vocab_text = build_vocab_text(data_path, args.vocab_sample_chars, SEP)
     t_v0 = time.perf_counter()
     seg = build_segmenter_parallel(vocab_text, SEG_KWARGS, args.vocab_workers)
     if vw > 1:
@@ -219,8 +252,10 @@ def main() -> None:
                       f"（{time.perf_counter() - t_v:.0f}s）", flush=True)
 
             seen, n_seen = scan_vocab_parallel(seg.vocab, seg.max_len,
-                                               PrefetchChars(data_path, SEP), vw,
-                                               progress=_scan_prog)
+                                               (stream_factory(args.data)()
+                                                if args.data == "mix"
+                                                else PrefetchChars(data_path, SEP)),
+                                               vw, progress=_scan_prog)
         else:
             for tk in StreamingTokenizer(seg, char_chunks(data_path, SEP)):
                 seen.add(tk)
@@ -262,7 +297,7 @@ def main() -> None:
           f" | 分片 {len(data_files)} 个（{total_mb:.0f} MB，流式不截断）")
     print(f"epochs={args.epochs} | 预算 tokens={args.tokens or '∞'} "
           f"minutes={args.minutes or '∞'} | 里程碑={args.context_milestone or '∞'}"
-          f" | 词表并行={vw} | 数据预取=多进程×{dl_w}"
+          f" | 词表并行={vw} | 数据预取={'轮转混合(串行源)' if args.data == 'mix' else f'多进程×{dl_w}'}"
           f" | 构建耗时 {time.perf_counter() - t0:.1f}s")
     print_capacity_report(capacity_report(cfg, vocab))
     print(f"可塑参数（构建时实际，count_params 口径）: {count_params(lm.net):,}")
@@ -292,8 +327,13 @@ def main() -> None:
     for ep in range(args.epochs):
         if _STOP["flag"] or (args.tokens and i - done >= args.tokens):
             break
-        # 多核数据加载：生产者进程预取（与 char_chunks 产出逐位一致）
-        stream = StreamingTokenizer(lm.tok.seg, PrefetchChars(data_path, SEP))
+        # 多核数据加载：生产者进程预取（与 char_chunks 产出逐位一致）；
+        # mix 模式为样本级轮转交错流（串行源，混合语义需要全局轮转顺序）
+        if args.data == "mix":
+            src = stream_factory("mix")()
+        else:
+            src = PrefetchChars(data_path, SEP)
+        stream = StreamingTokenizer(lm.tok.seg, src)
         it = iter(stream)
         p2 = None                                          # t_{i-1}（epoch 首步 prev 断开）
         p1 = next(it, None)                                # t_i

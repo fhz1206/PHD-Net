@@ -12,7 +12,7 @@ parquet 的好处：列式 + 内建压缩（实测 UltraInteract 616 MB → 87 M
 流式训练，不必整文件载入内存）。
 
 **兼容性铁律**：本模块只**新增**读取能力，不改动任何既有默认路径——
-`tests/eval_common.py` 等仍读 `datasets/eval/internal_corpus.txt`（纯文本），
+`tests/eval_common.py` 等仍读 `eval_corpus/internal_corpus.txt`（纯文本），
 行为逐位不变；parquet 仅在显式给出 `.parquet` 路径时启用。
 
 用法：

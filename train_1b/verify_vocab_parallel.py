@@ -32,7 +32,7 @@ from vocab_parallel import build_segmenter_parallel                     # noqa: 
 from vocab_parallel import iter_tokens_parallel, parallel_head_tokens   # noqa: E402
 from vocab_parallel import scan_vocab_parallel                          # noqa: E402
 
-EVAL = _ROOT / "datasets" / "eval" / "internal_corpus.txt"
+EVAL = _ROOT / "eval_corpus" / "internal_corpus.txt"
 
 _FAILURES: list[str] = []
 

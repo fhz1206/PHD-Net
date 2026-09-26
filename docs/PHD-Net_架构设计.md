@@ -1,4 +1,6 @@
 # PHD-Net：预测-赫布-双记忆网络
+
+> 📌 **现状快照（2026-09-27 整理）**：本文已按「删除过时与历史消息、只保留现状」的原则整理；引用已删除语料/旧基线的历史段落以现状结论为准，当前基线与口径见《性能评估与迭代方案（现状版)》。
 ### Predictive coding × Hebbian plasticity × Dual-memory Network
 
 > 一个完全不依赖自注意力（Self-Attention）的类脑模型架构——总设计文档（基础架构 M1–M6 ＋ 认知层 M7–M12，外扩 M13 上下文漂移情景记忆）。
@@ -6,10 +8,10 @@
 > 配套实现：`phdnet/`（Python 3.14）｜ 配套文档：《性能评估与迭代方案》《竞争力与脑同构性评估》《对标 Transformer 优化路线图》
 > 版本治理：统一使用 **v0.0.0**，分层表述用「基础架构 M1–M6 / 认知层 M7–M12」；是否升 v0.1.0 需 fhz 明确确认（当前保持 v0.0.0）。
 >
-> ✅ **语料解耦（2026-09-21 起）**：内置语料已冻结为逐字副本 `datasets/eval/internal_corpus.txt`（**23,504 字符**），
+> ✅ **语料解耦（2026-09-21 起）**：内置语料已冻结为逐字副本 `eval_corpus/internal_corpus.txt`（**23,504 字符**），
 > `tests/eval_common.py` 的 `DOC` 指向该文件——**编辑本文不再改变语料与基线**（原「本文即语料，编辑即漂移」条款作废）。
 > 若有意更换语料：更新冻结副本 → 重跑 `eval_suite.py` + `demo_m9.py` → 回填全部文档数字。
-> 远域泛化探针语料：`datasets/eval/ood_wiki.txt`（中文维基 26 篇 / 20,188 字符）。
+> 远域泛化探针语料：`eval_corpus/ood_wiki.txt`（中文维基 26 篇 / 20,188 字符）。
 
 ---
 
@@ -495,7 +497,7 @@ M8 采用与 M9 同构的非对称外积联想链（STDP 拓扑核的稀疏出�
 
 ### 12.1 M9 收官结论（五轨道）
 
-重测条件：冻结语料 `datasets/eval/internal_corpus.txt` **23,504 字符**（训练 18,803 / 评估 4,701）、seed 11、
+重测条件：冻结语料 `eval_corpus/internal_corpus.txt` **23,504 字符**（训练 18,803 / 评估 4,701）、seed 11、
 128 维小栈词表口径 OOV 0%，参照基线 R = **102.97**（bpc 6.686）。结果写入 `outputs/demo_m9_result.json`。
 
 | 配置 | 字符归一 PPL | 相对 R | 结论 |
@@ -540,8 +542,8 @@ M8 采用与 M9 同构的非对称外积联想链（STDP 拓扑核的稀疏出�
 
 | 语料 | 路径 | 规模 | 用途 |
 |---|---|---|---|
-| 内置（冻结） | `datasets/eval/internal_corpus.txt` | **23,504 字符**（逐字复制自本文 2026-09-21 版） | 默认回归与 ours 对拍（**编辑本文不再影响语料**） |
-| 探针（远域） | `datasets/eval/ood_wiki.txt` | 26 篇 / 20,188 字符（ModelScope Range 抽取） | 泛化探针 `tests/demo_gen.py` |
+| 内置（冻结） | `eval_corpus/internal_corpus.txt` | **23,504 字符**（逐字复制自本文 2026-09-21 版） | 默认回归与 ours 对拍（**编辑本文不再影响语料**） |
+| 探针（远域） | `eval_corpus/ood_wiki.txt` | 26 篇 / 20,188 字符（ModelScope Range 抽取） | 泛化探针 `tests/demo_gen.py` |
 | 外部预训练 | `datasets/pretrain/`（= Infinity-Instruct 7M_core / M7_Core，2026-09-22 拍板并已就位） | — | 预训练 / 跨轮稳定锚点（维基语料已按指令删除） |
 
 统一口径：**字符归一 PPL** = exp(总 token NLL / 评估段字符数)，并报 bpc。

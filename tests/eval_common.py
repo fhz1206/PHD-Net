@@ -12,7 +12,7 @@ if str(_ROOT) not in sys.path:
 import numpy as np
 import psutil
 
-DOC = str(_ROOT / "datasets" / "eval" / "internal_corpus.txt")    # 默认语料（同 run_tests/验收脚本）
+DOC = str(_ROOT / "eval_corpus" / "internal_corpus.txt")    # 默认语料（同 run_tests/验收脚本）
 BASE = dict(n_sdr=256, k_sparse=32, n_mid=256, n_top=256,
             eta_pc=0.0, eta_oja=0.0, eta_stdp=0.02, seed=11,
             pred_in_readout=True)

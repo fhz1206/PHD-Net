@@ -3,7 +3,7 @@
 用法：python tools/verify_seg_equiv.py
   - 正确性对拍：在 3 组超参下，对比「原实现（内联参考）」与「新实现」的
       vocab 集合（set==set）与 tokenize(text) 输出列表（逐元素 ==）。
-      语料 = datasets/eval/internal_corpus.txt 前 6000 字符。
+      语料 = eval_corpus/internal_corpus.txt 前 6000 字符。
   - 加速比：对全文 23504 字符各构建 1 次，报告 ms 与倍数。
   - 退出码 0 = 全部一致；非 0 = 不一致。
 """
@@ -73,7 +73,7 @@ class RefWordSegmenter:
 # ───────────────────────────────────────────────────────────────────────────
 # 参数与语料
 # ───────────────────────────────────────────────────────────────────────────
-CORPUS = "D:/AiModel/train/datasets/eval/internal_corpus.txt"
+CORPUS = "D:/AiModel/train/eval_corpus/internal_corpus.txt"
 PARAMS = [
     dict(max_len=6, min_count=5, min_entropy=1.0),   # 默认组
     dict(max_len=4, min_count=3, min_entropy=0.5),

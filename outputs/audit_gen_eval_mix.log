@@ -1,0 +1,12 @@
+[infer] 模型已加载：models\phdnet1b_smoke_mix.npz
+[infer] 词表 31,363 | done=100,000 tokens | 检查点 2026-09-27 07:23:00
+检查点: models/phdnet1b_smoke_mix.npz（done=100,000）| 词表 31,363
+大空间表: 已生长 61,440 / 62,914,560（利用率 0.0977%）
+域内段: skip 100,000 + eval 30,001 tokens
+------------------------------------------------------------------------------------------------
+目标                          字符   tokens     OOV   ppl_char    ppl_pen  2gram_ppl PHD/2gram
+in_domain_heldout       66,046   30,000  0.00%      81.31      81.31      73.78     1.102  inflation=1.00x
+near_domain_doc         23,504   13,888  5.77%     183.41     261.01     206.40     1.265  inflation=3.21x
+far_domain_wiki         20,187   14,745  8.82%     626.92    1221.78     970.09     1.259  inflation=15.03x
+------------------------------------------------------------------------------------------------
+口径注记：ppl_char 跳过 OOV 步（覆盖墙下表观偏低）；ppl_pen 为 OOV 补罚悲观口径；inflation 以域内 held-out ppl_pen 为 1.00×；2-gram 词表=训练段（UNK 折叠），覆盖全部 token，与 ppl_pen 可比。

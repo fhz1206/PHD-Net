@@ -1,6 +1,6 @@
 """O5（长程级联误差治理：再入连接 + 分段校验）与 B7（minibatch 统计效率）实验。
 
-口径：冻结语料 datasets/eval/internal_corpus.txt（23,504 字符）；
+口径：冻结语料 eval_corpus/internal_corpus.txt（23,504 字符）；
       训练段 = 前 80% 的前 4,000 字符（与 ablation_modules / scaling_curve 同口径，
       便于交叉对照：本脚本 baseline 应与 ablation baseline 逐位一致 = 97.2596）；
       评估段 = 后 20%（4,701 字符，全量）。
@@ -25,7 +25,7 @@ if str(_ROOT) not in sys.path:
 from phdnet.config import PHDNetConfig          # noqa: E402
 from phdnet.word_lm import PHDWordLM            # noqa: E402
 
-CORPUS = _ROOT / "datasets" / "eval" / "internal_corpus.txt"
+CORPUS = _ROOT / "eval_corpus" / "internal_corpus.txt"
 BASE = dict(n_sdr=256, k_sparse=32, n_mid=256, n_top=256,
             eta_pc=0.0, eta_oja=0.0, eta_stdp=0.02, seed=11,
             pred_in_readout=True)

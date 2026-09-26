@@ -4,8 +4,8 @@
 ----
 - 模型：train_1b 在 sft 中文对话语料上流式训练（检查点 = 训练至第 N 个流 token）；
 - 域内 held-out：同一语料流的**后续段**（skip N tokens 后取 M tokens）——模型从未见过；
-- 近域：`datasets/eval/internal_corpus.txt`（中文架构文档，23,504 字符）；
-- 远域：`datasets/eval/ood_wiki.txt`（中文维基探针）；
+- 近域：`eval_corpus/internal_corpus.txt`（中文架构文档，23,504 字符）；
+- 远域：`eval_corpus/ood_wiki.txt`（中文维基探针）；
 - 口径：字符归一 PPL = exp(Σ token NLL / 评估段字符数)（OOV 步跳过）；
   ppl_pen = OOV 步按词表均匀 −log(1/V) 补记 NLL 的悲观口径；
 - 参照：词级 2-gram（回退 1-gram → 均匀；词表=训练段 token 集，评估段未见表词折叠 UNK；
@@ -30,6 +30,7 @@ for p in (str(_ROOT / "train_1b"), str(_ROOT)):
 
 from infer import load_from_ckpt                               # noqa: E402
 from corpus_stream import StreamingTokenizer, char_chunks      # noqa: E402
+from corpus_stream import mix_chunks, zh_char_chunks           # noqa: E402
 
 
 def eval_tokens(lm, tokens, V: int):
@@ -109,6 +110,8 @@ def main() -> None:
     ap.add_argument("--skip-tokens", type=int, default=150000,
                     help="域内 held-out 从训练流第 N 个 token 开始（=训练 token 数）")
     ap.add_argument("--indomain-tokens", type=int, default=30000)
+    ap.add_argument("--data", default="sft", choices=["sft", "mix"],
+                    help="训练流类型（须与训练时一致）：sft / mix（sft+pretrain_zh 轮转）")
     ap.add_argument("--sft", default="datasets/sft/sft_000.*.parquet")
     args = ap.parse_args()
 
@@ -126,7 +129,12 @@ def main() -> None:
     segs: dict[str, list[str]] = {}
 
     # 1) 域内 held-out：重放训练流，skip 后取段（同时收集训练段 token 供 2-gram）
-    stream = StreamingTokenizer(lm.tok.seg, char_chunks(_ROOT / args.sft))
+    if args.data == "mix":
+        src = mix_chunks([char_chunks(_ROOT / "datasets/sft/sft_000.*.parquet"),
+                          zh_char_chunks(_ROOT / "datasets/pretrain/pretrain_*.parquet")])
+    else:
+        src = char_chunks(_ROOT / args.sft)
+    stream = StreamingTokenizer(lm.tok.seg, src)
     train_toks: list[str] = []
     for i, t in enumerate(stream):
         if i < args.skip_tokens:
@@ -142,9 +150,9 @@ def main() -> None:
 
     # 2) 近域 / 3) 远域
     segs["near_domain_doc"] = lm.tok.seg.tokenize(
-        (_ROOT / "datasets/eval/internal_corpus.txt").read_text(encoding="utf-8"))
+        (_ROOT / "eval_corpus/internal_corpus.txt").read_text(encoding="utf-8"))
     segs["far_domain_wiki"] = lm.tok.seg.tokenize(
-        (_ROOT / "datasets/eval/ood_wiki.txt").read_text(encoding="utf-8"))
+        (_ROOT / "eval_corpus/ood_wiki.txt").read_text(encoding="utf-8"))
 
     nll_fn, _ = build_bigram(train_toks)
 

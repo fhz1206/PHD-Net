@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]          # 项目根目录
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))                   # 保证 `import phdnet` 可用
 TESTS = ROOT / "tests"
-DOC = ROOT / "datasets" / "eval" / "internal_corpus.txt"
+DOC = ROOT / "eval_corpus" / "internal_corpus.txt"
 PY = sys.executable
 ENV = {**os.environ, "PYTHONPATH": str(ROOT), "PYTHONUTF8": "1"}
 

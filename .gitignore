@@ -4,7 +4,7 @@ datasets/sft/
 # datasets/ 自身是一个**独立仓库**（远端 gitcode.com/fhz1206/Mixture-General-Mini），
 # 其 .git 不参与 PHD-Net 仓库；内置语料 eval/ 按 fhz 要求不随数据集仓库外发。
 datasets/.git/
-# 注：datasets/eval/（冻结语料 + OOD 探针，43 KB）**保留在 PHD-Net 仓库**——评测基线必需
+# 注：eval_corpus/（冻结语料 + OOD 探针，43 KB）**保留在 PHD-Net 仓库**——评测基线必需
 
 # ── 训练产物与检查点 ──
 outputs/ckpt/

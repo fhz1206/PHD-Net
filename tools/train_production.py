@@ -97,7 +97,7 @@ DATA_FILES = {
     "sft": _ROOT / "datasets" / "sft" / "sft_000.*.parquet",
     "infinity_zh": _ROOT / "datasets" / "pretrain" / "pretrain_*.parquet",
     "infinity": _ROOT / "datasets" / "pretrain" / "pretrain_*.parquet",
-    "eval": _ROOT / "datasets" / "eval" / "internal_corpus.txt",
+    "eval": _ROOT / "eval_corpus" / "internal_corpus.txt",
 }
 
 _STOP = {"flag": False}

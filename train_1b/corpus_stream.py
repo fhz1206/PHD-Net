@@ -43,6 +43,49 @@ def char_chunks(path, sep: str = SEP) -> Iterator[str]:
         yield t + sep
 
 
+def zh_char_chunks(path, lang: str = "zh", sep: str = SEP) -> Iterator[str]:
+    """按 `lang` 字段过滤的 parquet 字符块流（泛化优化 P0：混合域训练的中文源）。
+
+    无 lang 列的文件退化为全量输出（与 char_chunks 一致）。
+    """
+    import pyarrow.parquet as pq
+
+    from phdnet.corpus import expand_paths
+    for p in expand_paths(path):
+        pf = pq.ParquetFile(str(p))
+        cols = [c for c in ("text", "lang") if c in pf.schema_arrow.names]
+        if "lang" not in cols:
+            for t in pf.iter_batches(batch_size=2048, columns=["text"]):
+                for v in t.column(0).to_pylist():
+                    if v:
+                        yield v + sep
+            continue
+        for b in pf.iter_batches(batch_size=2048, columns=cols):
+            texts = b.column("text").to_pylist()
+            langs = b.column("lang").to_pylist()
+            for t, l in zip(texts, langs):
+                if t and l == lang:
+                    yield t + sep
+
+
+def mix_chunks(sources, sep: str = SEP) -> Iterator[str]:
+    """多源样本级轮转交错（round-robin）——泛化优化 P0 的混合域训练流。
+
+    sources = 各源的样本迭代器（如 [char_chunks(sft), zh_char_chunks(pretrain)]）；
+    等概率轮转产出（样本 + sep），某源耗尽后其余源继续。确定性顺序。
+    """
+    iters = [iter(s) for s in sources]
+    idx = 0
+    while iters:
+        k = idx % len(iters)
+        try:
+            yield next(iters[k])         # 各源已自带样本分隔符（char_chunks 约定）
+        except StopIteration:
+            iters.pop(k)                 # 该源耗尽 → 移除（idx 不前进，避免跳源）
+            continue
+        idx += 1
+
+
 def _prefetch_producer(tasks, sep: str, batch_samples: int, q) -> None:
     """生产者进程体：顺序读取分派给本进程的文件，按批推入有界队列。
 

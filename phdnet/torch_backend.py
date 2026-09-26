@@ -185,3 +185,119 @@ def selftest_torch(device: str = "cpu", n: int = 128, m: int = 8,
         return bool(corr >= 0.99)
     same = np.allclose(W_torch, W_ref, atol=atol, rtol=1e-4)
     return bool(grown and same)
+
+
+# ---------------------------------------------------------------------------
+# P10 硬件后端适配（2026-09-26，fhz 指令：适配 CUDA / CANN(NPU) / ROCm）
+# ---------------------------------------------------------------------------
+def probe_devices() -> dict:
+    """统一加速器探针：返回 {平台: 可用信息}。
+
+    - CUDA：torch.cuda.is_available()（NVIDIA，sm ≥ 7.0 建议）；
+    - ROCm：torch.cuda.is_available() 且 torch.version.hip 非空（AMD，走 HIP 化的
+      cuda 接口，算子代码与 CUDA 完全相同）；
+    - CANN/昇腾 NPU：torch_npu 插件注册的 `npu` 设备（需按 CANN 版本安装
+      torch_npu，如 torch 2.1 ↔ torch_npu 2.1）；
+    - CPU：恒可用（fp32/fp16/bf16 全支持；fp8 仅模拟）。
+    """
+    out = {"cpu": {"ok": True, "note": "参考路径（fp32/fp16/bf16 全支持）"}}
+    if torch is None:
+        out["torch"] = {"ok": False, "note": "torch 未安装"}
+        return out
+    is_hip = bool(getattr(torch.version, "hip", None))
+    cuda_ok = torch.cuda.is_available()
+    out["cuda" if not is_hip else "rocm"] = {
+        "ok": cuda_ok,
+        "count": torch.cuda.device_count() if cuda_ok else 0,
+        "name": (torch.cuda.get_device_name(0) if cuda_ok else None),
+        "version": (torch.version.hip if is_hip else torch.version.cuda),
+    }
+    try:
+        import torch_npu  # noqa: F401  （CANN 插件：import 即注册 npu 设备）
+        npu_ok = torch.npu.is_available()
+        out["npu"] = {"ok": npu_ok,
+                      "count": torch.npu.device_count() if npu_ok else 0,
+                      "name": (torch.npu.get_device_name(0) if npu_ok else None),
+                      "version": getattr(torch_npu, "__version__", None)}
+    except ImportError:
+        out["npu"] = {"ok": False,
+                      "note": "torch_npu 未安装（CANN 适配需单独安装该插件）"}
+    return out
+
+
+class TorchReadout:
+    """词级读出热路径（M6）的 torch 化——前向 matvec + softmax 梯度更新。
+
+    覆盖 CUDA / ROCm / NPU / CPU 四类设备（同一份算子代码，仅 device/dtype 不同）；
+    精度：fp32（默认）/ fp16 / bf16 原生支持；fp8 需 CUDA ≥ 8.9（Ada/Hopper）且
+    torch ≥ 2.1 的 float8_e4m3fn（CPU 无原生 fp8 → 该档在 CPU 上不可用，诚实降级）；
+    fp4 无 torch 原生类型 → 走 CPU numba 量化码本路径（见 phdnet/readout.py P9）。
+
+    语义对应 `phdnet.readout.Readout.learn_softmax`（softmax 交叉熵末端梯度）；
+    数值协议：前向与梯度更新在设备 dtype 上执行，softmax 概率与 NLL 在 fp32
+    计算（低精度存储 + 高精度主回路，与 P9 CPU 方案一致）。等价性判据为
+    **容差一致**（设备归约顺序与 numpy 不同，逐位等价在跨设备场景不成立——
+    这是与 CPU 内部优化的本质区别，须在报告中显式声明）。
+    """
+
+    _DT = {"fp32": "fp32", "fp16": "fp16", "bf16": "bf16"}
+
+    def __init__(self, W: np.ndarray, device: str = "auto",
+                 dtype: str = "fp32"):
+        if torch is None:
+            raise RuntimeError("torch 未安装，无法使用 torch 后端")
+        self.device = _resolve_device("cpu" if device == "auto" else device)
+        self.tdtype = _resolve_dtype(self._DT.get(dtype, "fp32"))
+        self.W = torch.as_tensor(np.ascontiguousarray(W, dtype=np.float32),
+                                 device=self.device, dtype=self.tdtype)
+
+    def forward(self, h: np.ndarray) -> np.ndarray:
+        ht = torch.as_tensor(np.ascontiguousarray(h, dtype=np.float32),
+                             device=self.device, dtype=self.tdtype)
+        y = self.W @ ht
+        return y.float().cpu().numpy()                       # 主回路升精度
+
+    def learn_softmax(self, h: np.ndarray, target: np.ndarray,
+                      eta: float) -> float:
+        ht = torch.as_tensor(np.ascontiguousarray(h, dtype=np.float32),
+                             device=self.device, dtype=self.tdtype)
+        tt = torch.as_tensor(np.ascontiguousarray(target, dtype=np.float32),
+                             device=self.device, dtype=self.tdtype)
+        y = self.W @ ht
+        y32 = y.float()
+        p = torch.softmax(y32, dim=0)
+        correct = int(torch.argmax(tt).item())
+        nll = float(-torch.log(p[correct] + 1e-12).item())
+        dp = (p - tt).to(self.tdtype)                        # 梯度降回存储精度
+        g = torch.outer(dp, ht)                              # 存储精度上的外积
+        if self.tdtype == torch.bfloat16:
+            g = g.float(); self.W.add_(g.to(torch.bfloat16), alpha=-eta)
+        else:
+            self.W.add_(g, alpha=-eta)
+        return nll
+
+    def to_cpu(self) -> np.ndarray:
+        """权重回读（fp32 快照，供检查点保存）。"""
+        return self.W.float().cpu().numpy()
+
+
+def bench_readout(device: str = "auto", V: int = 9219, H: int = 3072,
+                  steps: int = 50) -> dict:
+    """读出热路径基准（前向 + 更新，1B 预设真实读出规模），返回 ms/token。"""
+    import time
+    rng = np.random.default_rng(0)
+    core = TorchReadout(rng.standard_normal((V, H)) * 0.01, device=device)
+    h = np.abs(rng.standard_normal(H)) + 0.1
+    t = np.zeros(V); t[V // 2] = 1.0
+    core.forward(h)                                          # 预热（JIT/上下文）
+    core.learn_softmax(h, t, 0.05)
+    t0 = time.perf_counter()
+    for _ in range(steps):
+        core.forward(h)
+    fwd = (time.perf_counter() - t0) / steps * 1000
+    t0 = time.perf_counter()
+    for _ in range(steps):
+        core.learn_softmax(h, t, 0.05)
+    upd = (time.perf_counter() - t0) / steps * 1000
+    return {"device": core.device, "dtype": str(core.tdtype),
+            "fwd_ms": fwd, "update_ms": upd, "total_ms": fwd + upd}

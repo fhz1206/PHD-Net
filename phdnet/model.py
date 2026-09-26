@@ -119,7 +119,7 @@ class PHDNet:
         if cfg.retrieval_topk > 0:                              # T3.2 top-k 召回线索
             n_h += cfg.retrieval_topk
         self.readout = Readout(n_h, n_out, rng, w_clip=cfg.readout_w_clip,
-                               fp32=cfg.readout_fp32,                      # C8 / P6b
+                               dtype=cfg.readout_dtype,                    # C8 / P6b / P9
                                conn_k=cfg.readout_conn_k,                  # O1-3 结构性稀疏
                                lognormal_init=cfg.lognormal_init,          # O1-4
                                exc_ratio=cfg.exc_ratio,

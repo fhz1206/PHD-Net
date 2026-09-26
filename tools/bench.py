@@ -18,7 +18,7 @@ from pathlib import Path as _Path
 _ROOT = _Path(__file__).resolve().parents[1]     # 项目根目录
 if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))              # 保证 `import phdnet` 可用
-_DOC = _ROOT / "datasets" / "eval" / "internal_corpus.txt"    # 默认语料
+_DOC = _ROOT / "eval_corpus" / "internal_corpus.txt"    # 默认语料
 # --- 引导结束 ---
 
 import platform

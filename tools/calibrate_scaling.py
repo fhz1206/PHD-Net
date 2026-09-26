@@ -12,7 +12,7 @@ from phdnet.config import PHDNetConfig
 from phdnet.word_lm import PHDWordLM
 from phdnet.model import count_params
 
-DOC = str(ROOT / "datasets" / "eval" / "internal_corpus.txt")
+DOC = str(ROOT / "eval_corpus" / "internal_corpus.txt")
 SEG = dict(max_len=6, min_count=5, min_entropy=1.0)
 BASE = dict(n_sdr=256, k_sparse=32, n_mid=256, n_top=256,
             eta_pc=0.0, eta_oja=0.0, eta_stdp=0.02, seed=11,
