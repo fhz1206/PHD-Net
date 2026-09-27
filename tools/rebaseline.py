@@ -26,7 +26,7 @@ from eval_common import BASE, DOC, SEG
 from phdnet.config import PHDNetConfig
 from phdnet.word_lm import PHDWordLM
 
-ANCHOR = {4000: 96.7241, "full": 77.5261}
+ANCHOR = {4000: 90.2480, "full": 73.1166}   # fhz 2026-09-27 拍板：eta_readout 0.05→0.15 后的新锚点（旧锚点见 git 历史）
 
 
 def run(limit: int | None = None) -> dict:

@@ -53,7 +53,7 @@ class PHDNetConfig:
     # M6 读出头（P1 语言接口扩展；默认值保持旧行为，非破坏）
     n_readout: int = 0          # 读出输出维度；0 = 与 n_input 相同（旧行为）
     readout_softmax: bool = False  # True = 下一 token 预测用 softmax 感知器（交叉熵局部梯度）
-    eta_readout: float = 0.05   # softmax 感知器学习率
+    eta_readout: float = 0.15   # softmax 感知器学习率（fhz 2026-09-27 拍板：0.05 → 0.15，实测最优区间 0.15–0.20，0.25+ 退化，0.5 发散）
     eta_readout_anneal: float = 0.0  # 读出学习率每步乘性退火（0=关闭；如 0.9997）
     eta_readout_floor: float = 0.004 # 退火下限（发育后巩固，防后期样本覆盖早期学习）
     readout_w_clip: float = 0.0 # C8：读出权重范数上限（0=关闭，保持旧行为）

@@ -20,15 +20,15 @@
 | PPL 口径 | 字符归一 PPL = exp(Σ token NLL / 评估段字符数)；跨粒度比较统一用该口径 |
 
 **当前默认配置**（fhz 指令固化）：读出精度 **fp32**（fp64 已停止支持，可选 fp16/bf16/fp8/fp4）；
-`sparse_conn=True` / `k_sparse=16`（库默认）；`eta_readout=0.05`（0.15–0.2 实测更优，
-切换会移动全部基线 → 待拍板）。
+`sparse_conn=True` / `k_sparse=16`（库默认）；`eta_readout=0.15`（**fhz 2026-09-27 拍板落地**：0.05→0.15；
+实测最优区间 0.15–0.20，0.25+ 退化，0.5 发散；新锚点 4K 90.2480 / 全语料 73.1166）。
 
 ## 二、当前基线（全部可由 `tools/rebaseline.py` / `tools/audit_precision.py` 复现）
 
 | 口径 | 配置 | ppl_char | 备注 |
 |---|---|---|---|
-| 4,000 字符（80/20） | BASE（256 维栈 / k_sparse=32 / 读出 fp32） | **96.7241** | 与历史 fp64 锚点逐位一致 |
-| 全语料（18,803 字符） | 同上 | **77.5261** | 同上 |
+| 4,000 字符（80/20） | BASE（256 维栈 / k_sparse=32 / 读出 fp32 / **eta=0.15**） | **90.2480**（−6.7% vs 旧 eta=0.05 锚点 96.7241） | 新默认锚点 |
+| 全语料（18,803 字符） | 同上 | **73.1166**（−5.7%） | 同上 |
 | 4,000 字符 | BASE + 1B 容量栈（big_ltm） | 95.4945 | −1.3%（来自替换稠密 LTM，非容量印迹） |
 | 对照：Transformer 0.52M / 2.38M | 同语料 | 85.27 / 85.66 | PHD-Net 低 8.3%（达标） |
 
@@ -41,7 +41,8 @@ fp8 e4m3fn / fp4 e2m1 + 逐张量缩放）；softmax/NLL 保持 fp64 主回路�
 
 | 精度 | 存储（1B 读出） | 4K ppl | Δ | 全语料 ppl |
 |---|---|---|---|---|
-| **fp32（默认）** | 113.3 MB | 96.7241 | — | **77.5261**（=历史锚点） |
+| **fp32（默认，eta=0.05 时）** | 113.3 MB | 96.7241 | — | 77.5261（=历史锚点） |
+| fp32（默认，**eta=0.15**） | 113.3 MB | **90.2480** | −6.70% | **73.1166** |
 | fp16 | 56.6 MB | 96.5633 | −0.17% | — |
 | bf16 | 56.6 MB | 95.6040 | **−1.16%** | — |
 | fp8 | 28.3 MB | 95.0823 | **−1.70%** | — |
@@ -98,7 +99,7 @@ fp8 e4m3fn / fp4 e2m1 + 逐张量缩放）；softmax/NLL 保持 fp64 主回路�
 | 项 | 状态 | 说明 |
 |---|---|---|
 | P0 泛化：多域 + 大预算训练 | 数据就位，待长跑 | M7_Core 中文子集混合流式 |
-| P2 `eta_readout` 0.05→0.2 | **待 fhz 拍板** | 实测 −4.4~−7.3%（两口径一致） |
+| ~~P2 `eta_readout` 切换~~ | **✅ 已拍板落地（0.15）** | 新锚点 90.2480 / 73.1166（`tools/rebaseline.py`） |
 | fp4 块缩放（MX） | 立项候选 | +5.9% 劣化 → 逐块 scale 可解 |
 | 1M context 长程验证 | 待长跑 | big_ltm 检索通路价值验证 |
 | LM 全栈 torch 化 | 立项 | 读出已 torch 化；CSR/大空间表映射为独立工程 |
@@ -108,7 +109,7 @@ fp8 e4m3fn / fp4 e2m1 + 逐张量缩放）；softmax/NLL 保持 fp64 主回路�
 
 ```bash
 python tests/run_tests.py fast                 # 零回归门槛（11 项）
-python tools/rebaseline.py                     # 当前基线复测（96.7241 / 77.5261）
+python tools/rebaseline.py                     # 当前基线复测（90.2480 / 73.1166，eta=0.15）
 python tools/audit_precision.py                # 精度体系验证（L1 逐位 / L2 带宽 / L3 PPL）
 python tools/audit_prof_1b.py                  # 1B 生产配置模块级剖析
 python tools/audit_gen_eval.py --ckpt models/phdnet1b_smoke_mix.npz \
