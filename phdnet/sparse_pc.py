@@ -38,36 +38,36 @@ import numpy as np
 from .plasticity import NUMBA_OK
 
 if NUMBA_OK:                                        # pragma: no cover
-    from numba import njit
+    from numba import njit, prange
 
-    @njit(cache=True, fastmath=True)
+    @njit(cache=True, fastmath=True, parallel=True)
     def _csr_matvec(indptr, idx, val, x):
-        """y[i] = Σ_{p∈入边(i)} val[p]·x[idx[p]]（只遍历存在的突触）。"""
+        """y[i] = Σ_{p∈入边(i)} val[p]·x[idx[p]]（只遍历存在的突触；按行并行）。"""
         n = indptr.shape[0] - 1
         y = np.zeros(n)
-        for i in range(n):
+        for i in prange(n):
             s = 0.0
             for p in range(indptr[i], indptr[i + 1]):
                 s += val[p] * x[idx[p]]
             y[i] = s
         return y
 
-    @njit(cache=True, fastmath=True)
+    @njit(cache=True, fastmath=True, parallel=True)
     def _csr_add_outer(indptr, idx, val, a, b, eta):
         """稀疏外积累加：val[p] += eta·a[i]·b[idx[p]]（边 (i, idx[p])）。"""
         n = indptr.shape[0] - 1
-        for i in range(n):
+        for i in prange(n):
             ai = a[i]
             if ai == 0.0:
                 continue
             for p in range(indptr[i], indptr[i + 1]):
                 val[p] += eta * ai * b[idx[p]]
 
-    @njit(cache=True, fastmath=True)
+    @njit(cache=True, fastmath=True, parallel=True)
     def _csr_oja_up(indptr, idx, val, post, pre, eta):
         """稀疏 Oja：Δw = η·post[i]·(pre[j] − post[i]·w)（边 (i, j)）。"""
         n = indptr.shape[0] - 1
-        for i in range(n):
+        for i in prange(n):
             pi = post[i]
             if pi == 0.0:
                 continue
@@ -83,21 +83,21 @@ if NUMBA_OK:                                        # pragma: no cover
             elif v < -w_max:
                 val[p] = -w_max
 
-    @njit(cache=True, fastmath=True)
+    @njit(cache=True, fastmath=True, parallel=True)
     def _csr_row_norms(indptr, val):
         n = indptr.shape[0] - 1
         out = np.zeros(n)
-        for i in range(n):
+        for i in prange(n):
             s = 0.0
             for p in range(indptr[i], indptr[i + 1]):
                 s += val[p] * val[p]
             out[i] = s ** 0.5
         return out
 
-    @njit(cache=True, fastmath=True)
+    @njit(cache=True, fastmath=True, parallel=True)
     def _csr_scale_rows(indptr, val, target):
         n = indptr.shape[0] - 1
-        for i in range(n):
+        for i in prange(n):
             s = 0.0
             for p in range(indptr[i], indptr[i + 1]):
                 s += val[p] * val[p]

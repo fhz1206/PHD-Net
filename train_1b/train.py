@@ -87,8 +87,12 @@ DATA_FILES = {
 def stream_factory(data: str):
     """返回 () -> 新的独立样本字符块流（mix = sft 与 pretrain 中文源轮转交错）。"""
     if data == "mix":
-        return lambda: mix_chunks([char_chunks(DATA_FILES["sft"]),
-                                   zh_char_chunks(DATA_FILES["pretrain_zh"])])
+        # 双源均走多进程加载（文件级并行 + 顺序归并 → 与串行产出逐位一致）：
+        # sft 全量源 + pretrain 中文过滤源（lang="zh" 在生产者进程内过滤）
+        return lambda: mix_chunks([
+            PrefetchChars(DATA_FILES["sft"], SEP),
+            PrefetchChars(DATA_FILES["pretrain_zh"], SEP, lang="zh"),
+        ])
     return lambda: char_chunks(DATA_FILES[data])
 
 _STOP = {"flag": False}
@@ -149,8 +153,8 @@ def main() -> None:
     ap.add_argument("--data", choices=list(DATA_FILES), default="sft")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
     ap.add_argument("--readout-dtype", default="fp32",
-                    choices=["fp32", "fp16", "bf16", "fp8", "fp4"],
-                    help="读出精度（P9：默认 fp32；fp64 已停止支持）")
+                    choices=["fp32", "fp16", "bf16", "fp8"],
+                    help="读出精度（P9：默认 fp32；fp64 已停止支持；fp4 已禁用）")
     ap.add_argument("--big-n", type=int, default=0, help="覆盖大空间神经元数（0=用预设）")
     ap.add_argument("--csr-online", action="store_true",
                     help="大空间表切换在线可写 CSR（长跑内存 ≈10×省，逐位等价已验证）")
@@ -297,7 +301,7 @@ def main() -> None:
           f" | 分片 {len(data_files)} 个（{total_mb:.0f} MB，流式不截断）")
     print(f"epochs={args.epochs} | 预算 tokens={args.tokens or '∞'} "
           f"minutes={args.minutes or '∞'} | 里程碑={args.context_milestone or '∞'}"
-          f" | 词表并行={vw} | 数据预取={'轮转混合(串行源)' if args.data == 'mix' else f'多进程×{dl_w}'}"
+          f" | 词表并行={vw} | 数据预取=多进程×{dl_w}{'+zh过滤' if args.data == 'mix' else ''}"
           f" | 构建耗时 {time.perf_counter() - t0:.1f}s")
     print_capacity_report(capacity_report(cfg, vocab))
     print(f"可塑参数（构建时实际，count_params 口径）: {count_params(lm.net):,}")

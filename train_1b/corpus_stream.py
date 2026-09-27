@@ -43,11 +43,12 @@ def char_chunks(path, sep: str = SEP) -> Iterator[str]:
         yield t + sep
 
 
-def zh_char_chunks(path, lang: str = "zh", sep: str = SEP) -> Iterator[str]:
-    """按 `lang` 字段过滤的 parquet 字符块流（泛化优化 P0：混合域训练的中文源）。
-
-    无 lang 列的文件退化为全量输出（与 char_chunks 一致）。
-    """
+def iter_texts_lang(path, lang: str | None = None):
+    """按 lang 字段过滤的流式读取（lang=None 时等价 iter_texts；仅 parquet 支持过滤）。"""
+    if lang is None:
+        from phdnet.corpus import iter_texts
+        yield from iter_texts(path)
+        return
     import pyarrow.parquet as pq
 
     from phdnet.corpus import expand_paths
@@ -55,17 +56,21 @@ def zh_char_chunks(path, lang: str = "zh", sep: str = SEP) -> Iterator[str]:
         pf = pq.ParquetFile(str(p))
         cols = [c for c in ("text", "lang") if c in pf.schema_arrow.names]
         if "lang" not in cols:
-            for t in pf.iter_batches(batch_size=2048, columns=["text"]):
-                for v in t.column(0).to_pylist():
+            for b in pf.iter_batches(batch_size=2048, columns=["text"]):
+                for v in b.column(0).to_pylist():
                     if v:
-                        yield v + sep
+                        yield v
             continue
         for b in pf.iter_batches(batch_size=2048, columns=cols):
-            texts = b.column("text").to_pylist()
-            langs = b.column("lang").to_pylist()
-            for t, l in zip(texts, langs):
+            for t, l in zip(b.column("text").to_pylist(), b.column("lang").to_pylist()):
                 if t and l == lang:
-                    yield t + sep
+                    yield t
+
+
+def zh_char_chunks(path, lang: str = "zh", sep: str = SEP) -> Iterator[str]:
+    """按 `lang` 字段过滤的 parquet 字符块流（串行参考；多进程版见 PrefetchChars(lang=...)）。"""
+    for t in iter_texts_lang(path, lang):
+        yield t + sep
 
 
 def mix_chunks(sources, sep: str = SEP) -> Iterator[str]:
@@ -86,7 +91,8 @@ def mix_chunks(sources, sep: str = SEP) -> Iterator[str]:
         idx += 1
 
 
-def _prefetch_producer(tasks, sep: str, batch_samples: int, q) -> None:
+def _prefetch_producer(tasks, sep: str, batch_samples: int, q,
+                       lang: str | None = None) -> None:
     """生产者进程体：顺序读取分派给本进程的文件，按批推入有界队列。
 
     tasks = [(全局文件序号 gfi, 路径)]（连续片段）；
@@ -97,7 +103,7 @@ def _prefetch_producer(tasks, sep: str, batch_samples: int, q) -> None:
     try:
         for gfi, path in tasks:
             buf: list[str] = []
-            for t in iter_texts(path):
+            for t in iter_texts_lang(path, lang):
                 buf.append(t + sep)
                 if len(buf) >= batch_samples:
                     q.put((gfi, buf))
@@ -128,7 +134,8 @@ class PrefetchChars:
     """
 
     def __init__(self, path, sep: str = SEP, depth: int = 64,
-                 batch_samples: int = 64, workers: int = 0):
+                 batch_samples: int = 64, workers: int = 0,
+                 lang: str | None = None):
         import multiprocessing as mp
         from phdnet.corpus import expand_paths
 
@@ -145,7 +152,7 @@ class PrefetchChars:
         for i in range(w):
             tasks = [(gfi, files[gfi]) for gfi in range(bounds[i], bounds[i + 1])]
             p = mp.Process(target=_prefetch_producer,
-                           args=(tasks, sep, batch_samples, self._q),
+                           args=(tasks, sep, batch_samples, self._q, lang),
                            daemon=True)
             p.start()
             self._procs.append(p)
