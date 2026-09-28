@@ -14,7 +14,7 @@
 >
 > **2026-09-24 三条更新**：① **性能 P7**——稠密读出更新改为 numba 融合并行核，
 > `tools/_prof_step.py` 实测 11.373 → 5.053 ms/token（**2.25×**），三层对拍**逐位等价**
-> （`tools/verify_readout_fused.py`），基线 96.7241 / 77.5261 **一字未变**，fast 11/11；
+> （`tests/verifiers/verify_readout_fused.py`），基线 96.7241 / 77.5261 **一字未变**，fast 11/11；
 > ② **新增两个数据集**——匠数 `deepctrl-sft-data`（中文 SFT，流式过滤后 150 MB）
 > 与 `Magpie-Reasoning-V1-150K-CoT-Deepseek-R1-Llama-70B`（R1 长链 CoT 300 MB，
 > 结构判定归到预训练）；叠加 `Ultra-FineWeb-L3` 中文采样（8 万条 / 102 MB parquet）；
@@ -30,7 +30,6 @@ train/
 ├── phdnet/                     核心包
 │   ├── config.py               PHDNetConfig（全部超参与开关；新增一律默认关闭）
 │   ├── sparse_encoder.py       M1 稀疏编码器（k-WTA / SDR）
-│   ├── pc.py                   M2 预测编码层级（生成-识别闭环 + 稳态缩放）
 │   ├── stdp_kernels.py         M3 STDP 计算核与自检（numba + numpy 回退）
 │   ├── plasticity.py           M3 时序关联核容器（STDPCore）
 │   ├── wm.py / ltm.py          M4a 工作记忆 / M4b 长期记忆
@@ -80,21 +79,30 @@ train/
 │   ├── demo_v2.py              认知层四实验
 │   └── demo_dev.py / demo_replay.py / demo_multihop.py
 │                               P3 自动发育 / P4 生成式回放 / P5 多跳检索
-├── tools/                      工程工具
+├── tools/                      工程工具（数据制备 / 基准 / 审计；验证脚本在 tests/verifiers/）
 │   ├── bench.py                CPU/内存基准（优化前后对照）
-│   ├── train_1b.py             10 亿突触容量模型在线训练
+│   ├── train_1b.py             10 亿突触容量模型在线训练（玩具 demo，非生产入口）
 │   ├── fetch_modelscope.py     ModelScope 数据集文件下载（断点续传，实测 ~5 MB/s）
 │   ├── prepare_wikicn.py       中文维基 JSONL 清洗 + 确定性划分（→ datasets/pretrain/；本轮用于 ood_wiki.txt 抽取）
 │   ├── backend_probe.py        硬件后端体检（昇腾 / ROCm / CUDA / DirectML）
-│   └── prepare_mimo.py / prepare_toolcall.py / prepare_mix.py / prepare_r1sft.py
-│                               旧语料制备（数据集已按指令删除，脚本仅留档）
+│   └── prepare_mimo.py / prepare_toolcall.py / prepare_mix.py / prepare_r1sft.py / train_r1sft.py
+│                               旧语料制备与训练（数据集已按指令删除，脚本仅留档）
+├── chat/                       对话与推理入口（fhz 2026-09-28 目录规范）
+│   ├── chat_openai.py          OpenAI 风格对话循环 + web_search 工具调用
+│   ├── chat_r1sft.py           R1 SFT 模型对话 / 演示续写
+│   ├── websearch_tool.py       联网搜索工具（OpenAI function calling 封装）
+│   └── run_demo.py / run_demo_external.py   「训练 + 对话」演示
 ├── docs/                       文档与介绍网页
 │   ├── PHD-Net_架构设计.md                     总设计（基础架构 + 认知层 + 终态状态）
 │   ├── PHD-Net_对标Transformer优化路线图.md     瓶颈定位 / 五轨道结论 / 开放项
 │   ├── PHD-Net_竞争力与脑同构性评估.md          与 LLM 对比 / 100B vs GLM-5.3-Flash / 脑同构
 │   ├── PHD-Net_性能评估与迭代方案.md            CPU·RAM 量化与 P1–P6/五轨道结果账
 │   └── index.html                              架构介绍网页（打开即用）
-├── outputs/                    历史运行输出（文本留档）
+├── outputs/                    运行产物（fhz 2026-09-28 分类规范）
+│   ├── test/                   测试产物：CI 回归 / verify 对拍 / audit 审计 / demo 日志（入库）
+│   ├── experiments/            实验与基准产物：experiment / scaling / bench / eval_suite（入库）
+│   ├── smoke/                  smoke 档产物（模型 + 断点，不入库）
+│   └── models/                 生产训练产物：模型检查点 + train_logs/（不入库）
 └── .workbuddy/                 工作区记忆与日志（勿删）
 ```
 
@@ -113,7 +121,7 @@ python tools/backend_probe.py      # 硬件后端体检
 python tools/train_1b.py           # 10 亿突触容量训练
 
 # 泛化探针（域内 / 近域 / 远域 + 统计基线对照）
-python tests/demo_gen.py                    # 基准组（→ outputs/demo_gen.log）
+python tests/demo_gen.py                    # 基准组（→ outputs/test/demo_gen.log）
 python tests/demo_gen.py --strength         # 加强组（T3.4 内容寻址 + ② 回放稳定读出）
 ```
 
@@ -167,7 +175,7 @@ python tests/demo_gen.py --strength         # 加强组（T3.4 内容寻址 + �
 | O1 双栈统一（2026-09-23 完成） | **容量栈合并**：LM 栈可挂 1B 事件驱动容量栈（`big_ltm`），**ppl 95.48（−1.83%）**、参数 1.58M、容量上限 **1.0B 突触**｜**主干结构性稀疏连接**：`sparse_conn`（CSR 稀疏图 + numba），**连接率 3.1% 时 PPL 持平（+0.03%）、突触存储压缩 32×**，k=16 时 −0.51%、PC 层加速 **1.68–4.02×**，与稠密栈数值等价（≤1.1e-15）｜读出学习率默认 0.05 经网格实测**次优**（0.2 时 −4.4%~−7.3%，待确认后统一切换） |
 | 脑同构审计（2026-09-23） | `tools/audit_brain_parity.py` **12 项结构性指标**逐项对照生物学事实（不以"模块存在"判对齐）。**三轮演进：一致 5/近似 6/偏离 1 → 6/6/0 → 10/2/0**。本轮把"近似"逐项改造对齐：**A5**（STDP 拓扑原判为误判，实为结构性稀疏 `(n,m)`）｜**A6** 激活稀疏度 k=16（6.2%）→ **−1.43%** 更优｜**A9** 独立抑制类群 抑制比 0.1 → **−1.17%** 正增益｜**A7** 重新判读（全架构无全局反传，监督源自自监督任务定义）｜**A4 新增两级群体读出**（速度 **6.8×**、参数 −60%，PPL +10~13% → 默认关闭）｜**A3** 可学习编码器实测有害（+33%）→ 确定性哈希为有据选择。默认路径 ppl 仍 **97.2596**、fast **11/11** |
 | Bug 猎手（2026-09-23） | `tools/hunt_bugs.py`：编译 85 文件 0 错误 / 31 组开关矩阵冒烟 / 边界输入 / 接口一致性 → **45 项通过、0 bug**。本轮修复：维度契约 fail-fast（原为模糊 numpy 广播错误）、新增 `net.n_out` 查询接口 |
-| 生产级训练（2026-09-23） | `tools/train_production.py`（规模预设 / 断点续训 / 检查点 / 双预算 / 滑动 PPL）。本机实测 4M 档：**7.43M 参数、17.38 ms/token、PPL 607.9→341.9 持续下降**。**256M 生产模型本机不可行**（算力差 ~3 个数量级：157 ms/token ⇒ 10⁹ token ≈ 5 年；详见性能评估 §6.10）——内存可行（2.05 GB）、质量与数据量均差 1–2 个数量级；投产需 GPU 集群 + 10⁹ token 数据 + torch 后端接入 |
+| 生产级训练（2026-09-23） | 原 `tools/train_production.py`（规模预设 / 断点续训 / 检查点 / 双预算 / 滑动 PPL）——**2026-09-28 功能重复治理已删除**：其为 `train_1b/train.py` 的严格子集（无 mix / 无 vocab-scan / ckpt 不支持稀疏读出恢复），训练入口单轨化为 `train_1b/train.py`。本机实测 4M 档（git 历史可复现）：**7.43M 参数、17.38 ms/token、PPL 607.9→341.9 持续下降**。**256M 生产模型本机不可行**（算力差 ~3 个数量级：157 ms/token ⇒ 10⁹ token ≈ 5 年；详见性能评估 §6.10）——内存可行（2.05 GB）、质量与数据量均差 1–2 个数量级；投产需 GPU 集群 + 10⁹ token 数据 + torch 后端接入 |
 | **稀疏默认开启（2026-09-24）** | fhz 指令「稀疏要默认开启」→ `sparse_conn=True`、`k_sparse=16`（激活 6.25%）已设为**库默认**。**新基线**（评测脚本显式传 k_sparse=32）：4,000 字符口径 **96.7241**（原 97.2596，**−0.55%**）｜全语料口径 **77.5261**（原 78.4180，**−1.14%**）｜主干连接率 **12.5%**（32,768/262,144 突触）、存储压缩 **8×**。⚠ 期间发现并修复**初始化量纲错误**：稀疏权重原用 `1/√n_in`，按 fan-in 应为 `1/√k`（否则前向幅值偏低 √(k/n)≈0.35×）——修正前全语料口径 +37.6% 劣化，修正后 **−1.14% 更优**（同一错误也存在于稀疏读出，已一并修复） |
 
 **诚实边界**：内置语料仅约 2 万字符，结论只在该规模与语料下成立，**不构成对通用 LLM 能力的宣示**；
@@ -187,8 +195,8 @@ python tests/demo_gen.py --strength         # 加强组（T3.4 内容寻址 + �
 
 ## CI/CD 与硬件后端
 
-- **测试流水线**：`ci/run_tests.py`（fast 回归 + 逐位对拍 + 精度验证）；
-  GitHub Actions：`.github/workflows/ci.yml`；GitCode：`Jenkinsfile`（控制台启用 Jenkins 流水线指向该文件）。
+- **测试流水线**：回归入口 `tests/run_tests.py`（fast 19 项）+ 逐位对拍 `tests/verifiers/`；
+  CI：`.gitcode/workflows/ci.yml`（GitCode Action）+ `Jenkinsfile`（GitCode Jenkins）+ `.github/workflows/ci.yml`（GitHub 镜像）。
 - **硬件后端**：CUDA / ROCm / CANN·NPU / CPU 适配与基准见《docs/PHD-Net_硬件后端适配报告》；
   探针与基准入口 `tools/bench_accel.py`。
 - **读出精度**：`--readout-dtype`（fp32 默认 / fp16 / bf16 / fp8 / fp4；fp64 已停止支持）；

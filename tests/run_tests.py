@@ -1,8 +1,11 @@
-"""分层回归总入口：python tests/run_tests.py [--full]
+"""分层回归总入口：python tests/run_tests.py [--fast | --full]
 
 fast（默认，< 1 分钟）：版本一致性、核心三实验、容量层小规模、词级 LM 冒烟、
                        大容量 LTM 冒烟、长程复制、后端三项、开关可构造。
 full：叠加全部耗时验收脚本（demo_lm / demo_m1 … demo_m4 / demo_strength / eval_suite）。
+
+向后兼容：旧的位置参数 `fast`（`python tests/run_tests.py fast`）仍等价于
+`--fast`；未给任何参数时默认 fast。
 
 检查项按类目拆分（结构整理 2026-09-18）：
     tests/checks_common.py   常量、结果收集与断言辅助
@@ -10,6 +13,7 @@ full：叠加全部耗时验收脚本（demo_lm / demo_m1 … demo_m4 / demo_str
     tests/checks_backend.py  硬件后端检查
 """
 
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -20,7 +24,8 @@ if str(ROOT) not in sys.path:
 TESTS = ROOT / "tests"
 PY = sys.executable
 
-from checks_backend import (t_backend_probe, t_torch_equivalence,
+from checks_backend import (t_backend_probe, t_prod_stdp_equivalence,
+                            t_torch_equivalence, t_torch_lm_switches,
                             t_torch_model_smoke)
 from checks_common import ENV, TESTS, _check, _results, reset_results
 from checks_core import (t_bigltm_smoke, t_brain_homologues, t_capacity_small,
@@ -41,10 +46,32 @@ def run_full() -> None:
                (r.stdout or "").strip().splitlines()[-1][:60] if r.stdout else "")
 
 
+def parse_mode(argv: list[str]) -> str:
+    """解析 fast/full 模式。
+
+    显式标志 `--fast` / `--full` 优先；未给标志时回落到旧的位置参数
+    （`fast` / `full` 皆可，忽略之），两者都没有则默认 fast。
+    """
+    ap = argparse.ArgumentParser(
+        prog="tests/run_tests.py",
+        description="PHD-Net 分层回归测试（fast 默认；--full 叠加耗时验收脚本）")
+    ap.add_argument("--fast", action="store_true", help="仅快速回归（默认）")
+    ap.add_argument("--full", action="store_true", help="快速回归 + 全部耗时验收脚本")
+    ap.add_argument("legacy", nargs="*", metavar="LEGACY",
+                    help="旧版位置参数（fast/full），仅为向后兼容保留")
+    ns = ap.parse_args(argv)
+    if ns.full:
+        return "full"
+    if ns.fast:
+        return "fast"
+    return "full" if "full" in ns.legacy else "fast"
+
+
 def main() -> None:
+    mode = parse_mode(sys.argv[1:])
     reset_results()                                  # C7：清空遗留累积结果
     print("=" * 66)
-    print("PHD-Net 回归测试（" + ("full" if "--full" in sys.argv else "fast") + "）")
+    print("PHD-Net 回归测试（" + mode + "）")
     print("=" * 66)
     t_version()
     t_core_demo()
@@ -54,10 +81,12 @@ def main() -> None:
     t_copy_task()
     t_backend_probe()
     t_torch_equivalence()
+    t_prod_stdp_equivalence()
     t_torch_model_smoke()
+    t_torch_lm_switches()
     t_switches_construct()
     t_brain_homologues()
-    if "--full" in sys.argv:
+    if mode == "full":
         run_full()
     n_ok = sum(1 for _, ok, _ in _results if ok)
     print("-" * 66)

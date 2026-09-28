@@ -85,15 +85,15 @@ python train_1b/train.py --preset 1b --data pretrain_zh --tokens 1000000
 python train_1b/train.py --preset 1b --data pretrain_zh --vocab-scan full --resume
 
 # 推理 / 对话（检查点自包含加载，不需要语料）
-python train_1b/infer.py --model models/phdnet1b_1b_sft_final.npz \
+python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz \
     --prompt "用户：什么是机器学习？\n助手：" --n 200
-python train_1b/infer.py --model models/phdnet1b_1b_sft_final.npz --chat
+python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 ```
 
-产物位置（fhz 2026-09-25 指令：**模型统一存 `models/`**）：
+产物位置（fhz 2026-09-28 指令：**生产训练产物统一存 `outputs/models/`**）：
 
-- `models/phdnet1b_{preset}_{data}.npz` —— 滚动检查点（`--ckpt-every` 触发 + 收尾）
-- `models/phdnet1b_{preset}_{data}_final.npz` —— 收尾另存的最终模型
+- `outputs/models/phdnet1b_{preset}_{data}.npz` —— 滚动检查点（`--ckpt-every` 触发 + 收尾）
+- `outputs/models/phdnet1b_{preset}_{data}_final.npz` —— 收尾另存的最终模型
 - `outputs/train_logs/train_1b_*.log` —— 训练日志（含 `[METRIC]` 尾行）
 
 ## 检查点内容（相对生产版的增强）
@@ -115,7 +115,7 @@ python train_1b/infer.py --model models/phdnet1b_1b_sft_final.npz --chat
 
 | 项 | 需求 |
 |---|---|
-| 内存 | 静态 ≈0.5–0.6 GB（读出占大头）+ 大空间表已生长突触（dict 版 ≈100 B/条；`--csr-online` 切在线 CSR ≈10 B/条，逐位等价已由 `tools/verify_csr_equiv.py` 验证） |
+| 内存 | 静态 ≈0.5–0.6 GB（读出占大头）+ 大空间表已生长突触（dict 版 ≈100 B/条；`--csr-online` 切在线 CSR ≈10 B/条，逐位等价已由 `ci/verifiers/verify_csr_equiv.py` 验证） |
 | 磁盘 | 检查点 ≈0.3–0.6 GB/份（npz 未压缩，速度优先） |
 | 吞吐 | 本机纯 CPU 实测见日志 `ms/token`；10^9 token 生产训练需 GPU/集群（参考 `tools/estimate_scale.py` 外推：256M 档本机 157 ms/token ⇒ 10^9 token ≈ 5 年，1B 档生产训练必须换硬件） |
 

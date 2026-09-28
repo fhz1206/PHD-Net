@@ -24,8 +24,8 @@
 参数规模一律用 phdnet.model.count_params 实测（非理论估算）。
 
 输出：
-  outputs/scaling_curve.log   每完成一点立即 append（flush=True）
-  outputs/scaling_curve.json  已完成点 + 最终 α/R²（中断也可保留已得点）
+  outputs/experiments/scaling_curve.log   每完成一点立即 append（flush=True）
+  outputs/experiments/scaling_curve.json  已完成点 + 最终 α/R²（中断也可保留已得点）
 ============================================================================
 """
 import sys, json, time, gc

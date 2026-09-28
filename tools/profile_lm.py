@@ -6,7 +6,7 @@
   2) 手工包装计时：对 step 管线各相（编码 / PC 推理 / PC 学习 / STDP / WM / LTM /
      读出前向 / 读出学习 / onehot / composite）单独累计耗时，给出每 token 分解。
 
-只读剖析，不修改任何模型与数据；结果写入 outputs/profile_lm.log。
+只读剖析，不修改任何模型与数据；结果写入 outputs/experiments/profile_lm.log。
 """
 from __future__ import annotations
 

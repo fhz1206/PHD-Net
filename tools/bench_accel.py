@@ -80,7 +80,7 @@ def main() -> None:
               encoding="utf-8") as f:
         json.dump({"probes": probes, "results": results}, f,
                   ensure_ascii=False, indent=2, default=str)
-    print(f"结果已写入 outputs/bench_accel.json")
+    print(f"结果已写入 outputs/experiments/bench_accel.json")
 
 
 if __name__ == "__main__":

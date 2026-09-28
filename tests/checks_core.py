@@ -124,7 +124,7 @@ def t_switches_construct() -> None:
                  critical_period=True,
                  # M9 第二轮全量优化开关（默认关闭；此处验证全开可构造可运行）
                  pc_predictive_target=True, learnable_encoder=True,
-                 retrieval_topk=4, wm_content_address=True, sparse_pc=True,
+                 retrieval_topk=4, wm_content_address=True,
                  readout_replay=True, neuron_target_rate=True,
                  plateau_sleep=True, pc_dev_steps=100, episodic_len=2)
     off = PHDNet(PHDNetConfig(seed=3))

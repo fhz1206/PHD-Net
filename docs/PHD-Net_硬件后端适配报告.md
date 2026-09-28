@@ -72,7 +72,7 @@ python -c "from phdnet.torch_backend import selftest_torch; print(selftest_torch
 | 设备探针 | cpu ✓；cuda/rocm/npu 均不可用（无硬件，探针诚实降级并告警） |
 | STDP 等价自检 | `selftest_torch('cpu')` PASS |
 | 读出基准 | 见 `outputs/bench_accel.{log,json}`（V=9219 × H=3072） |
-| **LM 全栈等价性（P11）** | `tools/verify_torch_lm.py`：torch vs numpy 主实现（同 seed、冻结语料、base 配置）PPL 相对差 **0.00003%**（容差 1%），读出/STDP/PC 三条权重轨迹 Pearson 相关全部 **1.000000**（容差 0.99）→ PASS |
+| **LM 全栈等价性（P11）** | `tests/verifiers/verify_torch_lm.py`：torch vs numpy 主实现（同 seed、冻结语料、base 配置）PPL 相对差 **0.00003%**（容差 1%），读出/STDP/PC 三条权重轨迹 Pearson 相关全部 **1.000000**（容差 0.99）→ PASS |
 | **LM 冒烟训练（P11）** | `tools/train_torch_lm.py --preset smoke` 2,000 token 跑通（15 ms/token，OOV 0）；PPL 曲线中段上冲经 numpy 同口径对拍确认为 128 维小栈固有动态（两版曲线四位小数一致），非 torch 实现差异 |
 
 ## 五、诚实边界与迁移路线
@@ -89,7 +89,7 @@ python -c "from phdnet.torch_backend import selftest_torch; print(selftest_torch
    fp4 已禁用（MX 块缩放立项后重新评估）。
 4. **无硬件验证边界**：CUDA/ROCm/NPU 的代码路径在本机只能做结构验证（探针降级、自检
    框架就位）；三平台的真机回归须在具备对应硬件的机器或 CI GPU runner 上执行
-   （`tools/bench_accel.py` + `tools/verify_torch_lm.py --device all` 即为 runner
+   （`tools/bench_accel.py` + `tests/verifiers/verify_torch_lm.py --device all` 即为 runner
    就绪的基准/验证入口）。
 5. **精度判据**：跨设备用容差一致（`atol/rtol` + 低精度相关性 ≥0.99，沿用 selftest_torch
    双档判据）；不宣称跨设备逐位等价。

@@ -270,9 +270,7 @@ Hopfield 检索用 sign 吸引子保证收敛；双速率分离避免快学习�
 | `pc_dev_steps` | 0 | ① 发育期后强制巩固表征（+15.6%，不建议） |
 | `neuron_target_rate` / `eta_homeo` | False / 0.01 | ③ 逐神经元目标发放率（+37.9%，不建议） |
 | `bidir_check` / `bidir_w` | False / 1.0 | 复制任务双向校验（−9.9pp，不建议） |
-| `sparse_pc` | False | T5.1-lite **稀疏更新**（稠密矩阵 + 支撑集截断更新；n_top=1024 下 **1.94×** 加速，近似等价） |
-| `pc_topk` | 0 | O1：稀疏更新的**精确 k**（0 = 默认 1/8 比例；k ≥ 层维度时与稠密逐位一致，`tools/verify_pc_topk_equiv.py` 验证） |
-| `sparse_conn` / `conn_k` | False / 0 | **O1-2 主干结构性稀疏连接**（CSR 稀疏图 + numba 核；脑对应：皮层 dense representation + sparse connectivity）。`conn_k` = 每神经元入边数（0 = 各层 n_in//8）。实测：**连接率 3.1%（k=8）时 PPL 与稠密持平（+0.03%）、突触存储压缩 32×**；k=16 时 −0.51%；数值与稠密栈等价（≤1.1e-15）。见 `tools/verify_sparse_conn.py` |
+| `sparse_conn` / `conn_k` | True / 0 | **O1-2 主干结构性稀疏连接（唯一实现）**（CSR 稀疏图 + numba 核；脑对应：皮层 dense representation + sparse connectivity）。`conn_k` = 每神经元入边数（0 = 各层 n_in//8）。实测：连接率 3.1%（k=8）时 PPL 与稠密持平（+0.03%）、突触存储压缩 32×；k=16 时 −0.51%。**2026-09-28 起（fhz 指令）稠密栈已删除**，`sparse_conn=False` 在 config 层 fail-fast（原 `sparse_pc`/`pc_topk` 字段随之移除） |
 | `readout_conn_k` | 0 | **O1-3 读出结构性稀疏**（CSR）。实测 k=8（连接率 1.0%）：**速度 13.3×（7.95→0.60 ms/token）但 PPL +14.8%** ⇒ 吞吐换精度，**默认不启用**；副产物：读出是全项目最大计算瓶颈（占 7.9 ms/token 主体） |
 | `lognormal_init` / `exc_ratio` | False / 0.8 | **O1-4 皮层式权重初始化**（脑对应：突触强度对数正态/重尾 + E/I ≈ 80/20，Song et al. 2005）。启用后权重分布判定为"重尾"，初始 E/I 比即为设定值；默认关闭以保历史基线口径 |
 | `readout_hidden` / `readout_hid_k` / `readout_eta_hid` | 0 / 0 / 0.002 | **A4 两级群体读出**（脑对应：皮层→输出为**多级中继 + 群体编码**，非单层线性分类器）：h → 隐藏群体（稀疏投射 + k-WTA 侧抑制竞争 + **局部无监督 Oja**）→ 输出（稀疏投射 + 任务监督）。实测：速度 **6.828→0.999 ms/token（6.8×）**、参数 −60%，但 PPL **+10~13%**（h=1024 时 +10.3% 最优）→ 与单级稀疏化同量级代价，**默认关闭** |
@@ -332,7 +330,7 @@ AMD GPU 建议 DirectML 路径。
 | 架构模块 | 文件 | 核心类/函数 |
 |---|---|---|
 | M1 稀疏编码器 | `phdnet/sparse_encoder.py` | `SparseEncoder.encode` |
-| M2 预测编码层级 | `phdnet/pc.py` | `PredictiveCodingStack.infer / learn`（含稳态缩放） |
+| M2 预测编码层级 | `phdnet/sparse_pc.py` | `SparsePCStack.infer / learn`（CSR 结构性稀疏；稠密栈 2026-09-28 删除） |
 | M3 STDP 计算核与自检 | `phdnet/stdp_kernels.py` | `_predict_edges` / `_stdp_delta` / `NUMBA_OK` |
 | M3 时序关联核容器 | `phdnet/plasticity.py` | `STDPCore`（稀疏拓扑 + 突触迹 + 自适应/双迹） |
 | M4a 工作记忆 | `phdnet/wm.py` | `WorkingMemory`（兼容再导出：`phdnet/memory.py`） |
@@ -498,7 +496,7 @@ M8 采用与 M9 同构的非对称外积联想链（STDP 拓扑核的稀疏出�
 ### 12.1 M9 收官结论（五轨道）
 
 重测条件：冻结语料 `eval_corpus/internal_corpus.txt` **23,504 字符**（训练 18,803 / 评估 4,701）、seed 11、
-128 维小栈词表口径 OOV 0%，参照基线 R = **102.97**（bpc 6.686）。结果写入 `outputs/demo_m9_result.json`。
+128 维小栈词表口径 OOV 0%，参照基线 R = **102.97**（bpc 6.686）。结果写入 `outputs/test/demo_m9_result.json`。
 
 | 配置 | 字符归一 PPL | 相对 R | 结论 |
 |---|---|---|---|

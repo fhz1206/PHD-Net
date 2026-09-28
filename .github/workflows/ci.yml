@@ -24,9 +24,21 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install numpy numba pyarrow psutil
+          # CPU 版 torch：否则 t_torch_equivalence / t_torch_model_smoke 会以「未安装
+          # torch」被跳过，两个覆盖点在 CI 上从未真正执行。CPU 轮子约 200MB。
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: Run tests (fast + 逐位对拍 + 精度验证)
-        run: python ci/run_tests.py
+      - name: fast 回归（19 项，零回归门槛）
+        run: python tests/run_tests.py fast
+
+      - name: 逐位对拍（分词器 / 词表并行 / 并行核一致性）
+        run: |
+          python tests/verifiers/verify_seg_equiv.py
+          python tests/verifiers/verify_vocab_parallel.py
+          python tests/verifiers/verify_parallel_consistency.py
+
+      - name: torch LM 栈 vs numpy 主实现等价性（容差判据）
+        run: python tests/verifiers/verify_torch_lm.py --device cpu
 
   backend-torch:
     # 硬件后端适配验证：CPU torch 路径（CUDA/NPU/ROCm 需对应硬件 runner，
@@ -47,3 +59,11 @@ jobs:
         run: python tools/bench_accel.py --steps 20
       - name: STDP torch 等价性自检
         run: python -c "from phdnet.torch_backend import selftest_torch; assert selftest_torch('cpu'); print('selftest PASS')"
+      - name: 显式执行两个 torch 回归检查（缺 torch 会在此硬失败）
+        run: |
+          python -c "import torch; print('torch', torch.__version__)"
+          python -c "
+          import sys; sys.path.insert(0, 'tests')
+          from checks_backend import t_torch_equivalence, t_torch_model_smoke
+          t_torch_equivalence(); t_torch_model_smoke()
+          print('torch checks PASS')"

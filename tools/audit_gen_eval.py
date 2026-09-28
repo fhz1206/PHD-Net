@@ -106,7 +106,7 @@ def eval_bigram(nll_fn, tokens) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="第四轮审计 · 泛化能力实测")
-    ap.add_argument("--ckpt", default="models/phdnet1b_smoke_sft.npz")
+    ap.add_argument("--ckpt", default="outputs/smoke/phdnet1b_smoke_sft.npz")
     ap.add_argument("--skip-tokens", type=int, default=150000,
                     help="域内 held-out 从训练流第 N 个 token 开始（=训练 token 数）")
     ap.add_argument("--indomain-tokens", type=int, default=30000)

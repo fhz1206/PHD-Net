@@ -28,11 +28,16 @@
 
 5. **数值协议**：网络状态默认 fp32（cfg.torch_dtype）；softmax/NLL 在 fp32
    主回路（numpy 版为 fp64 主回路——这是跨实现数值差异的主来源，容差判据
-   见 tools/verify_torch_lm.py：PPL 相对差 <1%，权重范数轨迹强相关）。
+   见 ci/verifiers/verify_torch_lm.py：PPL 相对差 <1%，权重范数轨迹强相关）。
 
 已知限制（诚实）：
-  - `readout_dtype` 仅支持 fp32/fp16/bf16（fp8 需 CUDA≥8.9 真机、fp4 无 torch
-    原生类型）；
+  - `readout_dtype` 支持 fp32/fp16/bf16 三档（2026-09-28 修复：此前 fp16/bf16
+    构造成功但训练必崩——`TorchReadoutDense` 裸 `self.W @ h`，torch matmul 不做
+    类型提升，`readout_dtype != torch_dtype` 即报 addmv dtype 不一致。现已在
+    forward/learn_softmax 内显式统一 dtype，softmax 仍在 fp32 主回路算完再转回）；
+    fp8 需 CUDA≥8.9 真机、fp4 无 torch 原生类型（fp4 另已在 config 层禁用）；
+  - 主干恒为稀疏 CSR 语义（`TorchSparsePC` 只实现 CSR 边表示）；稠密 PC 栈
+    已于 2026-09-28 按 fhz 指令删除（sparse_conn=False 在 config 层 fail-fast）；
   - T4.1 逐突触自适应 / STDP 稳态 / 元可塑性 / E-I 突触 / big_ltm 大容量表 /
     retrieval_topk / 两级读出 / 内容寻址 WM 未迁移（显式 NotImplementedError）；
   - M3 复用 `TorchSTDPCore` 的 numpy↔torch 每步互转（n_top 维小向量，CPU 上
@@ -100,9 +105,11 @@ class _ProdSTDPCore(TorchSTDPCore):
 # 设备解析（诚实报错，不静默回退）
 # ---------------------------------------------------------------------------
 def resolve_device(device: str = "auto", allow_fallback: bool = False) -> str:
-    """把 auto/cpu/cuda/rocm/npu/任意 torch 设备串解析为可执行设备。
+    """把 auto/cpu/cuda/rocm/npu/dml/任意 torch 设备串解析为可执行设备。
 
-    - "auto"：probe_devices() 按昇腾 NPU → ROCm → CUDA → CPU 择优；
+    - "auto"：probe_devices() 按 **昇腾 NPU → ROCm → CUDA → DirectML → CPU**
+      择优（与 `phdnet/device.py::probe()` 声明的顺序一致；2026-09-28 补齐
+      DirectML，此前本函数缺该项，会跳过 Windows 上的 AMD/Intel GPU 直通）；
     - 显式设备不可用时抛 RuntimeError（诚实报错）；allow_fallback=True 才
       在 RuntimeWarning 后回退 CPU。
     """
@@ -114,6 +121,8 @@ def resolve_device(device: str = "auto", allow_fallback: bool = False) -> str:
         for key in ("npu", "rocm", "cuda"):
             if probes.get(key, {}).get("ok"):
                 return "npu" if key == "npu" else "cuda"
+        if probes.get("dml", {}).get("ok"):
+            return probes["dml"]["device"] or "privateuseone:0"
         return "cpu"
     if dev == "cpu":
         return "cpu"
@@ -131,6 +140,17 @@ def resolve_device(device: str = "auto", allow_fallback: bool = False) -> str:
             return "npu" if dev == "npu" else "cuda"
         probes = probe_devices()
         msg = (f"请求设备 '{device}' 在本机不可用（probe_devices: {probes}）；"
+               "torch LM 栈诚实报错，不做静默回退。")
+        if allow_fallback:
+            import warnings
+            warnings.warn(msg + " 已按 allow_fallback=True 回退 CPU。", RuntimeWarning)
+            return "cpu"
+        raise RuntimeError(msg)
+    if dev == "dml":
+        probes = probe_devices()
+        if probes.get("dml", {}).get("ok"):
+            return probes["dml"]["device"] or "privateuseone:0"
+        msg = (f"请求设备 'dml' 在本机不可用（probe_devices: {probes}）；"
                "torch LM 栈诚实报错，不做静默回退。")
         if allow_fallback:
             import warnings
@@ -294,7 +314,7 @@ class TorchWM:
         """最弱槽位选择 —— 复刻 numpy `WorkingMemory._pick_weakest` 的
         `np.argsort(strength)[0]` 语义（并列时 introsort 的顺序与 argmin 的
         首最小值可能不同，实测会导致槽位选择分歧，故直接用 numpy 对齐）。"""
-        order = np.argsort(self.strength.detach().cpu().numpy())
+        order = np.argsort(self.strength.detach().float().cpu().numpy())
         return int(order[0])
 
     def write(self, r: "torch.Tensor", gate: float, thresh: float) -> bool:
@@ -357,16 +377,21 @@ class TorchReadoutDense:
         self.w_clip = float(w_clip)
 
     def forward(self, h: "torch.Tensor") -> "torch.Tensor":
-        return self.W @ h
+        # 显式统一 dtype：网络状态 dtype（cfg.torch_dtype）可与读出存储精度
+        # （cfg.readout_dtype）不同，而 torch matmul 不做类型提升，直接
+        # `self.W @ h` 会抛 "addmv input tensors must have the same dtype"。
+        # fp32 默认路径下 .to() 为 no-op（返回同一张量），逐位不变。
+        return self.W @ h.to(self.W.dtype)
 
     def learn_softmax(self, h: "torch.Tensor", target: "torch.Tensor",
                       eta: float, y_pre: "torch.Tensor | None" = None) -> float:
-        y = self.W @ h if y_pre is None else y_pre
-        p = torch.softmax(y.float(), dim=0)
+        ht = h.to(self.W.dtype)                  # 同上：统一到读出存储精度
+        y = self.W @ ht if y_pre is None else y_pre
+        p = torch.softmax(y.float(), dim=0)      # softmax 主回路恒为 fp32
         correct = int(torch.argmax(target).item())
         nll = float(-torch.log(p[correct] + 1e-12).item())
         dp = (p - target.float()).to(self.W.dtype)
-        self.W.add_(torch.outer(dp, h.to(self.W.dtype)), alpha=-eta)
+        self.W.add_(torch.outer(dp, ht), alpha=-eta)
         if self.w_clip > 0.0:
             self.W.clamp_(-self.w_clip, self.w_clip)
         return nll
@@ -381,7 +406,14 @@ class TorchPHDNet:
     未迁移机制（显式拒绝，不做静默近似）：adaptive_lr / stdp_homeostasis /
     metaplasticity / ei_synapses / big_ltm / retrieval_topk / readout_hidden /
     readout_conn_k / lognormal_init / wm_summary_every / readout_recurrence /
-    segment_check / plateau_sleep / multi_modulation。
+    segment_check / multi_modulation / dual_trace / learnable_encoder /
+    critical_period / task_modulation / auto_development /
+    pc_predictive_target / neuron_target_rate。
+
+    ⚠ `sparse_conn` 单独处理（见下）：torch 栈**恒用稀疏 CSR 主干语义**
+    （`TorchSparsePC` 只实现 CSR 边表示，无稠密路径），故 `sparse_conn=False`
+    （要求稠密主干）显式 NotImplementedError；而库默认 `sparse_conn=True`
+    与 torch 栈行为一致，正常放行。
     """
 
     def __init__(self, cfg: "PHDNetConfig", device: str = "cpu",
@@ -396,13 +428,23 @@ class TorchPHDNet:
         for name in ("adaptive_lr", "stdp_homeostasis", "metaplasticity",
                      "ei_synapses", "big_ltm", "retrieval_topk", "readout_hidden",
                      "readout_conn_k", "lognormal_init", "wm_summary_every",
-                     "readout_recurrence", "segment_check", "multi_modulation"):
+                     "readout_recurrence", "segment_check", "multi_modulation",
+                     # 以下 7 项 numpy 端真实生效（见 model.py:325-398），
+                     # 但 step() 从未实现 → 此前被静默忽略（构造成功、
+                     # 训练照跑，但与 numpy 逐张量不同）。按模块 docstring
+                     # 「显式拒绝，不做静默近似」的承诺改为构造时拒绝。
+                     "dual_trace", "learnable_encoder", "critical_period",
+                     "task_modulation", "auto_development",
+                     "pc_predictive_target", "neuron_target_rate"):
             v = getattr(cfg, name, 0)
             if v and (v is True or (isinstance(v, (int, float)) and v > 0)):
                 _unsupported.append(name)
         if _unsupported:
             raise NotImplementedError(
                 f"torch LM 栈暂不支持机制：{_unsupported}（请关闭或使用 numpy 后端）")
+        # sparse_conn：config.__post_init__ 已拦 False（稠密 PC 栈 2026-09-28 按
+        # fhz 指令删除）；torch 栈恒用稀疏 CSR 主干语义（TorchSparsePC 只实现
+        # CSR 边表示），与库默认 True 一致。
         if cfg.readout_dtype in ("fp8", "fp4"):
             raise NotImplementedError(
                 "torch 栈 readout_dtype 暂不支持 fp8/fp4（fp8 需 CUDA≥8.9 真机；"
@@ -471,7 +513,7 @@ class TorchPHDNet:
         cache = self.pc.infer(s0, cfg.n_infer_steps)         # 2. M2
         r2 = cache["r2"]
         rate = self._rate(r2)
-        rate_np = rate.detach().cpu().numpy().astype(np.float64)
+        rate_np = rate.detach().float().cpu().numpy().astype(np.float64)
 
         pred = self.stdp.predict(self._prev_rate)            # 3. M3（诊断）
         pred_feat = self.stdp.predict(self._last_rate)       # T3.1 读出预测特征
@@ -573,6 +615,7 @@ class TorchPHDNet:
             "mod_m2": np.array([self.modulator.m2]),
             "mod_count": np.array([self.modulator.count]),
             "ro_eta": np.array([self._ro_eta]),
+            "_exp": np.array([self._exp]),
             "step_count": np.array([self.step_count]),
         }
         return d
@@ -598,6 +641,10 @@ class TorchPHDNet:
         self.modulator.m2 = float(d["mod_m2"][0])
         self.modulator.count = float(d["mod_count"][0])
         self._ro_eta = float(d["ro_eta"][0])
+        # _exp（发育经验计数）此前漏出/漏恢复，round-trip 后归零；
+        # 向后兼容旧检查点（无该键则不恢复）。
+        if "_exp" in d:
+            self._exp = float(d["_exp"][0])
         self.step_count = int(d["step_count"][0])
 
 
@@ -639,10 +686,12 @@ class TorchWordLM:
         prev: str | None = None
         for i in range(len(toks) - 1):
             if not keep[i]:                       # 跳过位置仍推进上下文
-                prev = toks[i]
+                prev = toks[i] if toks[i] in stoi else prev
                 continue
-            if toks[i + 1] not in stoi:           # OOV 目标：跳过学习，上下文照常推进
-                prev = toks[i]
+            # OOV 安全（2026-09-28 修复，与 numpy 主实现同口径）：cur/nxt 任一端
+            # OOV 整步跳过，prev 保持最后已知 token（旧实现只挡目标端 → cur OOV
+            # 时 encode_composite KeyError）。
+            if toks[i] not in stoi or toks[i + 1] not in stoi:
                 continue
             ls = 1.0 if weights is None else weights[i]
             d = self.net.step(self.tok.encode_composite(toks[i], prev),
@@ -684,9 +733,8 @@ class TorchWordLM:
         n_tok, oov = 0, 0
         for i in range(len(toks) - 1):
             cur, nxt = toks[i], toks[i + 1]
-            if cur not in stoi or nxt not in stoi:   # OOV：不计 NLL、不改状态
+            if cur not in stoi or nxt not in stoi:   # OOV：不计 NLL、不计字符分母（同 numpy 口径）
                 oov += 1
-                n_chars += len(nxt)
                 continue
             y = self.net.step(self.tok.encode_composite(cur, prev),
                               learn=False, readonly=True)["y"]
@@ -709,6 +757,9 @@ class TorchWordLM:
                  rng: "np.random.Generator | None" = None) -> list[str]:
         """自回归采样（温度 τ；情景缓冲 T3.3 未迁移）。"""
         rng = rng or np.random.default_rng(0)
+        if seed_token not in self.tok.stoi:
+            raise KeyError(f"seed_token={seed_token!r} 不在词表中（词表规模 "
+                           f"{len(self.tok)}；OOV 种子无法编码，诚实报错）")
         out = [seed_token]
         prev: str | None = None
         cur = seed_token

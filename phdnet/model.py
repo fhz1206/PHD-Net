@@ -18,7 +18,6 @@ from .bigltm import SparseLTM
 from .sparse_pc import SparsePCStack
 from .memory import LongTermMemory, WorkingMemory
 from .modulator import Neuromodulator, MultiModulator
-from .pc import PredictiveCodingStack
 from .plasticity import STDPCore
 from .readout import Readout
 from .sparse_encoder import SparseEncoder
@@ -34,16 +33,14 @@ class PHDNet:
         self.cfg = cfg
         rng = np.random.default_rng(cfg.seed)
         self.encoder = SparseEncoder(cfg.n_input, cfg.n_sdr, cfg.k_sparse, rng)   # M1
-        if cfg.sparse_conn:                                                       # O1-2
-            self.pc = SparsePCStack(cfg.n_sdr, cfg.n_mid, cfg.n_top,              # M2（结构性稀疏）
-                                    cfg.eta_pc, cfg.eta_oja, rng, conn_k=cfg.conn_k,
-                                    lognormal_init=cfg.lognormal_init,            # O1-4
-                                    exc_ratio=cfg.exc_ratio)
-        else:
-            self.pc = PredictiveCodingStack(                                      # M2（稠密）
-                cfg.n_sdr, cfg.n_mid, cfg.n_top, cfg.eta_pc, cfg.eta_oja, rng,
-                sparse_pc=cfg.sparse_pc, topk=cfg.pc_topk,                        # T5.1-lite / O1
-                lognormal_init=cfg.lognormal_init, exc_ratio=cfg.exc_ratio)       # O1-4
+        # M2 主干：结构性稀疏 CSR（唯一实现）。2026-09-28 按 fhz 指令删除稠密
+        # PredictiveCodingStack（phdnet/pc.py）；cfg.sparse_conn 仅为兼容保留，
+        # 传 False 会在 config 校验期 fail-fast。
+        self.pc = SparsePCStack(cfg.n_sdr, cfg.n_mid, cfg.n_top,                  # M2（结构性稀疏）
+                                cfg.eta_pc, cfg.eta_oja, rng, conn_k=cfg.conn_k,
+                                w_max=cfg.pc_w_max,
+                                lognormal_init=cfg.lognormal_init,                # O1-4
+                                exc_ratio=cfg.exc_ratio)
         # M3 关联核：默认 numpy(+numba)；显式指定或检测到加速器时改用 torch 后端
         # （同一算子语义，覆盖 CPU / CUDA / ROCm(HIP) / 昇腾 NPU）
         if use_torch_backend(cfg.backend):
@@ -329,11 +326,15 @@ class PHDNet:
             task_gate_now = self._task_gate
         # 读出学习率退火（0=关闭）：恒定学习率 + 表征漂移会导致后期样本
         # 覆盖早期学习（灾难性遗忘的入口之一），发育后需逐步巩固
-        if cfg.eta_readout_anneal > 0.0 and learn:
+        if cfg.eta_readout_anneal > 0.0 and learn and not readonly:
             self._ro_eta = max(cfg.eta_readout_floor,
                                self._ro_eta * cfg.eta_readout_anneal)
 
-        if learn:                                            # 8. 全模块局部学习（×调制门）
+        if learn and not readonly:                           # 8. 全模块局部学习（×调制门）
+            # 2026-09-28 修复：readonly=True 时此块此前未被冻结（PC/STDP/编码器
+            # 学习、task_gate、_prev_rate/_exp 均被改写），与 docstring「冻结所有
+            # 持久状态」的承诺不符。现行调用方均为 learn=False+readonly=True 配对，
+            # 故默认路径数值不变； learn=True+readonly=True 从此真正只读。
             # P3 自动发育调度：支撑集 Jaccard 变化率 → 表征稳定度
             # 不稳定期：STDP 被门控压制（dev_floor 下限）、PC 快速发育；
             # 表征稳定后：PC 学习自动衰减至 0，STDP 全量放开（双通道互补）

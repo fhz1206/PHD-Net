@@ -92,7 +92,7 @@ fp8 e4m3fn / fp4 e2m1 + 逐张量缩放）；softmax/NLL 保持 fp64 主回路�
 - `TorchReadout`：读出热路径 torch 化（fp32/fp16/bf16 原生；fp8 需 CUDA ≥ 8.9；fp4 走 CPU 码本）；
 - `TorchSTDPCore` + `selftest_torch` 等价自检（沿用）；
 - 本机实测：CPU 参考路径 fp32 40.9 ms/token（读出规模 9219×3072）；三平台真机回归待硬件。
-- CI：`ci/run_tests.py` + `.github/workflows/ci.yml`（GitHub）+ `Jenkinsfile`（GitCode）。
+- CI：`.gitcode/workflows/ci.yml`（GitCode Action）+ `.github/workflows/ci.yml`（GitHub 镜像）+ `Jenkinsfile`（GitCode Jenkins）；验证脚本统一在 `tests/verifiers/`。
 
 ## 七、开放项（按优先级）
 
@@ -112,10 +112,10 @@ python tests/run_tests.py fast                 # 零回归门槛（11 项）
 python tools/rebaseline.py                     # 当前基线复测（90.2480 / 73.1166，eta=0.15）
 python tools/audit_precision.py                # 精度体系验证（L1 逐位 / L2 带宽 / L3 PPL）
 python tools/audit_prof_1b.py                  # 1B 生产配置模块级剖析
-python tools/audit_gen_eval.py --ckpt models/phdnet1b_smoke_mix.npz \
+python tools/audit_gen_eval.py --ckpt outputs/smoke/phdnet1b_smoke_mix.npz \
     --skip-tokens 100000 --indomain-tokens 30000 --data mix   # 三域泛化评测
 python tools/audit_imprint_gate.py [--full]    # big_ltm 印迹门控实验
-python train_1b/verify_vocab_parallel.py       # 多核词表/加载逐位对拍
+python tests/verifiers/verify_vocab_parallel.py  # 多核词表/加载逐位对拍
 python tools/bench_accel.py                    # 加速器探针 + 读出基准（CUDA/ROCm/NPU/CPU）
-python ci/run_tests.py                         # CI 全量（GitHub Actions / GitCode 同源）
+python tests/run_tests.py fast                # CI 回归（三平台 CI 同源，见 .gitcode/workflows/ci.yml）
 ```

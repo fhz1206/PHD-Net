@@ -41,7 +41,6 @@ SMALL = dict(n_sdr=64, k_sparse=8, n_mid=64, n_top=64,
 
 # 单个开关（每项独立开启）+ 关键组合
 SINGLE = [
-    ("sparse_pc", dict(sparse_pc=True)),
     ("sparse_conn", dict(sparse_conn=True)),
     ("big_ltm", dict(big_ltm=True, big_ltm_N=1 << 16)),
     ("big_ltm+csr", dict(big_ltm=True, big_ltm_N=1 << 16, csr_online=True, csr_grow_chunk=4)),
@@ -68,7 +67,6 @@ SINGLE = [
     ("growth", dict(growth_guidance=True)),
     ("wm_content", dict(wm_content_address=True)),
     ("readout_replay", dict(readout_replay=True, replay_every=2)),
-    ("sparse_pc+topk", dict(sparse_pc=True, pc_topk=8)),
 ]
 
 COMBO = [

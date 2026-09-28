@@ -25,7 +25,10 @@ class PHDNetConfig:
     m_lateral: int = 16        # 每神经元出边数（稀疏拓扑）
     lambda_trace: float = 0.35  # 突触迹衰减（时间窗宽度，过宽会引入隔步混淆）
     eta_stdp: float = 0.03     # STDP 学习率
-    w_max: float = 1.0         # 权重截断上限
+    w_max: float = 1.0         # 权重截断上限（STDP 核；PC 主干用 pc_w_max）
+    pc_w_max: float = 2.0      # PC 主干（稠密/稀疏）权重截断上限——2026-09-28 修复：
+                               # 此前 cfg.w_max 从未传入 PC（签名默认 2.0 静默生效），
+                               # 现显式化为独立字段，默认值 = 历史实际行为（逐位不变）
 
     # M4a 工作记忆
     n_wm_slots: int = 4        # 槽位数（有限容量 ≈7±2 的抽象）
@@ -172,23 +175,16 @@ class PHDNetConfig:
     plateau_sleep: bool = False
     plateau_patience: int = 2       # 连续 N 个验证段无改善才触发
 
-    # T5.1（lite）稀疏 PC：学习更新只触达活跃支撑集（各层 |r| 前 1/8），
-    #      学习成本 O(n²)→O(k·n)，为「顶层 4096+ 双栈统一」铺路。
-    #      注：截断到支撑集属近似等价（非活跃单元贡献被舍弃）。
-    sparse_pc: bool = False
-    pc_topk: int = 0        # O1：稀疏 PC 的精确 k（>0 覆盖默认 1/8 比例；
-                            # k ≥ 层维度时退化为稠密更新——与稠密路径逐位一致，
-                            # 由 tools/verify_pc_topk_equiv.py 对拍验证）
-
     # O1-2：主干**结构性稀疏连接**（sparse connectivity）。
     # 脑对应：皮层组织原则是 dense representation + sparse connectivity ——
     # 单个锥体神经元仅 ~10³–10⁴ 突触（潜在靶点 ~10¹¹，连接率 ~10⁻⁵～10%），
     # 权重的存在性是结构性的（不存在的突触不存储、不计算），而非"零值稠密矩阵"。
     # **2026-09-24 起默认 True**（fhz 指令「稀疏要默认开启」）：
     #   实测依据——连接率 12.5%（k=32）时 PPL 与稠密持平（+0.03%~−0.30%），
-    #   k=16（6.25%）时 −0.51%；突触存储压缩 6.7–32×、PC 层加速 1.68–4.02×；
-    #   与稠密栈数值等价（150 步后权重偏差 ≤1.1e-15）。
-    sparse_conn: bool = True    # True = 主干用 SparsePCStack（CSR 稀疏图 + numba 核）
+    #   k=16（6.25%）时 −0.51%；突触存储压缩 6.7–32×、PC 层加速 1.68–4.02×。
+    # **2026-09-28 起（fhz 指令「删稠密功能」）稠密栈已删除**（phdnet/pc.py 移除），
+    #   主干唯一实现为 SparsePCStack；本字段仅为配置兼容保留，False 会 fail-fast。
+    sparse_conn: bool = True
     conn_k: int = 0             # 每神经元入边数 k（0 = 自动取各层 n_in//8 ≈ 12.5%）
 
     # O1-3：**读出头的结构性稀疏连接**（默认关闭）。
@@ -292,3 +288,15 @@ class PHDNetConfig:
                 "4K 口径 ppl +5.88%；MX 块缩放立项后重新启用。"
                 "实现代码保留于 phdnet/readout.py（_q_fp4/_ro_q_update_fp4）"
                 "与 tools/audit_precision.py。")
+        # 2026-09-28 修复：k_sparse > n_sdr 时 SparseEncoder 的 argpartition kth
+        # 越界（构造成功、首个 step 才崩）。fail-fast 提前到配置期。
+        if self.k_sparse > self.n_sdr:
+            raise ValueError(
+                f"k_sparse({self.k_sparse}) 不得超过 n_sdr({self.n_sdr})"
+                "——k-WTA 每层只有 n_sdr 个神经元可选。")
+        # 2026-09-28（fhz 指令「删稠密功能」）：稠密 PC 栈已删除，主干唯一实现
+        # 为 SparsePCStack；sparse_conn=False 显式拒绝（不做静默稀疏化）。
+        if self.sparse_conn is not True:
+            raise ValueError(
+                "sparse_conn=False 已不可用（fhz 2026-09-28 删除稠密 PC 功能）："
+                "主干唯一实现为 SparsePCStack（CSR 稀疏图），请使用默认 True。")

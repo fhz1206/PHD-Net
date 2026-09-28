@@ -1,0 +1,73 @@
+# GitCode Action 流水线（https://docs.gitcode.com/docs/help/home/org_project/pipeline/quick-start）
+# Workflow 目录：.gitcode/workflows/（注意：不是 .workflow/ 或 .github/workflows/）
+# 与 .github/workflows/ci.yml（GitHub 镜像）、Jenkinsfile（GitCode Jenkins）同一套测试。
+name: PHD-Net CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  regression:
+    name: 回归 + 逐位对拍
+    runs-on: [ubuntu-latest]
+    steps:
+      - name: Checkout
+        uses: checkout
+      - name: 安装依赖（numpy / numba / pyarrow / psutil）
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy numba pyarrow psutil
+      - name: fast 回归（19 项，零回归门槛）
+        run: python tests/run_tests.py fast
+      - name: 分词器向量化逐位对拍
+        run: python tests/verifiers/verify_seg_equiv.py
+      - name: 词表并行构建逐位对拍
+        run: python tests/verifiers/verify_vocab_parallel.py
+      - name: 并行核 / 多进程流逐位一致性
+        run: python tests/verifiers/verify_parallel_consistency.py
+
+  torch-backend:
+    name: torch 栈（CPU 参考路径）
+    runs-on: [ubuntu-latest]
+    steps:
+      - name: Checkout
+        uses: checkout
+      - name: 安装依赖（含 CPU 版 torch）
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy numba pyarrow psutil
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: torch 等价性 + 模型冒烟检查
+        run: |
+          python -c "import sys; sys.path.insert(0, 'tests'); \
+            from checks_backend import t_torch_equivalence, t_torch_model_smoke; \
+            t_torch_equivalence(); t_torch_model_smoke(); print('torch checks PASS')"
+      - name: torch LM 栈 vs numpy 主实现等价性（容差判据）
+        run: python tests/verifiers/verify_torch_lm.py --device cpu
+
+  precision:
+    name: 精度体系验证（P9）
+    runs-on: [ubuntu-latest]
+    needs: [regression]
+    steps:
+      - name: Checkout
+        uses: checkout
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy numba pyarrow psutil
+      - name: 精度审计（L1 位算法逐位 / L2 带宽 / L3 端到端）
+        run: python tools/audit_precision.py

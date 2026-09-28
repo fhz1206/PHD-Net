@@ -70,8 +70,8 @@ from phdnet.word_encoder import WordTokenizer                         # noqa: E4
 from vocab_parallel import auto_workers, build_segmenter_parallel    # noqa: E402
 from vocab_parallel import parallel_head_tokens, scan_vocab_parallel # noqa: E402
 
-SAVE_DIR = _ROOT / "models"          # fhz 2026-09-25：训练模型统一存 models/
-LOG_DIR = _ROOT / "outputs" / "train_logs"
+SAVE_DIR = _ROOT / "outputs" / "models"   # fhz 2026-09-28：生产训练产物统一存 outputs/models/
+LOG_DIR = _ROOT / "outputs" / "models" / "train_logs"
 
 DATA_FILES = {
     # 训练数据一律用上传分片 parquet（sft/ pretrain/ 根）；raw/ 仅归档不触碰

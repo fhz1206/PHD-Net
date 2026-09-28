@@ -16,7 +16,7 @@
   python -X utf8 tools/experiment_plasticity.py                 # 全跑
   python -X utf8 tools/experiment_plasticity.py --only freeze,plastic_naive,...
   python -X utf8 tools/experiment_plasticity.py --bwt            # 可选 BWT 对比（见下）
-日志：outputs/experiment_plasticity.log（脚本内追加写，调用方重定向亦可）。
+日志：outputs/experiments/experiment_plasticity.log（脚本内追加写，调用方重定向亦可）。
 """
 
 from __future__ import annotations

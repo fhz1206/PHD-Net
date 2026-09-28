@@ -6,7 +6,7 @@
   T3.2 检索常态化+top-k      retrieval_topk
   T3.4 WM 内容寻址+扩容      wm_content_address / n_wm_slots
   T4.4 验证驱动睡眠          plateau_sleep（valid_text）
-  T5.1lite 稀疏 PC 学习更新  sparse_pc（容量组基准）
+  （T5.1lite 稀疏 PC 对照轨道：随稠密栈删除，fhz 2026-09-28）
   T5.2 拓扑生长引导          growth_guidance（容量组）
   T5.3 int8 量化存储         sparse_int8（容量组）
   PC突破① 发育期后巩固      pc_dev_steps
@@ -36,7 +36,6 @@ import numpy as np
 
 from phdnet.bigltm import SparseLTM
 from phdnet.config import PHDNetConfig
-from phdnet.pc import PredictiveCodingStack
 from phdnet.word_lm import PHDWordLM
 
 SEG = dict(max_len=4, min_count=8, min_entropy=1.0)
@@ -196,40 +195,8 @@ def capacity_bench() -> dict:
     out["growth_causal"] = {"a_to_b": hit_b, "b_to_c": hit_c}
     print(f"  T5.2 因果结构（引导表）: A→B 重合 {hit_b:.2f} / B→C 重合 {hit_c:.2f}")
 
-    # ---- T5.1-lite 稀疏 PC：n_top=1024 学习步耗时 ----
-    n0, n1, n2 = 256, 1024, 1024
-    pc_d = PredictiveCodingStack(n0, n1, n2, 0.02, 0.02,
-                                 np.random.default_rng(0), sparse_pc=False)
-    pc_s = PredictiveCodingStack(n0, n1, n2, 0.02, 0.02,
-                                 np.random.default_rng(0), sparse_pc=True)
-    x = np.zeros(n0); x[np.arange(0, 32)] = 1.0
-    cache_d = pc_d.infer(x, 1)
-    cache_s = pc_s.infer(x, 1)
-    N = 20
-    t0 = time.perf_counter()
-    for _ in range(N):
-        pc_d.learn(cache_d, eta_scale=1.0)
-    t_dense = (time.perf_counter() - t0) / N * 1000
-    t0 = time.perf_counter()
-    for _ in range(N):
-        pc_s.learn(cache_s, eta_scale=1.0)
-    t_sparse = (time.perf_counter() - t0) / N * 1000
-    # 近似等价度：同一权重出发跑 1 步后比较
-    pc_a = PredictiveCodingStack(n0, n1, n2, 0.02, 0.02,
-                                 np.random.default_rng(0), sparse_pc=False)
-    pc_b = PredictiveCodingStack(n0, n1, n2, 0.02, 0.02,
-                                 np.random.default_rng(0), sparse_pc=True)
-    pc_a.learn(pc_a.infer(x, 1), 1.0)
-    pc_b.learn(pc_b.infer(x, 1), 1.0)
-    rel = float(np.abs(pc_a.W_dn0 - pc_b.W_dn0).max()
-                / (np.abs(pc_a.W_dn0).max() + 1e-9))
-    out["sparse_pc"] = {"dense_ms": round(t_dense, 2),
-                        "sparse_ms": round(t_sparse, 2),
-                        "speedup": round(t_dense / t_sparse, 2),
-                        "rel_dev_1step": rel}
-    print(f"  T5.1lite 稀疏 PC (n_top=1024): 稠密 {t_dense:.2f} ms/步 → "
-          f"稀疏 {t_sparse:.2f} ms/步（{t_dense / t_sparse:.2f}×），"
-          f"单步相对偏差 {rel:.4f}（近似等价）")
+    # ---- T5.1-lite 稀疏 PC：随稠密栈删除（fhz 2026-09-28），轨道移除 ----
+
     return out
 
 
@@ -253,7 +220,7 @@ def main() -> None:
               "n_chars": len(text)}
     (_ROOT / "outputs" / "demo_m9_result.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
-    print("\n结果已写入 outputs/demo_m9_result.json")
+    print("\n结果已写入 outputs/test/demo_m9_result.json")
 
 
 if __name__ == "__main__":

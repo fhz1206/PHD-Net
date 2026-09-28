@@ -23,13 +23,15 @@ class Generator:
             self.lm.net.step(self.lm.tok.encode(ch), learn=False)
         out = []
         last = prompt[-1] if prompt else self.lm.tok.chars[0]
+        topk = min(self.topk, len(self.lm.tok.chars))   # 2026-09-28 修复：
+                                                        # 词表 < topk 时 argpartition kth 越界
         for _ in range(n_chars):
             d = self.lm.net.step(self.lm.tok.encode(last), learn=False)
             y = d["y"].astype(np.float64)
             y -= y.max()
             p = np.exp(y / self.tau)
             p /= p.sum()
-            idx = np.argpartition(-p, self.topk - 1)[:self.topk]
+            idx = np.argpartition(-p, topk - 1)[:topk]
             pp = p[idx] / p[idx].sum()
             j = int(self.rng.choice(idx, p=pp))
             out.append(self.lm.tok.chars[j])

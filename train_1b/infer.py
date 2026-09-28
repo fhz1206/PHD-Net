@@ -2,7 +2,7 @@
 
 能力（2026-09-25，配合 1M context 流式训练补齐推理侧）
 ----------------------------------------------------
-1. **检查点自包含加载**：从 `models/phdnet1b_*.npz` 恢复模型，**不需要语料**
+1. **检查点自包含加载**：从 `outputs/models/phdnet1b_*.npz` 恢复模型，**不需要语料**
    ——词表（seg.vocab/tokens/SDR 哈希）已完整序列化在检查点内（ckpt_1b），
    cfg 由检查点元数据重建。训练与推理的词表逐位一致（同一哈希逻辑）。
 2. **流式长 prompt**：prompt 经 StreamingTokenizer 流式预热（learn=False），
@@ -19,9 +19,9 @@ WM 锚定 + LTM 印迹 + 情景缓冲），生成的是格式上连贯的文本�
 
 用法
 ----
-python train_1b/infer.py --model models/phdnet1b_1b_sft_final.npz \
+python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz \
     --prompt "用户：什么是机器学习？\n助手：" --n 200
-python train_1b/infer.py --model models/phdnet1b_1b_sft_final.npz --chat
+python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 """
 
 from __future__ import annotations
@@ -150,7 +150,7 @@ def generate(lm: PHDWordLM, prompt: str, n_tokens: int = 200,
 def main() -> None:
     ap = argparse.ArgumentParser(description="PHD-Net 1B 推理 / 对话")
     ap.add_argument("--model", type=Path, required=True,
-                    help="models/phdnet1b_*.npz（检查点或 final）")
+                    help="outputs/models/phdnet1b_*.npz（检查点或 final）")
     ap.add_argument("--prompt", type=str, default="",
                     help="单次续写 prompt（空 + --chat 进入交互）")
     ap.add_argument("--chat", action="store_true",

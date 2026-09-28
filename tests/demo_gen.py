@@ -27,7 +27,7 @@
   ≤2× 良好 ｜ 2–4× 中等 ｜ >4× 不足；另看远域 ratio（vs ngram full）>1
   为附加不足信号。
 
-运行：python tests/demo_gen.py（后台 ~15–30 分钟）→ 建议重定向 outputs/demo_gen.log
+运行：python tests/demo_gen.py（后台 ~15–30 分钟）→ 建议重定向 outputs/test/demo_gen.log
 """
 
 from __future__ import annotations
@@ -184,7 +184,7 @@ def main(argv: list[str] | None = None) -> None:
         json.dump({"config": label, "rows": rows, "results": results,
                    "verdict": verdict, "worst_inflation": worst},
                   f, ensure_ascii=False, indent=1)
-    print("结果已写入 outputs/demo_gen_result.json")
+    print("结果已写入 outputs/test/demo_gen_result.json")
 
 
 if __name__ == "__main__":

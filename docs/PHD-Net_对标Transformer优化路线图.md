@@ -140,7 +140,7 @@ T3.2（**+3.2%，符号翻转**）、T2.2（**+18.4%**）、T4.3（+4.2%）、�
 
 > 本轮对全部 7 项做了定向推进：**O4/O6/O7 完成**、**O1/O3 结构落地并完成 1B 档验证**、
 > **O5 部分兑现**、**O2 经 10 配置实测判定"当前不可解锁"**（诚实负面结论）。
-> 证据日志：`outputs/verify_seg_equiv.log`（O4）、`ablation_modules.log`（O6）、
+> 证据日志：`outputs/test/verify_seg_equiv.log`（O4）、`ablation_modules.log`（O6）、
 > `scaling_curve.log`+`scaling_data_axis.log`（O7）、`verify_csr_equiv.log`+`bench_1b_migrate.log`（O1/O3）、
 > `experiment_o5_b7.log`+`experiment_o5_segment.log`（O5）、`experiment_plasticity.log`（O2）。
 > 统一训练口径：冻结语料，训练段前 4,000 字符（基线 ppl_char = **97.2596**，各脚本独立复现一致）。
@@ -164,10 +164,10 @@ T3.2（**+3.2%，符号翻转**）、T2.2（**+18.4%**）、T4.3（+4.2%）、�
 | M1 | △ 机制落地、未拿到收益 → 任务信号在冻结表征下无处可去 | 三条 T1 全部无净增益 | `tests/demo_m1.py` |
 | M2 | ✓ 词涌现 + 上下文绑定编码落地，词级化兑现了 M1 拿不到的收益 | 【旧】字符归一 PPL 155.80 → 89.15（−42.8%）；【新】最优 **75.17**（字符级 3-gram 参照 631.47） | `tests/demo_m2.py` |
 | M3 | △ 优化器层改动在本规模下落在噪声带 | 【新】R 参照 **76.55**；旧 −0.4% / −0.8% / +4.2% | `tests/demo_m3.py` |
-| M4 | △ 容量层打通 ✓（0.75 ms/步、因果结构 ✓），接入是否收益仍未稳定 | 【新】接入后字符归一 PPL **69.37**（vs 稠密对照，见 `outputs/demo_m4_2026-09-21.log`）；旧 102.11 vs 89.88 | `tests/demo_m4.py` |
-| M5 | ✓ 主任务优于同规模 Transformer → 判定"相当（达标）" | 【冻】**78.16 vs 85.27 / 85.66（低 8.3%）**；【旧】89.48 vs 103.53 / 121.02；BWT **0.000 vs −1.000** | `tests/eval_suite.py`、`outputs/eval_suite_frozen.log` |
+| M4 | △ 容量层打通 ✓（0.75 ms/步、因果结构 ✓），接入是否收益仍未稳定 | 【新】接入后字符归一 PPL **69.37**（vs 稠密对照，见 `outputs/test/demo_m4_2026-09-21.log`）；旧 102.11 vs 89.88 | `tests/demo_m4.py` |
+| M5 | ✓ 主任务优于同规模 Transformer → 判定"相当（达标）" | 【冻】**78.16 vs 85.27 / 85.66（低 8.3%）**；【旧】89.48 vs 103.53 / 121.02；BWT **0.000 vs −1.000** | `tests/eval_suite.py`、`outputs/test/eval_suite_frozen.log` |
 | M6 | ✓ 长程复制显著增强（DG 模式分离是决定性组件） | 位置准确率 **默认栈 ~10%，启用 M13 后 45.6 / 25.9 / 17.8%**（随机 8.3%；Transformer 5.7 / 9.7 / 8.6%） | `tests/demo_copy.py`、`tests/eval_suite.py` |
-| M9 | ✓ 五轨道收官：T3.4/② 稳定正增益 / 2 中 / 5 负；容量赛道有硬件收益 | 【冻】T3.4 **−1.6%**、② −1.4%（T3.2 翻转 +3.2%）/ int8 值内存 3.0×↓ / 稀疏 PC **1.91×** | `tests/demo_m9.py`、`outputs/demo_m9_frozen.log` |
+| M9 | ✓ 五轨道收官：T3.4/② 稳定正增益 / 2 中 / 5 负；容量赛道有硬件收益 | 【冻】T3.4 **−1.6%**、② −1.4%（T3.2 翻转 +3.2%）/ int8 值内存 3.0×↓ / 稀疏 PC **1.91×** | `tests/demo_m9.py`、`outputs/test/demo_m9_frozen.log` |
 
 > **基线漂移史（已终结）**：89.15 / 89.48 @13.8K → 110.57 @18,692 → 117.05 @19,013 →
 > 102.35 @22,420（128 维小栈）/ 76.53 @22,420（256 维默认栈）→ 97.42 @23,276（128 维）/ 72.48 @23,276（256 维）
@@ -235,5 +235,5 @@ python tests/demo_corpus.py          # 外部语料（中文维基）上的词�
 python tools/backend_probe.py        # 硬件后端体检
 ```
 
-关键证据文件：`outputs/demo_m9.log`、`outputs/demo_m9_result.json`、`outputs/m9_combo.log`、
-`outputs/m9_combo_result.json`、`outputs/demo_copy_m9.log`、`outputs/fast_test.log`。
+关键证据文件：`outputs/test/demo_m9.log`、`outputs/test/demo_m9_result.json`、`outputs/test/m9_combo.log`、
+`outputs/test/m9_combo_result.json`、`outputs/test/demo_copy_m9.log`、`outputs/test/fast_test.log`。

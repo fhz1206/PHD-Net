@@ -85,15 +85,19 @@ class PHDWordLM:
         recur_cue: np.ndarray | None = None
         seg_scale = 1.0
         nll_ema: float | None = None
+        stoi = self.tok.stoi
         nlls, seg = [], []
         prev: str | None = None
         best_ppl, bad = float("inf"), 0
         for i in range(len(toks) - 1):
             if not keep[i]:                       # 跳过位置仍推进上下文（prev）
-                prev = toks[i]
+                prev = toks[i] if toks[i] in stoi else prev
                 continue
-            if toks[i + 1] not in self.tok.stoi:  # OOV 目标：跳过学习，上下文照常推进
-                prev = toks[i]
+            # OOV 安全（2026-09-28 修复，与 evaluate() 同口径）：cur/nxt 任一端
+            # 不在词表则整步跳过，prev 保持**最后一个已知 token**——旧实现只挡
+            # 目标端，cur OOV 时 encode_composite 直接 KeyError；且 OOV 若推进
+            # prev 会在下一步污染 prev 位（同键崩溃）。
+            if toks[i] not in stoi or toks[i + 1] not in stoi:
                 continue
             x = self.tok.encode_composite(toks[i], prev)
             target = self.tok.onehot(self.tok.stoi[toks[i + 1]])
@@ -177,8 +181,10 @@ class PHDWordLM:
             # 且 prev 保持最后一个已知 token —— 避免 OOV 串污染上下文
             if cur not in stoi or nxt not in stoi:
                 oov += 1
-                n_chars += len(nxt)
-                continue
+                continue                       # 2026-09-28 修复：OOV 字符不计入分母
+                                               # （与 docstring 一致；旧实现只免分子
+                                               # 不免分母 → ppl_char 被系统性低估）
+            x = self.tok.encode_composite(cur, prev)
             x = self.tok.encode_composite(cur, prev)
             y = self.net.step(x, learn=False, readonly=True)["y"]  # B5：评估冻结状态，保证可复现
             y = y - y.max()
@@ -208,6 +214,9 @@ class PHDWordLM:
         双重条件化（内言语受情景流约束），提升长程连贯性。
         """
         rng = rng or np.random.default_rng(0)
+        if seed_token not in self.tok.stoi:
+            raise KeyError(f"seed_token={seed_token!r} 不在词表中——请从词表 token 起始"
+                           f"（词表规模 {len(self.tok)}；OOV 种子无法编码，诚实报错）")
         if episodic_len is None:
             episodic_len = self.net.cfg.episodic_len
         out = [seed_token]

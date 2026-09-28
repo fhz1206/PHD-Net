@@ -7,7 +7,7 @@ torch（--device auto|cpu|cuda|rocm|npu）。
 示例：
   python tools/train_torch_lm.py --device cpu --preset smoke --data eval --tokens 2000
   python tools/train_torch_lm.py --device auto --preset base --data eval \\
-      --tokens 50000 --ckpt outputs/torch_lm_base.npz --resume
+      --tokens 50000 --ckpt outputs/smoke/torch_lm_base.npz --resume
 
 检查点：npz（权重 + 标量状态 + 词表文本 + 配置 JSON），--resume 支持断点续训。
 """
@@ -145,7 +145,7 @@ def main() -> None:
                 save_ckpt(step)
             prev = cur                      # prev 只推进到已知 token（OOV 安全）
         else:
-            n_oov += 1                      # OOV：跳过学习，上下文照常推进
+            n_oov += 1                      # OOV：跳过学习，prev 保持最后已知 token（与 _pass 同口径）
         cur = nxt
 
     # ---- 收尾：最终评估 + 检查点

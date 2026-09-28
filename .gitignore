@@ -6,17 +6,20 @@ datasets/sft/
 datasets/.git/
 # 注：eval_corpus/（冻结语料 + OOD 探针，43 KB）**保留在 PHD-Net 仓库**——评测基线必需
 
-# ── 训练产物与检查点 ──
-outputs/ckpt/
-outputs/train_logs/
-# fhz 2026-09-25：1B 训练产物目录（大文件不入库）
-models/
-datasets/.ms_upload_cache
+# ── 训练产物与检查点（outputs/ 分类布局，fhz 2026-09-28）──
+# outputs/test/        测试产物（CI 回归 / verify 对拍 / audit 审计 / demo）—— 日志入库
+# outputs/experiments/ 实验与基准产物（experiment / scaling / bench / eval_suite）—— 日志入库
+# outputs/smoke/       smoke 档产物（模型 + 断点）—— 不入库
+# outputs/models/      生产训练产物（模型检查点 + train_logs）—— 不入库
+outputs/smoke/
+outputs/models/
 *.npz
+datasets/.ms_upload_cache
 
 # ── 临时诊断脚本 / 日志（下划线前缀 = 临时，不入库）──
 tools/_*.py
 outputs/_*
+chat/_*
 
 # ── Python / numba 缓存 ──
 __pycache__/

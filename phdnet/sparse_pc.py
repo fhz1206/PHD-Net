@@ -24,7 +24,7 @@
 
 数值关系（可验证）：**k = n_in（全连接图）时本模块与稠密栈数值一致**
 （CSR 求和顺序按列索引升序；与 BLAS 内部求和顺序不保证逐位相同，
-对拍判据见 tools/verify_sparse_conn.py）。
+对拍判据见 tests/verifiers/verify_parallel_consistency.py）。
 
 开关（默认关闭，默认路径逐位不变）：
   cfg.sparse_conn  —— True 时主干改用本模块

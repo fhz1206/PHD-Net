@@ -20,7 +20,7 @@ class SparseLTM:
 
     O1/O3（2026-09-22）：`csr_online=True` 时底层切换为在线可写 CSR 表
     （`OnlineCSRTable`，定长行 + 预留槽）；默认 False = dict 邻接表，
-    默认路径逐位不变。两版 predict/learn 逐位等价（tools/verify_csr_equiv.py）。
+    默认路径逐位不变。两版 predict/learn 逐位等价（ci/verifiers/verify_csr_equiv.py）。
     """
 
     def __init__(self, n_dim: int, n_neurons: int = 1 << 24, m_out: int = 60,
@@ -128,17 +128,41 @@ class SparseLTM:
         self._prev = None
 
     def consolidate(self, forget: float = 1.0) -> None:
-        """大容量表无稠密快/慢权重分离：巩固退化为对已生长突触的轻微衰减。"""
+        """大容量表无稠密快/慢权重分离：巩固退化为对已生长突触的轻微衰减。
+
+        2026-09-28 修复：在线 CSR 表（OnlineCSRTable）存储在 keys/vals/size，
+        旧实现遍历 self.out（恒为空 dict）→ consolidate **静默无操作**。
+
+        ⚠ int8 量化台阶（诚实边界）：码值域 10~32（q=127）时，1% 乘性衰减
+        （forget=1.0）落在量化台阶内、round 后回原码 → consolidate 零效果；
+        需 forget ≳ 3 才开始起作用。属量化精度固有属性，非缺陷。
+        """
         if forget <= 0.0:
             return
         f = 1.0 - 0.01 * forget
-        if self.table.int8_store:
-            q = self.table._q
-            w_max = self.table.w_max
-            for bucket in self.table.out.values():
+        table = self.table
+        if hasattr(table, "vals") and hasattr(table, "size"):      # 在线 CSR 表
+            if table.int8_store:
+                q = table._q
+                w_max = table.w_max
+                for i, vals in table.vals.items():
+                    n = table.size[i]
+                    seg = vals[:n]
+                    dec = np.round(np.clip(seg.astype(np.float64) / q * f,
+                                           0.0, w_max) * q).astype(np.int16)
+                    seg[:] = dec
+            else:
+                for i, vals in table.vals.items():
+                    n = table.size[i]
+                    vals[:n] *= f
+            return
+        if table.int8_store:                                       # dict 版 + int8
+            q = table._q
+            w_max = table.w_max
+            for bucket in table.out.values():
                 for k, code in bucket.items():
                     bucket[k] = int(round(min(max(code / q * f, 0.0), w_max) * q))
         else:
-            for bucket in self.table.out.values():
+            for bucket in table.out.values():
                 for k in bucket:
                     bucket[k] *= f

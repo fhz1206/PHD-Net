@@ -61,7 +61,17 @@ class WorkingMemory:
         else:                                     # 稠密双速率 LTM（旧行为）
             r = ltm.recall(np.sign(content))
         if slot is None:
-            slot = int(np.argmin(self.strength))
+            # 2026-09-28 修复：与 _pick_weakest 同口径排除当前摘要槽——否则每次
+            # summarize 都把免衰减保护「搬家」，上一个受保护槽立即失去保护并可被
+            # 普通写入覆盖（B3 修复的同类漏洞）。
+            order = np.argsort(self.strength)
+            slot = int(order[0])
+            if (self.summary_slot is not None and len(order) > 1
+                    and slot == self.summary_slot):
+                for s in order[1:]:
+                    if int(s) != self.summary_slot:
+                        slot = int(s)
+                        break
         self.slots[slot] = r.astype(float)
         self.strength[slot] = 1.0
         self.summary_slot = slot
