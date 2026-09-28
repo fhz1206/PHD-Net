@@ -57,11 +57,21 @@ fp8 e4m3fn / fp4 e2m1 + 逐张量缩放）；softmax/NLL 保持 fp64 主回路�
 
 ## 四、1B 训练管线性能（train_1b）
 
+**扫描引擎选型（P13，fhz 2026-09-28 指令「线程 + GIL 解锁吃满核心」）**：原锚点链热路径
+是纯 Python 对象操作（dict/set 查找、str 切片），**全程持有 GIL**——单纯线程化只能单核；
+纯 Python 也无法靠线程并行。故顺序是：先把热循环编译为释放 GIL 的机器码
+（`train_1b/tokenizer_core.py`：`@njit(nogil=True)` 的 CSR-trie 贪心轨道 + δ 前缀链），
+再用 `ThreadPoolExecutor` 并行——共享内存、零 pickle，主进程只做 µs 级 ndarray 接链。
+numba 不可用时自动回退进程池（逐位一致）。P7 融合读出核同此思路（prange）。
+
 | 项 | 实测 | 说明 |
 |---|---|---|
 | 读出占比（1B 预设，V=9,219） | fwd+update ≈ **89%** | 227 MB fp64 权重 → fp32 后 113 MB |
 | 融合核带宽墙 | 1→8 线程 4.1→9.3 GB/s | 本机写混合带宽上限，fp32 逐位等价空间已耗尽 |
-| 多核词表 | 词涌现按 L 并行 + 锚点链扫描 | `verify_vocab_parallel.py` 13 例逐位等价全 PASS |
+| 多核词表 | 词涌现按 L 并行 + 锚点链扫描 | `verify_vocab_parallel.py` 18 例逐位等价全 PASS |
+| 锚点链扫描引擎（P13） | **numba `nogil` 线程池**（`tokenizer_core.py`） | 本机 6 核：8.30 → **21.41 Mchar/s（2.58×）**；w=6 与 w=4 持平（主进程 GIL 侧到顶） |
+| 锚点链合并 | 词表内 bincount 位图 OR + OOV unique | 消除逐 token Python `set.update`（原主进程瓶颈） |
+| 组大小 | 缺省 32M → **1M 字符** | 32M 组时并行度塌缩（组数 ≪ worker 数），且每组数百万 token 的字符串 pickle 成单点 |
 | 多进程数据加载 | W = 核数×0.8（≤文件数）+ 顺序归并 | 与串行产出逐位一致；mix 模式为样本级轮转（串行源） |
 | 零等待代码 | 主循环无 sleep/轮询/忙等 | 仅 OS 级阻塞 |
 

@@ -244,8 +244,11 @@ def main() -> None:
               f"涌现词表 {len(seg.vocab):,}（{time.perf_counter() - t_v0:.1f}s）",
               flush=True)
     if args.vocab_scan == "full":
-        print(f"[词表] full 扫描：全量流式分词一遍"
-              f"（{'多核锚点链 ×' + str(vw) if vw > 1 else '串行'}；大语料需较久）…",
+        from vocab_parallel import NUMBA_TOK_OK as _TOK_NB
+        _engine = (f"多核锚点链 ×{vw}"
+                   + ("（numba nogil 线程）" if vw > 1 and _TOK_NB
+                      else "（进程池）" if vw > 1 else ""))
+        print(f"[词表] full 扫描：全量流式分词一遍（{_engine}；大语料需较久）…",
               flush=True)
         seen: set[str] = set()
         n_seen = 0
@@ -271,7 +274,7 @@ def main() -> None:
                           flush=True)
         tokens = sorted(seen)
         print(f"[词表] full 扫描完成：全语料 {n_seen:,} tokens → 词表 {len(tokens):,}"
-              f"（{time.perf_counter() - t_v:.0f}s，{'多核 ×' + str(vw) if vw > 1 else '串行'}），"
+              f"（{time.perf_counter() - t_v:.0f}s，{_engine}），"
               f"零 OOV", flush=True)
     else:
         if vw > 1:

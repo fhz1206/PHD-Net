@@ -26,19 +26,45 @@
    并行输出 ≡ 串行 StreamingTokenizer 逐位一致（含跨组/跨样本 token）。
    workers=1 时调用方直接走串行原路径（本模块不参与）。
 
-内存护栏：worker 峰值 ≈ 组文本 + 组 token 表（group_chars 缺省 32M 字符
-≈ 数十 MB/worker）；词涌现并行的瞬时峰值 ≈ 各层 W 矩阵之和（4M 字符
+内存护栏：worker 峰值 ≈ 组文本 + 组 token 表（group_chars 缺省 1M 字符
+≈ 数 MB/worker）；词涌现并行的瞬时峰值 ≈ 各层 W 矩阵之和（4M 字符
 采样、max_len=6 时 ≈1.5 GB，12 GB 级机器可承受）。
+
+P13（2026-09-28，fhz「线程 + GIL 解锁吃满核心」指令）：全量扫描热路径
+numba 化（tokenizer_core.py，njit nogil）→ **ThreadPoolExecutor** 真多核：
+共享内存零 pickle，主进程只做 µs 级 ndarray 接链与 bincount 位图合并。
+服务器实测教训（进程版）：153 worker 全睡眠、主进程单核 100%——
+组 32M 字符过大（并行度塌缩）+ 每组数百万 token 字符串 pickle 单点。
+group_chars 缺省 32M → 1M（组数 ≫ worker 数，IPC/内存双降）。
+numba 不可用时自动回退进程池路径（Python 版 _scan_group，逐位一致）。
 """
 
 from __future__ import annotations
 
 import os
-from bisect import bisect_left
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 import numpy as np
+
+try:
+    from tokenizer_core import (NUMBA_TOK_OK, OOV_FLAG, build_trie,
+                                scan_group_numba, text_to_codes)
+except Exception:                                            # pragma: no cover
+    NUMBA_TOK_OK = False
+
+_TRIE_CACHE: dict = {}                                       # (max_len, frozenset) -> trie
+
+
+def _trie_for(vocab, max_len: int):
+    """trie 一次性构建（同词表跨组复用；frozenset 哈希做缓存键）。"""
+    key = (max_len, frozenset(vocab))
+    t = _TRIE_CACHE.get(key)
+    if t is None:
+        t = build_trie(vocab)
+        _TRIE_CACHE.clear()                  # 只保留最新词表（生产场景词表唯一）
+        _TRIE_CACHE[key] = t
+    return t
 
 
 def auto_workers() -> int:
@@ -151,20 +177,35 @@ def _group_iter(samples, group_chars: int, lookahead: int):
     组间正文严格无缝分区（carry 机制：上一组借出的前视残余在下一轮
     先归还进正文；前视借用也先消费 carry 再向源取）。组边界可为任意
     位置（锚点链对边界无假设）。
+    P13：carry 改 list 收集 + 一次性 join（原 str += 是 O(n²) 复制，
+    组 1M 字符 × 样本千级时主进程内存带宽成瓶颈）。
     """
     it = iter(samples)
     carry = ""                                   # 已取出、尚未划入正文的字符
     src_done = False
     while True:
-        while len(carry) < group_chars and not src_done:
+        parts: list[str] = []
+        plen = 0
+        if carry:
+            parts.append(carry)
+            plen = len(carry)
+            carry = ""
+        while plen < group_chars and not src_done:
             try:
-                carry += next(it)
+                s = next(it)
+                parts.append(s)
+                plen += len(s)
             except StopIteration:
                 src_done = True
-        if not carry:
+        if plen == 0:
             return
-        body = carry[:group_chars]
-        rest = carry[group_chars:]
+        full = parts[0] if len(parts) == 1 else "".join(parts)
+        if len(full) < group_chars:
+            # 攒不满一组 ⟹ 源已耗尽（plen>0 已保证）→ 最后一组，无前视可借
+            yield full, len(full)
+            return
+        body = full[:group_chars]
+        rest = full[group_chars:]
         while len(rest) < lookahead and not src_done:    # 借前视（不消费）
             try:
                 rest += next(it)
@@ -175,37 +216,72 @@ def _group_iter(samples, group_chars: int, lookahead: int):
         yield body + la, len(body)
 
 
+def _scan_task_numba(text: str, body_len: int, max_len: int, trie):
+    """线程池任务体：文本 → 码点 → nogil 轨道（encode/nogil 均释放 GIL）。"""
+    return scan_group_numba(text_to_codes(text), body_len, max_len, trie)
+
+
 def _iter_group_tokens(vocab, max_len: int, samples, workers: int,
                        group_chars: int):
-    """编排器：按序 yield 每组的真实 token 列表（锚点链接链）。
+    """编排器：按序 yield 每组的真实 token 索引数组（锚点链接链）。
 
+    返回元素 = np.ndarray uint32：词表内 token = vocab_list 下标（升序与
+    build_trie 的 vocab_list 一致）；单字符 OOV = 0x8000_0000 | ord(ch)。
+    P13：numba 可用时走 ThreadPoolExecutor（nogil 真多核、零 pickle）；
+    否则回退进程池 Python 版（逐位一致）。
     预提交窗口 = 2×workers+2 组（有界 → 内存有界、背压自然形成）；
     消费按提交序（Future.result() 为 OS 级阻塞，无忙等）。
     """
-    ex = ProcessPoolExecutor(max_workers=workers, initializer=_scan_init,
-                             initargs=(tuple(vocab),))
+    groups = _group_iter(samples, group_chars, 2 * max_len)
+    if NUMBA_TOK_OK:
+        trie = _trie_for(vocab, max_len)
+        ex = ThreadPoolExecutor(max_workers=workers)
+        submit = _scan_task_numba
+        targs = (max_len, trie)
+    else:
+        ex = ProcessPoolExecutor(max_workers=workers,
+                                 initializer=_scan_init,
+                                 initargs=(tuple(vocab),))
+        submit = _scan_group
+        targs = (max_len,)
+    tok2idx = None if NUMBA_TOK_OK else {w: i for i, w in enumerate(sorted(vocab))}
     try:
-        groups = _group_iter(samples, group_chars, 2 * max_len)
         window: deque = deque()                  # 待消费 Future 队列
         src_done = False
         delta = 0                                # 当前组真实入口锚点
         while True:
             while not src_done and len(window) < 2 * workers + 2:
                 try:
-                    window.append(ex.submit(_scan_group, *next(groups), max_len))
+                    text, body_len = next(groups)
+                    window.append(ex.submit(submit, text, body_len, *targs))
                 except StopIteration:
                     src_done = True
             if not window:
                 return
-            spine_off, spine_tok, exit0, per_delta = window.popleft().result()
+            res = window.popleft().result()
+            if NUMBA_TOK_OK:
+                spine_off, spine_idx, exit0, per_delta = res
+            else:                                # 进程版：str list → idx ndarray
+                spine_off, spine_tok, exit0, per_delta = res
+                spine_idx = np.fromiter(
+                    (tok2idx.get(t, 0) if len(t) > 1 else
+                     int(OOV_FLAG) | ord(t) for t in spine_tok),
+                    dtype=np.uint32, count=len(spine_tok))
+                spine_off = np.array(spine_off, dtype=np.int64)
+                per_delta = [(d, np.fromiter(
+                    (tok2idx.get(t, 0) if len(t) > 1 else
+                     int(OOV_FLAG) | ord(t) for t in pref),
+                    dtype=np.uint32, count=len(pref)) if pref else
+                    np.empty(0, dtype=np.uint32), hit, ex_d)
+                    for (d, pref, hit, ex_d) in per_delta]
             if delta == 0:
-                toks = spine_tok
+                toks = spine_idx
                 new_delta = exit0
             else:
                 d, prefix, hit, exit_d = per_delta[delta - 1]
                 if hit >= 0:
-                    i0 = bisect_left(spine_off, hit)
-                    toks = prefix + spine_tok[i0:]
+                    i0 = int(np.searchsorted(spine_off, hit))
+                    toks = np.concatenate([prefix, spine_idx[i0:]])
                     new_delta = exit0
                 else:
                     toks = prefix
@@ -218,28 +294,50 @@ def _iter_group_tokens(vocab, max_len: int, samples, workers: int,
         ex.shutdown(wait=False, cancel_futures=True)
 
 
+def _idx_to_str(vocab_list: list[str], toks: np.ndarray):
+    """idx ndarray → str 列表（OOV 高位码还原单字符；验证路径专用）。"""
+    n_v = len(vocab_list)
+    flag = int(OOV_FLAG)
+    return [vocab_list[i] if i < n_v else chr(i & (flag - 1)) for i in toks.tolist()]
+
+
 def iter_tokens_parallel(vocab, max_len: int, samples, workers: int,
-                         group_chars: int = 32_000_000):
+                         group_chars: int = 1_000_000):
     """并行全量扫描：逐个 yield token（顺序 ≡ 串行 StreamingTokenizer）。"""
+    vocab_list = sorted(vocab)
     for toks in _iter_group_tokens(vocab, max_len, samples, workers,
                                    group_chars):
-        yield from toks
+        yield from _idx_to_str(vocab_list, toks)
 
 
 def scan_vocab_parallel(vocab, max_len: int, samples, workers: int,
-                        group_chars: int = 32_000_000, progress=None):
+                        group_chars: int = 1_000_000, progress=None):
     """并行全量扫描（词表收集形态）：返回 (seen 集合, 扫过 token 总数)。
 
+    P13：合并走 C 级 —— 词表内 token 用 bincount 位图 OR（µs 级/组），
+    OOV 单字符 unique 后 chr 还原；不再逐 token Python set.update。
     progress(累计 tokens, 当前词表数) 在每组合并后回调。
     """
-    seen: set[str] = set()
+    vocab_list = sorted(vocab)
+    n_v = len(vocab_list)
+    mask = np.zeros(n_v + 1, dtype=bool)
+    seen_oov: set[str] = set()
     n_total = 0
+    flag = int(OOV_FLAG)
     for toks in _iter_group_tokens(vocab, max_len, samples, workers,
                                    group_chars):
-        seen.update(toks)
-        n_total += len(toks)
+        n_total += int(toks.size)
+        tk = toks.astype(np.int64, copy=False)
+        in_v = tk[tk < flag]
+        if in_v.size:
+            mask |= np.bincount(in_v, minlength=n_v + 1).astype(bool)
+        oov = tk[tk >= flag]
+        if oov.size:
+            seen_oov.update(map(chr, np.unique(oov & (flag - 1)).tolist()))
         if progress is not None:
-            progress(n_total, len(seen))
+            progress(n_total, int(mask.sum()) + len(seen_oov))
+    seen = set(np.array(vocab_list, dtype=object)[mask[:n_v]].tolist())
+    seen |= seen_oov
     return seen, n_total
 
 
@@ -247,8 +345,9 @@ def parallel_head_tokens(seg, vocab_text: str, workers: int) -> set[str]:
     """head 模式 token 收集的多核版：把采样文本切块送锚点链扫描。
 
     与串行 `set(seg.tokenize(vocab_text))` 逐位一致（同一词表、同一贪心轨道）。
+    P13：组大小取 max(200K, len/(2×workers))——太小则每组固定开销占比过高。
     """
-    group_chars = max(1, len(vocab_text) // (workers * 4))
+    group_chars = max(200_000, len(vocab_text) // (workers * 2))
     seen, _ = scan_vocab_parallel(seg.vocab, seg.max_len,
                                   (vocab_text[i:i + group_chars]
                                    for i in range(0, len(vocab_text), group_chars)),
