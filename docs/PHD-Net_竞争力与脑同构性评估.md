@@ -3,7 +3,7 @@
 > 📌 **现状快照（2026-09-27 整理）**：历史段落以现状结论为准；当前基线与口径见《性能评估与迭代方案（现状版)》。
 
 > 架构版本：v0.0.0 ｜ 评估日期：**2026-09-20**（M9 五轨道收官后重估）
-> 评估对象：`phdnet/`（基础架构 M1–M6 ＋ 认知层 M7–M12，外扩 M13 上下文漂移情景记忆）及 `tools/train_1b.py`（1B 突触模型）
+> 评估对象：`phdnet/`（基础架构 M1–M6 ＋ 认知层 M7–M12，外扩 M13 上下文漂移情景记忆）及 `tools/train_1b_capacity.py`（1B 突触模型）
 > 环境：Windows 11 ｜ Python 3.14.5 ｜ 8 线程 CPU（无独显）｜ 12.6 GB 内存 ｜ numpy 实测 50.9 GFLOPS
 > 数据性质标注：**实测**（脚本可复现）／ **推算**（方法已注明）／ **估算**（量级推断）／ **引用**（公开资料）
 > **对标常量 strip**：本轮把通用对标对象从"自建 nanoGPT"升级为 **GLM-5.3-Flash（320B-A18B MoE）**，并给出 PHD-Net 扩到 **100B 突触**时的三情景外推。
@@ -265,7 +265,7 @@
 | M9 最优单点（同小栈） | T3.4 内容寻址 101.29（−1.6%）、② 回放稳定读出 101.48（−1.4%）——稳定正增益；T3.2 +3.2% 有害 | `tests/demo_m9.py` | 实测 |
 | Transformer 对照（冻结语料） | 85.27（0.52M, 96d×2L）/ 85.66（2.38M, 192d×4L） | `tests/nano_gpt.py` + `eval_suite.py` | 实测 |
 | 持续学习 BWT | +0.000 vs −1.000 | `tests/eval_suite.py` | 实测 |
-| 1B 容量层 | 1.28 ms/步、RSS 增量 ~0 MB、利用率 0.0003% | `tools/train_1b.py` | 实测 |
+| 1B 容量层 | 1.28 ms/步、RSS 增量 ~0 MB、利用率 0.0003% | `tools/train_1b_capacity.py` | 实测 |
 | int8 / CSR / 稀疏 PC | cos 0.9999、内存 3.0×↓、1.94× 加速 | `tests/demo_m9.py` 容量基准 | 实测 |
 | 长程复制 | 45.6% / 25.9% / 17.8% | `tests/demo_copy.py` | 实测 |
 | 认知层四实验 | 67% / 75% / 98.1% / 100% | `tests/demo_v2.py` | 实测 |
@@ -273,7 +273,7 @@
 | 100B vs GLM 三情景 PPL 区间 | 悲观 100–120 / 中性 20–60 / 乐观 10–20 | 借 Transformer α≈0.34 + M4/M9 实测约束 | **估算** |
 | GLM-5.3-Flash 全部规格与 benchmark | 320B-A18B / 1M ctx / AA 57 / Terminal-Bench 84.3 | 官方模型卡与公开报道 | 引用 |
 
-复现入口：`python tests/run_tests.py`（fast 11 项）｜ `python tests/demo_m9.py`（十配置消融 + 容量基准）｜ `python tests/eval_suite.py`（六任务）｜ `python tests/demo_copy.py`（长程复制）｜ `python tools/train_1b.py`（1B 训练）｜ `python tools/backend_probe.py`（后端体检）。
+复现入口：`python tests/run_tests.py`（fast 11 项）｜ `python tests/demo_m9.py`（十配置消融 + 容量基准）｜ `python tests/eval_suite.py`（六任务）｜ `python tests/demo_copy.py`（长程复制）｜ `python tools/train_1b_capacity.py`（1B 训练）｜ `python tools/backend_probe.py`（后端体检）。
 
 ---
 

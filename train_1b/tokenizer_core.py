@@ -55,21 +55,27 @@ def build_trie(vocab) -> tuple:
         for ch in w:
             n = nxt.setdefault((n, ord(ch)), len(nxt) + 1)
         term.setdefault(n, i)
+    # 一次遍历建邻接表（2026-09-28 修复：原实现每个节点全量扫描 nxt，
+    # O(节点数 × 词表规模) → 5 万词词表建 trie 需数十亿次迭代、直接卡死；
+    # 服务器 full 扫描实测命中此坑。改为 O(词表规模) 一次分组 + BFS 展平）。
+    kids_of: dict = {}                    # 原节点 -> [(char, 子节点), ...]
+    for (p, c), m in nxt.items():
+        kids_of.setdefault(p, []).append((c, m))
     # BFS 展平（保证子区间连续；char 排序留给展平阶段）
     order = [0]                            # 节点 → 展平 id
     flat = {}                              # 原节点 → 展平 id
     children = {}                          # 展平 id -> [(char, 原子节点)]
-    frontier = [0]
     flat[0] = 0
-    while frontier:
-        n = frontier.pop(0)
-        kids = sorted((c, m) for (p, c), m in nxt.items() if p == n)
-        children[flat[n]] = kids
+    i = 0
+    while i < len(order):
+        fid = order[i]
+        i += 1
+        kids = sorted(kids_of.get(fid, ()))
+        children[fid] = kids
         for c, m in kids:
             if m not in flat:
                 flat[m] = len(order)
                 order.append(m)
-                frontier.append(m)
     N = len(order)
     child_start = np.zeros(N, dtype=np.int64)
     child_end = np.zeros(N, dtype=np.int64)

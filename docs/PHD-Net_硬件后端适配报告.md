@@ -93,3 +93,57 @@ python -c "from phdnet.torch_backend import selftest_torch; print(selftest_torch
    就绪的基准/验证入口）。
 5. **精度判据**：跨设备用容差一致（`atol/rtol` + 低精度相关性 ≥0.99，沿用 selftest_torch
    双档判据）；不宣称跨设备逐位等价。
+
+## 六、多卡自动适配（P14，2026-09-28）
+
+### 结论先行：为什么不是 DDP / DataParallel
+
+PHD-Net 是**逐 token 事件驱动的稀疏网络**：无 batch 维、无注意力，全局状态
+（WM 情景缓冲 / STDP 印迹 / LTM 长时记忆）跨样本连续携带。标准 DDP 需要可分的
+梯度与 batch 归约——本网络**没有**；DataParallel 需要 batch 轴可切——本网络**没有**。
+因此多卡走**模型并行**，且只切真正可分的部分。
+
+### 切分策略
+
+| 部件 | 可分性 | 方案 | 状态 |
+|---|---|---|---|
+| 读出 W ∈ R^{V×H} | **完全可分**（逐行 dot + 逐行外积更新） | 按词表行（V 维）列并行到各卡 | ✅ 已实现 + 逐位验证 |
+| PC 栈（稀疏 CSR 主循环） | 事件驱动、隐式耦合 | 不切 | 上游单卡（主设备） |
+| STDP 印迹 / LTM 2^24 | CSR 天然可按神经元区间切 | `shard_ranges` 计划 + 跨卡共激活对通信 | 计划层（1B 真机待验） |
+| 分词 / SDR 编码 | CPU numpy | 不切 | CPU |
+
+读出列并行的通信量：每步两次小向量（全局 logits y 下发 + dp 分片上行），
+V=9,219 时约 37 KB×2 ≈ 数 μs，不构成瓶颈。softmax 主回路在主卡 fp32
+（与 P9 协议一致）。1B 预设读出占端到端 ~89% → N 卡上限 ≈ 1/(1-0.89+0.89/N)
+（N=4 → ≈3.3×，**仅为读出部分的线性加速，非全模型加速**）。
+
+### 公共 API（`phdnet/backends/multi_device.py`）
+
+- `resolve_devices("auto" | "cuda:0,1" | "npu:0 1" | "cpu", max_devices=N)`
+  → 设备列表；auto = 昇腾 → ROCm → CUDA → DirectML → CPU 择优并取**全部同型号设备**
+  （与 `resolve_device` 同一优先级）；不可用设备诚实报错（`allow_fallback=True` 才回退）；
+- `probe_multi()`：多卡视角探针（含各平台设备串列表）；
+- `shard_ranges(n_items, n_devices)`：均衡切分（读出 V / LTM 神经元共用）；
+- `plan_parallel(devices, V, H)`：自动选型 + 诚实预期（策略、通信量、未并行部分）；
+- `configure_host_threads()`：多卡时 OMP/MKL 线程收敛为 1；
+- `MultiDeviceReadout(W, devices, dtype)`：列并行读出（forward / learn_softmax /
+  `to_numpy` / `load_rows` 检查点往返）。
+
+### 接入点
+
+- 训练：`tools/train_torch_lm.py --devices auto`（单设备 = 原生路径，零行为变更；
+  多卡自动启用读出列并行 + host 线程收敛）；`TorchWordLM(devices=...)` /
+  `TorchPHDNet(readout_devices=...)` 透传；
+- 推理：`train_1b/infer.py --devices auto` 打印设备清单与计划，并**明确声明**
+  生产推理为 numba CPU 单路（不假装多卡）；多卡推理走 torch 栈，**权重不通用**。
+
+### 验证（`tests/verifiers/verify_multi_device.py`，24 例全 PASS）
+
+- A 设备解析：auto / 显式列表 / 不可用设备报错 / fallback / max_devices；
+- B 分片：均衡、余数分配（10/4 → 3,3,2,2）、空段剔除、覆盖完整；
+- C 单设备 ≡ `TorchReadoutDense`（前向 / NLL / 更新后 W，**逐位** max|Δ|=0）；
+- D 4 路分片 ≡ 单设备（**逐位** max|Δ|=0）；真实训练端到端 4 分片 PPL 与单卡
+  完全一致（smoke preset 567.7016）；
+- E 计划报告字段；F host 线程收敛。
+- **诚实边界**：本机无加速器，跨**不同**卡的路径仅做结构验证（判据为容差一致，
+  非逐位）；同设备分片为逐位一致。多卡真机回归待硬件到位后按 D 例扩到真机执行。

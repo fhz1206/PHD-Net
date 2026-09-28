@@ -102,6 +102,10 @@ numba 不可用时自动回退进程池（逐位一致）。P7 融合读出核�
 - `TorchReadout`：读出热路径 torch 化（fp32/fp16/bf16 原生；fp8 需 CUDA ≥ 8.9；fp4 走 CPU 码本）；
 - `TorchSTDPCore` + `selftest_torch` 等价自检（沿用）；
 - 本机实测：CPU 参考路径 fp32 40.9 ms/token（读出规模 9219×3072）；三平台真机回归待硬件。
+- **多卡自动适配（P14）**：`phdnet/backends/multi_device.py` —— `resolve_devices("auto")`
+  取全部同型号设备、读出按词表行**列并行**（逐位等价已验，通信 ~74 KB/步）、
+  `shard_ranges` 给出 LTM 神经元分片计划；DDP/DP 不适用（无 batch 维、无梯度），
+  详见《硬件后端适配报告》§六。
 - CI：`.gitcode/workflows/ci.yml`（GitCode Action）+ `.github/workflows/ci.yml`（GitHub 镜像）；验证脚本统一在 `tests/verifiers/`。
 
 ## 七、开放项（按优先级）

@@ -417,7 +417,8 @@ class TorchPHDNet:
     """
 
     def __init__(self, cfg: "PHDNetConfig", device: str = "cpu",
-                 dtype=None, rng: "np.random.Generator | None" = None):
+                 dtype=None, rng: "np.random.Generator | None" = None,
+                 readout_devices: "list[str] | None" = None):
         if torch is None:
             raise RuntimeError("未安装 torch，无法使用 torch LM 栈")
         self.cfg = cfg
@@ -477,8 +478,15 @@ class TorchPHDNet:
         self.ro_dtype = _resolve_dtype(cfg.readout_dtype)
         n_h = cfg.n_top * (3 if cfg.pred_in_readout else 2)
         W0 = rng.normal(0.0, 0.05, (cfg.n_readout, n_h))
-        self.readout = TorchReadoutDense(W0, device, self.ro_dtype,
-                                         w_clip=cfg.readout_w_clip)
+        # P14 多卡：readout_devices 长度 >1 时读出按词表行列并行（单设备行为不变）
+        if readout_devices and len(readout_devices) > 1:
+            from .multi_device import MultiDeviceReadout
+            self.readout = MultiDeviceReadout(W0, readout_devices,
+                                              cfg.readout_dtype,
+                                              w_clip=cfg.readout_w_clip)
+        else:
+            self.readout = TorchReadoutDense(W0, device, self.ro_dtype,
+                                             w_clip=cfg.readout_w_clip)
         self.n_out = cfg.n_readout if cfg.n_readout > 0 else cfg.n_input
 
         # ---- 状态（与 PHDNet 对齐）
@@ -583,10 +591,31 @@ class TorchPHDNet:
         self.ltm.consolidate(forget)
 
     # ---------- 权重快照（等价性验证 / 检查点） ----------
+    def _ro_W_tensor(self):
+        """读出权重（分片时拼回完整矩阵）——仅快照/检查点路径调用，非每步热路径。"""
+        r = self.readout
+        if getattr(r, "is_sharded", False):
+            return torch.cat([w.detach() for w in r.W], dim=0)
+        return r.W
+
+    def _ro_W_np(self) -> np.ndarray:
+        r = self.readout
+        if getattr(r, "is_sharded", False):
+            return r.to_numpy()
+        return r.W.detach().float().cpu().numpy()
+
+    def _ro_load(self, W_np) -> None:
+        r = self.readout
+        arr = np.asarray(W_np, dtype=np.float32)
+        if getattr(r, "is_sharded", False):
+            r.load_rows(arr)
+        else:
+            r.W.copy_(torch.as_tensor(arr, device=r.W.device, dtype=r.W.dtype))
+
     def weight_norms(self) -> dict:
         return {
             "readout": float(torch.linalg.vector_norm(
-                self.readout.W.float()).item()),
+                self._ro_W_tensor().float()).item()),
             "stdp_w_sum": float(self.stdp.W.float().sum().item()),
             "pc_up0": float(torch.linalg.vector_norm(
                 self.pc.up0["val"].float()).item()),
@@ -609,7 +638,7 @@ class TorchPHDNet:
             "stdp_t_post": self.stdp.t_post.detach().float().cpu().numpy(),
             "wm_slots": npy(self.wm.slots), "wm_strength": npy(self.wm.strength),
             "ltm_W_fast": npy(self.ltm.W_fast), "ltm_W_slow": npy(self.ltm.W_slow),
-            "ro_W": self.readout.W.detach().float().cpu().numpy(),
+            "ro_W": self._ro_W_np(),
             "prev_rate": self._prev_rate, "last_rate": self._last_rate,
             "mod_mu": np.array([self.modulator.mu]),
             "mod_m2": np.array([self.modulator.m2]),
@@ -634,7 +663,7 @@ class TorchPHDNet:
         put(self.stdp.t_post, d["stdp_t_post"])
         put(self.wm.slots, d["wm_slots"]); put(self.wm.strength, d["wm_strength"])
         put(self.ltm.W_fast, d["ltm_W_fast"]); put(self.ltm.W_slow, d["ltm_W_slow"])
-        put(self.readout.W, d["ro_W"])
+        self._ro_load(d["ro_W"])
         self._prev_rate = np.asarray(d["prev_rate"], dtype=np.float64)
         self._last_rate = np.asarray(d["last_rate"], dtype=np.float64)
         self.modulator.mu = float(d["mod_mu"][0])
@@ -656,7 +685,8 @@ class TorchWordLM:
 
     def __init__(self, vocab_text_or_tokenizer, cfg: "PHDNetConfig | None" = None,
                  device: str = "auto", seg_kwargs: dict | None = None,
-                 allow_fallback: bool = False):
+                 allow_fallback: bool = False,
+                 devices: "list[str] | None" = None):
         if torch is None:
             raise RuntimeError("未安装 torch，无法使用 torch LM 栈")
         cfg = cfg or PHDNetConfig()
@@ -673,7 +703,10 @@ class TorchWordLM:
                                 "n_readout": len(self.tok),
                                 "readout_softmax": True})
         self.cfg = inner
-        self.net = TorchPHDNet(inner, device=self.device, dtype=cfg.torch_dtype)
+        # P14：devices（多卡）→ 读出列并行；上游仍在 self.device（主设备）
+        self.devices = list(devices) if devices else [self.device]
+        self.net = TorchPHDNet(inner, device=self.device, dtype=cfg.torch_dtype,
+                                readout_devices=self.devices)
 
     def tokenize(self, text: str) -> list[str]:
         return self.tok.seg.tokenize(text)

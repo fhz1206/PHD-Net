@@ -161,7 +161,30 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--milestone", type=int, default=1_000_000,
                     help="预热进度打点间隔 tokens（0=关闭）")
+    ap.add_argument("--devices", type=str, default="auto",
+                    help="设备探测（P14）：打印加速器清单与多卡计划。"
+                         "注意本入口为 numba CPU 生产路径（单路），"
+                         "多卡加速见 torch 栈 tools/train_torch_lm.py")
     args = ap.parse_args()
+
+    # ---- 设备探测（诚实声明：1B 生产推理为 numba CPU 单路，不假装多卡）----
+    try:
+        from phdnet.backends.multi_device import (plan_parallel, probe_multi,
+                                                  resolve_devices)
+        devs = resolve_devices(args.devices, allow_fallback=True)
+        probes = probe_multi()
+        accel = ", ".join(f"{k}×{v.get('count')}" for k, v in probes.items()
+                          if v.get("ok") and v.get("count"))
+        print(f"[infer] 设备探测：{devs}（可用加速器：{accel or '无'}）")
+        if len(devs) > 1:
+            print(f"[infer] 多卡计划（参考 torch 栈）："
+                  f"{plan_parallel(devs, 0, 0)['strategy']}")
+        print("[infer] 本入口推理走 numba CPU 生产路径（单路）；"
+              "多卡推理请用 torch 栈（phdnet.backends.multi_device），"
+              "两者权重不通用。")
+    except Exception as e:                                   # noqa: BLE001
+        print(f"[infer] 设备探测不可用（{type(e).__name__}: {e}），"
+              "按 CPU 单路继续。")
 
     lm = load_from_ckpt(args.model)
 

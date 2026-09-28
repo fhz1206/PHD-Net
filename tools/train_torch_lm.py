@@ -51,6 +51,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", type=str, default="auto",
                     help="auto / cpu / cuda / rocm / npu")
+    ap.add_argument("--devices", type=str, default="auto",
+                    help="多卡自动适配（P14）：auto=探测全部同型号设备；"
+                         "或 'cuda:0,1' / 'npu:0 1' / 'cpu'。多卡时读出按词表行列并行")
+    ap.add_argument("--max-devices", type=int, default=0,
+                    help=">0 时截断设备数（多任务共享场景）")
     ap.add_argument("--preset", type=str, default="smoke",
                     choices=sorted(PRESETS))
     ap.add_argument("--data", type=str, default="eval",
@@ -77,6 +82,16 @@ def main() -> None:
             full = f.read()
         eval_txt = full[int(len(full) * 0.8):]
 
+    # ---- P14 多卡自动适配：解析设备（单设备 = 原生路径，零行为变更）
+    from phdnet.backends.multi_device import configure_host_threads, resolve_devices
+    devices = resolve_devices(args.devices, max_devices=args.max_devices,
+                              allow_fallback=True)
+    if len(devices) > 1:
+        configure_host_threads(1)              # 避免 CPU 线程与卡内线程争抢
+    print(f"[device] devices={devices}"
+          + ("（多卡：读出列并行，host 线程已收敛为 1）" if len(devices) > 1
+             else "（单设备原生路径）"), flush=True)
+
     # ---- 检查点 / 断点续训
     start_step = 0
     if args.resume and args.ckpt and os.path.exists(args.ckpt):
@@ -85,17 +100,20 @@ def main() -> None:
             meta = json.loads(str(z["meta"]))
             cfg = PHDNetConfig(**meta["cfg"])
             start_step = int(z["step_count"][0]) if "step_count" in z else 0
+            # 状态数组必须在 with 块内取出（块外访问已关闭的 npz 会失败）
+            state = {k: z[k] for k in z.files
+                     if k not in ("vocab_text", "meta")}
         lm = TorchWordLM(vocab_text, cfg, device=args.device,
-                         seg_kwargs=meta.get("seg"))
+                         seg_kwargs=meta.get("seg"), devices=devices)
         # 用重建的模型逐字重放词表文本并无害（只为拿到 seg），状态来自检查点
-        lm.net.load_state_arrays({k: z[k] for k in z.files
-                                  if k not in ("vocab_text", "meta")})
+        lm.net.load_state_arrays(state)
         start_step = int(lm.net.step_count)
         print(f"[resume] 从 {args.ckpt} 恢复：step={start_step}", flush=True)
     else:
         # ---- 词表（与训练流开头逐字符一致，train_1b 同款）
         vocab_text = build_vocab_text(data, args.vocab_sample_chars)
-        lm = TorchWordLM(vocab_text, cfg, device=args.device, seg_kwargs=SEG)
+        lm = TorchWordLM(vocab_text, cfg, device=args.device, seg_kwargs=SEG,
+                         devices=devices)
         print(f"[init] 词表 {len(lm.tok)} token（采样 {len(vocab_text)} 字符）"
               f"  device={lm.device}", flush=True)
 

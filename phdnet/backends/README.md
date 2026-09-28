@@ -9,7 +9,13 @@ device/dtype 不同），跨设备判据为**容差一致**（不宣称逐位—
 |---|---|
 | `torch_backend.py` | 基础层：设备探针、STDP 核、读出热路径、自检、基准 |
 | `torch_lm.py` | 词级 LM 全栈（M1–M6）torch 化：`TorchWordLM` / `TorchPHDNet` |
+| `multi_device.py` | 多卡自动适配（P14）：`resolve_devices` / `probe_multi` / `shard_ranges` / `plan_parallel` / `MultiDeviceReadout`（读出列并行，权重按词表行切分） |
 | `__init__.py` | 公共 API re-export |
+
+多卡（P14）：PHD-Net 无 batch 维/无梯度 → DDP/DP 不适用，走**模型并行**：
+读出 W∈R^{V×H} 按词表行列并行（每步通信 ~2×V×4B），4 路分片与单设备**逐位一致**
+（`tests/verifiers/verify_multi_device.py` 24 例）；LTM 2^24 按神经元区间分片为
+计划层（`shard_ranges`），真机待验。入口 `tools/train_torch_lm.py --devices auto`。
 
 旧路径 `phdnet.torch_backend` 保留兼容 shim（`from .backends.torch_backend import *`），
 7 处既有引用零改动。

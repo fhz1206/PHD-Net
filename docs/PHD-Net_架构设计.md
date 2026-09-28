@@ -207,7 +207,7 @@ Hopfield 检索用 sign 吸引子保证收敛；双速率分离避免快学习�
 - 因此 1B 参数模型的**单步训练在 CPU 上是毫秒级**的——密集 1B 模型
   （权重+梯度+优化器状态 ≈ 16GB 且每步 10⁹× 数次 FLOPs）在无独显机器上物理不可行，
   而事件驱动的稀疏类脑架构使其可行。
-- **1B 规模实测（2026-09-19 复跑 `tools/train_1b.py` 定稿）**：容量 N=2²⁴ × m=60 ≈ 1.007B，
+- **1B 规模实测（2026-09-19 复跑 `tools/train_1b_capacity.py` 定稿）**：容量 N=2²⁴ × m=60 ≈ 1.007B，
   **单步训练耗时 1.28 ms/步**（1500 步合计 1.92 s，已生长 3,072 条突触、利用率 0.0003%）；
   突触迹与时间戳改为 dict 按需存储，RSS 增量约 0 MB（相对 N 长度数组方案 ~197 MB 的实质改进）。
   注：早前容量层独立微基准（`tests/demo_m4.py` 的 `SparseSynapseTable` 查表核）曾报 0.47 ms/步，
@@ -359,7 +359,7 @@ AMD GPU 建议 DirectML 路径。
 | 后端体检 | `tools/backend_probe.py` | 探测昇腾/ROCm/CUDA/DirectML + 等价性自检 |
 | 回归总入口 | `tests/run_tests.py` | fast（默认）/ `--full` 分层回归 |
 | 演示实验 | `tests/demo_phdnet.py` | 序列预测 / 模式补全 / 少样本关联 |
-| 1B 训练 | `tools/train_1b.py` | `BillionSynapseNet`（§6 规模化设计） |
+| 1B 训练 | `tools/train_1b_capacity.py` | `BillionSynapseNet`（§6 规模化设计） |
 | M9 五轨道验收 | `tests/demo_m9.py` | 15 项配置对比 + 容量赛道（int8 / CSR / 稀疏 PC / 生长引导） |
 | 外部语料获取 | `tools/fetch_modelscope.py` | ModelScope 数据集文件下载（含断点续传，实测 ~5 MB/s；本期间用于 ood_wiki.txt Range 抽取） |
 | 外部语料制备 | `tools/prepare_wikicn.py` | 中文维基 JSONL → `datasets/pretrain/wiki_{train,eval}.txt`（清洗 + 确定性划分；维基语料已删，脚本留档待新锚点） |
