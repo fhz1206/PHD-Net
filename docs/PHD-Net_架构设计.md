@@ -569,6 +569,16 @@ Transformer 对照为自建 nanoGPT 级模型（PyTorch，**0.52M（96d×2L）/ 
 
 ## 附：词表来源与设备张量兼容（P17，2026-09-28）
 
+**词表快照（P17，fhz「词表做出来第一时间存入 outputs/models」）**：
+词表一确定就落盘 `outputs/models/vocab_<preset>_<data>.json`（权威）+ `.txt`（人读镜像），
+训练崩溃/中断也不丢；下次 `--vocab-file <同名>.json` 直接复用，免重扫（full 扫描 520s）。
+快照**必须同时存两个集合**：`words`（token 词表 = 读出层行数 = n_readout）与
+`seg_vocab`（分词器候选集，训练时是涌现词表，通常是真子集）——用 token 词表
+代替候选集会让分词结果与训练不一致（静默降质）。另：词表可能含**跨行 token**
+（`"\n的"` 等），故 JSON 为权威格式（纯文本每行一词会把它切碎：实测 2,610 → 2,571）。
+推理侧 `infer.py` 自动定位同目录 / `outputs/models/` 的快照并**交叉校验**
+（比对 `tok_tokens`），不一致即报错退出——防「用错词表静默降质」。
+
 **词表来源三选一**（优先级从高到低，`train_1b/train.py`）：
 
 1. `--resume` + 检查点存在 → **跳过构建**，用检查点内 `tok_vocab` /

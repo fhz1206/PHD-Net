@@ -27,6 +27,69 @@ CKPT_VERSION = 1
 
 
 # ────────────────────────────── 保存 ──────────────────────────────
+def save_vocab_snapshot(path: Path, tokens, max_len: int,
+                        seg_vocab=None, meta: dict | None = None) -> Path:
+    """词表**快照**落盘（P17，fhz「词表做出来第一时间存入 outputs/models」）。
+
+    ⚠ 存**两个**词集合，缺一不可（它们语义不同）：
+      - `words`     = token 词表（LM token 序列 / 读出层行数，len = n_readout）；
+      - `seg_vocab` = **分词器候选集**（贪心匹配的查表集合，训练时是涌现词表，
+        通常是真子集）。用 words 代替 seg_vocab 会让分词结果与训练不一致
+        （静默降质），故快照必须同时记录；老快照缺 seg_vocab 时读回会告警。
+    ⚠ 词表可能含**跨行 token**（"\\n的" 等）——纯文本每行一词会切碎它
+      （实测 2,610 词读回只剩 2,571），故：
+      - `<name>.json` = **权威格式**（任意字符安全，可程序回读）；
+      - `<name>.txt`  = 人读镜像（\\n / \\r / \\ 显式转义，仅供查看）。
+    """
+    import json
+    import time as _t
+    toks = sorted(set(str(x) for x in tokens))
+    segv = sorted(set(str(x) for x in (seg_vocab if seg_vocab is not None
+                                       else toks)))
+    info = {"n_words": len(toks), "n_seg_vocab": len(segv),
+            "max_len": int(max_len),
+            "saved_at": _t.strftime("%Y-%m-%d %H:%M:%S")}
+    info.update(meta or {})
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    jpath = path.with_suffix(".json")
+    jpath.write_text(json.dumps({**info, "words": toks, "seg_vocab": segv},
+                                ensure_ascii=False, indent=1),
+                     encoding="utf-8")
+    def _esc(w: str) -> str:
+        return w.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+    path.write_text("# " + json.dumps({**info, "note": "seg_vocab 见同名 .json"},
+                                     ensure_ascii=False) + "\n"
+                    + "\n".join(_esc(w) for w in toks) + "\n",
+                    encoding="utf-8")
+    return jpath
+
+
+def load_vocab_file(path: Path):
+    """读回词表快照 → (tokens, seg_vocab, max_len)。
+
+    `.json` 为权威格式；`.txt` 为人读镜像（转义还原，seg_vocab 缺失 → 退回
+    tokens 并由调用方告警：分词候选集与训练可能不同，建议改用 --resume）。
+    """
+    import json
+    path = Path(path)
+    if path.suffix.lower() == ".json":
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(obj, dict):
+            words = [str(w) for w in obj["words"]]
+            segv = ([str(w) for w in obj["seg_vocab"]]
+                    if "seg_vocab" in obj else None)
+            return words, segv, int(obj.get("max_len", 6))
+        return [str(w) for w in obj], None, 6
+    words = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        w = line.strip()
+        if w and not w.startswith("#"):
+            words.append(w.replace("\\n", "\n").replace("\\r", "\r")
+                         .replace("\\\\", "\\"))
+    return words, None, 6
+
+
 def to_numpy(x, dtype=None):
     """延迟导入的 to_numpy（避免与 phdnet.model 的导入顺序耦合）。"""
     from phdnet.model import to_numpy as _tn

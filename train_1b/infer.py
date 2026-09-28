@@ -48,6 +48,51 @@ from phdnet.word_lm import PHDWordLM                               # noqa: E402
 CHAT_TEMPLATE = "用户：{q}\n助手："
 
 
+def verify_vocab_snapshot(model_path: Path, ckpt_vocab: set,
+                          vocab_file: Path | None = None) -> None:
+    """词表一致性校验（P17）：推理词表**以检查点为准**，快照只做交叉验证。
+
+    定位顺序：显式 --vocab-file → 与检查点同目录的
+    `vocab_<preset>_<data>.json`（由 `phdnet1b_<preset>_<data>[_final].npz`
+    反解 preset/data）。不一致时**明确报错退出**：用错词表会让 SDR 哈希与
+    读出层错位，表现为「能跑但输出退化」的静默故障。
+    """
+    import json
+    import re
+    snap = vocab_file
+    if snap is None:
+        m = re.match(r"phdnet1b_(.+?)_(.+?)(?:_final)?\.npz$", model_path.name)
+        if m:
+            name = f"vocab_{m.group(1)}_{m.group(2)}.json"
+            # 候选：检查点同目录 → 上一级 models/ → 项目 outputs/models/
+            # （训练默认把快照写 outputs/models，smoke 产物在 outputs/smoke/）
+            cands = [model_path.parent / name,
+                     model_path.parent.parent / "models" / name,
+                     Path("outputs") / "models" / name]
+            for c in cands:
+                if c.exists():
+                    snap = c
+                    break
+    if snap is None or not Path(snap).exists():
+        print("[infer] 未找到词表快照（可选）：仅用检查点自含词表")
+        return
+    obj = json.loads(Path(snap).read_text(encoding="utf-8"))
+    words = {str(w) for w in (obj["words"] if isinstance(obj, dict) else obj)}
+    # 注：比对对象是 **token 词表**（= ckpt 的 tok_tokens，即读出层行数），
+    # 不是分词器候选集（tok_vocab）。两者语义不同，别搞混。
+    only_ckpt = len(ckpt_vocab - words)
+    only_snap = len(words - ckpt_vocab)
+    if only_ckpt == 0 and only_snap == 0:
+        print(f"[infer] 词表校验通过：与 {Path(snap).name} 一致"
+              f"（{len(words):,} 词）")
+        return
+    print(f"[infer] 词表**不一致**：检查点独有 {only_ckpt} 词、快照独有 "
+          f"{only_snap} 词（{Path(snap).name}）", file=sys.stderr)
+    print("[infer] 推理必须用检查点自含词表（SDR 哈希与读出层按它对齐）；"
+          "若要改词表需重训。已中止。", file=sys.stderr)
+    sys.exit(2)
+
+
 def load_from_ckpt(model_path: Path) -> PHDWordLM:
     """从检查点自包含重建 PHDWordLM（词表 + cfg + 全部权重；不需要语料）。"""
     import json
@@ -55,12 +100,13 @@ def load_from_ckpt(model_path: Path) -> PHDWordLM:
         meta = json.loads(str(z["meta"][0]))
         ckpt_vocab = {str(w) for w in z["tok_vocab"]}
         ckpt_tokens = [str(t) for t in z["tok_tokens"]]
+        ckpt_max_len = int(z["tok_max_len"][0]) if "tok_max_len" in z.files else 6
     cfg = PHDNetConfig(**meta["cfg"])
 
     # 词表重建（与 ckpt_1b._restore_tokenizer 同一注入逻辑，逐位一致）
     seg = WordSegmenter.__new__(WordSegmenter)
     seg.vocab = ckpt_vocab
-    seg.max_len = 6
+    seg.max_len = ckpt_max_len      # P17：不再硬编码 6（词表快照已带 max_len）
     tok = WordTokenizer.__new__(WordTokenizer)
     tok.seg = seg
     tok.tokens = ckpt_tokens
@@ -161,6 +207,9 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--milestone", type=int, default=1_000_000,
                     help="预热进度打点间隔 tokens（0=关闭）")
+    ap.add_argument("--vocab-file", type=Path, default=None,
+                    help="词表快照（.json 权威 / .txt 镜像）—— 仅用于**交叉校验**，"
+                         "推理词表始终取自检查点；不一致即报错退出")
     ap.add_argument("--devices", type=str, default="auto",
                     help="设备探测（P14）：打印加速器清单与多卡计划。"
                          "注意本入口为 numba CPU 生产路径（单路），"
@@ -187,6 +236,15 @@ def main() -> None:
               "按 CPU 单路继续。")
 
     lm = load_from_ckpt(args.model)
+    try:                                    # 词表交叉校验（快照 vs 检查点）
+        import numpy as _np
+        with _np.load(str(args.model), allow_pickle=False) as _z:
+            _cv = {str(w) for w in _z["tok_tokens"]}   # token 词表（非 seg 候选集）
+        verify_vocab_snapshot(args.model, _cv, args.vocab_file)
+    except SystemExit:
+        raise
+    except Exception as e:                   # noqa: BLE001
+        print(f"[infer] 词表校验跳过（{type(e).__name__}: {e}）")
 
     if args.chat:
         print("[infer] 交互对话（逐行输入，Ctrl-C 退出；多轮状态连续共享）")

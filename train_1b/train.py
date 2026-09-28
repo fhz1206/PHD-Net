@@ -298,18 +298,21 @@ def main() -> None:
               f"（{_ckpt_path.name}：{len(_cv):,} 词 / max_len={_cmax}，"
               f"SDR 哈希确定性重建、逐位一致；读出层按该尺寸对齐）", flush=True)
     elif _file_vocab:
-        _words = []
-        for _line in Path(args.vocab_file).read_text(
-                encoding="utf-8").splitlines():
-            _w = _line.strip()
-            if _w and not _w.startswith("#"):
-                _words.append(_w)
-        seg = make_external_segmenter(SEG_KWARGS, _words)
+        from ckpt_1b import load_vocab_file
+        _words, _segv, _wmax = load_vocab_file(Path(args.vocab_file))
+        if _segv is None:
+            print("[词表] ⚠ 快照缺 seg_vocab（分词器候选集）：已退回用 token 词表"
+                  "作候选集——分词结果可能与训练时不同（静默降质风险）。"
+                  "建议改用 --resume（检查点自包含，权威）或用新版快照。",
+                  flush=True)
+            _segv = _words
+        seg = make_external_segmenter({**SEG_KWARGS, "max_len": _wmax}, _segv)
         tokens = sorted(set(_words))
         vocab_text = "\n".join(_words[:4096])   # 仅供分词器注入构造
-        print(f"[词表] 外部词表文件 {args.vocab_file}：{len(_words):,} 行 → "
-              f"去重 {len(tokens):,} 词（跳过扫描阶段；OOV 步跳过并统计）",
-              flush=True)
+        print(f"[词表] 外部词表文件 {args.vocab_file}"
+              f"（{'JSON 权威格式' if Path(args.vocab_file).suffix.lower() == '.json' else '文本（转义还原）'}）"
+              f"：{len(_words):,} 词 / max_len={_wmax} → 去重 {len(tokens):,} 词"
+              f"（跳过扫描阶段；OOV 步跳过并统计）", flush=True)
     elif args.vocab_scan == "full":
         from vocab_parallel import NUMBA_TOK_OK as _TOK_NB
         _engine = (f"多核锚点链 ×{vw}"
@@ -358,6 +361,26 @@ def main() -> None:
             print(f"[词表] head 模式：采样前 {len(vocab_text):,} 字符构建"
                   f"（涌现词表 {len(seg.vocab):,}，token 词表 {len(tokens):,}）；"
                   f"训练流 OOV 步将跳过并统计", flush=True)
+
+    # ── 词表快照**第一时间落盘**（P17，fhz 要求）──
+    # 训练崩溃/中断也不丢词表；下次 `--vocab-file <该文件>` 直接复用（免重扫，
+    # full 扫描 520s）。四个来源（resume/外部文件/head/full）统一在此落盘。
+    if tokens:
+        from ckpt_1b import save_vocab_snapshot
+        _src = ("resume" if _resume_vocab else
+                "vocab-file" if _file_vocab else
+                f"scan-{args.vocab_scan}")
+        _vp = save_vocab_snapshot(  # 返回 .json 权威路径
+            SAVE_DIR / f"vocab_{args.preset}_{args.data}.txt", tokens,
+            getattr(seg, "max_len", SEG_KWARGS["max_len"]),
+            seg_vocab=getattr(seg, "vocab", None),   # 分词器候选集（必存）
+            meta={"preset": args.preset, "data": args.data, "source": _src,
+                  "sha1": __import__("hashlib").sha1(
+                      "\n".join(sorted(set(tokens))).encode("utf-8")
+                  ).hexdigest()[:12]})
+        print(f"[词表] 快照已落盘：{_vp.name}（{_vp.stat().st_size / 1024:.0f} KB，"
+              f"来源={_src}，人读镜像 {_vp.with_suffix('.txt').name}）"
+              f"—— 崩溃后续训直接 --vocab-file {_vp.name}，免重扫", flush=True)
 
     # ── 构建 LM（注入式 tokenizer；n_readout = 词表大小）──
     t0 = time.perf_counter()
