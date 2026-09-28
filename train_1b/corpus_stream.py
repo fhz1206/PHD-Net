@@ -35,6 +35,13 @@ from collections.abc import Iterable, Iterator
 
 SEP = "\n\n"
 
+# 预取进程数上限（P16，2026-09-28 fhz「不要那么多进程，主进程已用多核」）：
+# parquet 解码在 pyarrow 内**自身多线程且释放 GIL**，生产者进程数超过解码
+# 并行度只会带来内存（每进程一份 Python+pyarrow 上下文，153 份即 15–30 GB）
+# 与调度开销。真正的并行来自主进程的 numba nogil 线程（分词）+ 这里的
+# 解码线程池，故进程数收敛到 ~8（每进程 pa.set_cpu_count 限核，总量≈核数）。
+PREFETCH_MAX_PROCS = 8
+
 
 def char_chunks(path, sep: str = SEP) -> Iterator[str]:
     """语料字符块流：逐样本 yield（样本 + 分隔符）；path 支持单文件或 glob。"""
@@ -43,13 +50,18 @@ def char_chunks(path, sep: str = SEP) -> Iterator[str]:
         yield t + sep
 
 
-def iter_texts_lang(path, lang: str | None = None):
+def iter_texts_lang(path, lang: str | None = None, decode_threads: int = 0):
     """按 lang 字段过滤的流式读取（lang=None 时等价 iter_texts；仅 parquet 支持过滤）。"""
     if lang is None:
         from phdnet.corpus import iter_texts
         yield from iter_texts(path)
         return
+    import pyarrow as pa
     import pyarrow.parquet as pq
+
+    if decode_threads > 0:
+        pa.set_cpu_count(decode_threads)     # P16：按进程数分摊解码核
+        pa.set_io_thread_count(max(1, decode_threads // 2))
 
     from phdnet.corpus import expand_paths
     for p in expand_paths(path):
@@ -92,7 +104,8 @@ def mix_chunks(sources, sep: str = SEP) -> Iterator[str]:
 
 
 def _prefetch_producer(tasks, sep: str, batch_samples: int, q,
-                       lang: str | None = None) -> None:
+                       lang: str | None = None,
+                       decode_threads: int = 0) -> None:
     """生产者进程体：顺序读取分派给本进程的文件，按批推入有界队列。
 
     tasks = [(全局文件序号 gfi, 路径)]（连续片段）；
@@ -103,7 +116,8 @@ def _prefetch_producer(tasks, sep: str, batch_samples: int, q,
     try:
         for gfi, path in tasks:
             buf: list[str] = []
-            for t in iter_texts_lang(path, lang):
+            for t in iter_texts_lang(path, lang,
+                                     decode_threads=decode_threads):
                 buf.append(t + sep)
                 if len(buf) >= batch_samples:
                     q.put((gfi, buf))
@@ -122,7 +136,8 @@ def _prefetch_producer(tasks, sep: str, batch_samples: int, q,
 class PrefetchChars:
     """多进程数据加载（fhz 2026-09-25：「数据加载也用多核」「能不能多进程」）。
 
-    W 个生产者进程（默认 = 核心数×0.8，按文件数封顶）按**连续文件片段**并行
+    W 个生产者进程（**P16：默认 min(8, 核数×0.8, 文件数)**——解码在 pyarrow
+    内多线程，进程数过多只增内存/调度）按**连续文件片段**并行
     解码 parquet/txt，各批带全局文件序号推入有界队列；主进程按文件顺序
     reorder 归并 → 产出与 char_chunks **逐位一致**（同一 iter_texts、同一
     文件顺序、批内同序）。
@@ -141,10 +156,14 @@ class PrefetchChars:
 
         from vocab_parallel import auto_workers
         files = [str(p) for p in expand_paths(path)]
-        w = auto_workers() if workers in (0, None) else int(workers)
+        cpu = auto_workers()
+        w = min(PREFETCH_MAX_PROCS, cpu, len(files)) if workers in (0, None) \
+            else int(workers)
         w = max(1, min(w, len(files)))
         self._n_files = len(files)
         self._n_workers = w
+        # 解码核在 W 个进程间分摊：W × decode_threads ≈ cpu（避免超订）
+        self._decode_threads = max(1, cpu // w)
 
         self._q: "mp.Queue" = mp.Queue(maxsize=depth)
         self._procs = []
@@ -152,7 +171,8 @@ class PrefetchChars:
         for i in range(w):
             tasks = [(gfi, files[gfi]) for gfi in range(bounds[i], bounds[i + 1])]
             p = mp.Process(target=_prefetch_producer,
-                           args=(tasks, sep, batch_samples, self._q, lang),
+                           args=(tasks, sep, batch_samples, self._q, lang,
+                                 self._decode_threads),
                            daemon=True)
             p.start()
             self._procs.append(p)

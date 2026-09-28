@@ -69,6 +69,10 @@ from phdnet.model import count_params                                # noqa: E40
 from phdnet.word_encoder import WordTokenizer                         # noqa: E402
 from vocab_parallel import auto_workers, build_segmenter_parallel    # noqa: E402
 from vocab_parallel import parallel_head_tokens, scan_vocab_parallel # noqa: E402
+from corpus_stream import PREFETCH_MAX_PROCS                             # noqa: E402
+
+# 预取进程数（0=自动；main 里按 --prefetch-workers 覆盖，P16）
+PREFETCH_W = 0
 
 SAVE_DIR = _ROOT / "outputs" / "models"   # fhz 2026-09-28：生产训练产物统一存 outputs/models/
 LOG_DIR = _ROOT / "outputs" / "models" / "train_logs"
@@ -90,8 +94,9 @@ def stream_factory(data: str):
         # 双源均走多进程加载（文件级并行 + 顺序归并 → 与串行产出逐位一致）：
         # sft 全量源 + pretrain 中文过滤源（lang="zh" 在生产者进程内过滤）
         return lambda: mix_chunks([
-            PrefetchChars(DATA_FILES["sft"], SEP),
-            PrefetchChars(DATA_FILES["pretrain_zh"], SEP, lang="zh"),
+            PrefetchChars(DATA_FILES["sft"], SEP, workers=PREFETCH_W),
+            PrefetchChars(DATA_FILES["pretrain_zh"], SEP, lang="zh",
+                          workers=PREFETCH_W),
         ])
     return lambda: char_chunks(DATA_FILES[data])
 
@@ -171,6 +176,9 @@ def main() -> None:
                          "full=全量流式扫一遍(零 OOV, 大语料需数小时)")
     ap.add_argument("--vocab-sample-chars", type=int, default=4_000_000,
                     help="head 模式词表采样字符数（只影响词表，训练数据本身不截断）")
+    ap.add_argument("--prefetch-workers", type=int, default=0,
+                    help="语料预取进程数（P16：0=自动，默认 min(8, 核数×0.8, 文件数)；"
+                         "解码在 pyarrow 内多线程，进程过多只增内存/调度）")
     ap.add_argument("--vocab-workers", type=int, default=0,
                     help="词表构建/全量扫描并行进程数（0=自动=核心数×0.8，1=串行；"
                          "fhz 2026-09-25 指令）")
@@ -186,6 +194,13 @@ def main() -> None:
                     help="只打印检查点的大空间表统计后退出")
     args = ap.parse_args()
     vw = args.vocab_workers if args.vocab_workers > 0 else auto_workers()
+    # P16：预取**进程**数收敛（解码在 pyarrow 内多线程 + 主进程分词为 nogil
+    # 线程）；进程数 × 每进程解码核 ≈ 核数，避免 153 进程的超订与内存爆炸。
+    global PREFETCH_W
+    PREFETCH_W = (args.prefetch_workers if args.prefetch_workers > 0 else 0)
+    _cpu = auto_workers()
+    _pf_auto = min(PREFETCH_MAX_PROCS, _cpu)
+    _pf = PREFETCH_W if PREFETCH_W > 0 else _pf_auto
 
     if args.log_file is not None:
         log_path = args.log_file
@@ -195,6 +210,9 @@ def main() -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     sys.stdout = TeeLogger(log_path)
 
+    print(f"[并行] 分词线程（numba nogil）={vw} | 预取进程={_pf}"
+          f"（解码核/进程≈{max(1, _cpu // _pf)}，合计≈{_pf * max(1, _cpu // _pf)}）"
+          f" | 数据侧并行不与分词线程叠加争抢")
     print(f"[log] 日志文件：{log_path}")
     print(f"[log] 启动：{datetime.now().isoformat(timespec='seconds')}  "
           f"argv：{' '.join(sys.argv[1:]) or '(默认参数)'}")
@@ -262,7 +280,9 @@ def main() -> None:
             seen, n_seen = scan_vocab_parallel(seg.vocab, seg.max_len,
                                                (stream_factory(args.data)()
                                                 if args.data == "mix"
-                                                else PrefetchChars(data_path, SEP)),
+                                                else PrefetchChars(
+                                                    data_path, SEP,
+                                                    workers=PREFETCH_W)),
                                                vw, progress=_scan_prog)
         else:
             for tk in StreamingTokenizer(seg, char_chunks(data_path, SEP)):
@@ -340,7 +360,7 @@ def main() -> None:
         if args.data == "mix":
             src = stream_factory("mix")()
         else:
-            src = PrefetchChars(data_path, SEP)
+            src = PrefetchChars(data_path, SEP, workers=PREFETCH_W)
         stream = StreamingTokenizer(lm.tok.seg, src)
         it = iter(stream)
         p2 = None                                          # t_{i-1}（epoch 首步 prev 断开）
