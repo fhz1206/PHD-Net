@@ -227,3 +227,53 @@ python tools/accel_doctor.py --no-bench               # 只诊断不跑基准
 训练/推理启动日志也会打印**读出设备的实际解析结果**（`[能力] 读出设备解析
 （auto）= npu`），失败时给出一行可复制的诊断命令。真正生效的后端仍以
 `[读出] 后端=...` 为准（回落时同行给出原因）。
+
+## 十、NPU 性能问题定位与修复（P28，2026-09-29）
+
+用户在昇腾上报告性能异常。子代理逐行审计 `AccelReadout` 每 token 的设备交互后，
+定位到**带宽超支 40% + 3 次硬同步**。
+
+### 每步设备流量账（V=73,958，H=3,072，W = 867 MiB fp32）
+
+| 项 | 修复前 | 修复后 |
+|---|---|---|
+| `W @ h` 读 W | 867 MiB | 867 MiB |
+| `torch.outer(dp, h)` **物化临时张量** | **867 MiB** | 0（消除） |
+| `W.add_(outer)` 读 W + 读临时 + 写 W | 2,600 MiB | 1,733 MiB（`addmm_` 读 W + 写 W） |
+| H2D h（×2）+ target + **y D2H→H2D 回传** | 0.6 MiB | 0.3 MiB |
+| **合计** | **4,334 MiB/步** | **2,600 MiB/步（−40.0%）** |
+
+理论下限（读 W 一次 + 读写 W 各一次）= 2,600 MiB → **修复后正好触底**。
+按昇腾 ~1.6 TB/s HBM 估，2.9 ms → 1.7 ms/步。
+
+### 三处修正
+
+1. **`torch.outer` → `W.addmm_(dp.reshape(-1,1), h.reshape(1,-1), alpha=-eta)`**
+   rank-1 AXPY，不物化与 W 同尺寸的临时张量（1B 档 867 MiB），同时消除每步
+   一次大块设备分配/释放对 caching allocator 的压力。
+   **数值逐位相同**（实测 max|ΔW| = 0.000e+00）。
+2. **设备侧 (h, y) 缓存**：`forward` 缓存设备张量，紧随其后的 `learn_softmax`
+   直接复用 → 省掉「y D2H 289 KiB → H2D 传回」与 h 的重复上传。
+3. **硬同步 3 → 1**：`correct` 改在主机侧算（target 本来就在主机），
+   nll 合并成唯一一次 `.item()`。
+
+### 实测
+
+| 指标 | 修复前 | 修复后 |
+|---|---|---|
+| 设备流量/步 | 4,334 MiB | 2,600 MiB（**−40%**） |
+| 墙钟（CPU 参考，不外推 NPU） | 456.75 ms | **220.39 ms（2.07×）** |
+| 硬同步/步 | 3 | 1 |
+
+复现：`python tests/verifiers/bench_accel_path.py`
+
+### 尚未处理（已知下一步）
+
+- `PHDNet.step` 里 `y = self.readout(h)` 仍会把 y 拉回主机（`forward` 里的
+  `.cpu()`），而训练热路径只消费 `d["nll"]` → 这是一次可省的同步 + 289 KiB
+  D2H。彻底消除需要 `model.step` 走 `forward_dev`（设备张量）并把返回 dict
+  里的 `y` 惰性化，涉及核心热路径与 infer 的接口约定，**本轮未动**
+  （收益约 3%，风险高于收益）。
+- `AccelReadout.learn_softmax` 收了 `accumulate` 参数但未使用（minibatch
+  在加速后端被静默忽略）。当前 `minibatch_size` 默认 1 → 无行为差异，
+  但启用前必须实现或显式拒绝。

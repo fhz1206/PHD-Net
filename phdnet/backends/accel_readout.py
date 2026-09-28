@@ -73,11 +73,25 @@ class AccelReadout:
         # 而 W 是原位更新的 → 调用方（例如比较用的参考权重）会被静默改掉。
         self.W = torch.tensor(np.ascontiguousarray(init, dtype=np.float32),
                               device=self.device, dtype=self.tdtype)
+        # P28：设备侧 (h, y) 缓存，供 forward → learn_softmax 的热路径复用
+        self._cache_h: np.ndarray | None = None
+        self._cache_ht = None
+        self._cache_y = None
 
     # ---------- 前向 ----------
     def forward(self, h) -> np.ndarray:
+        """前向并返回 **numpy**（`Readout.__call__` 契约）。
+
+        同时把设备侧的 (h, y) 缓存下来，供紧随其后的 `learn_softmax` 复用
+        （P28：生产热路径是 `y = readout(h)` → `learn_softmax(..., y_pre=y)`，
+        若不缓存就要 D2H 289 KiB 再 H2D 传回，纯往返）。
+        """
         ht = self._to_dev(h)
-        return (self.W @ ht).float().cpu().numpy()
+        y = self.W @ ht
+        self._cache_h = np.ascontiguousarray(h, dtype=np.float32)
+        self._cache_ht = ht
+        self._cache_y = y
+        return y.float().cpu().numpy()
 
     def __call__(self, h) -> np.ndarray:
         """与 `Readout.__call__` 同协议（model.step 里是 `self.readout(h)`）。
@@ -89,32 +103,72 @@ class AccelReadout:
         return self.forward(h)
 
     def forward_dev(self, h):
-        """设备内前向（返回设备张量，省一次回传；供流水/批量场景）。"""
-        return self.W @ self._to_dev(h)
+        """设备内前向（返回**设备张量**，零同步）。
+
+        P28：这是消除「训练热路径上 y 白 D2H 再白 H2D」的正解——调用方拿设备
+        张量直接进 `learn_softmax`，整条链路上没有主机↔设备往返。
+        """
+        ht = self._to_dev(h)
+        y = self.W @ ht
+        self._cache_h = np.ascontiguousarray(h, dtype=np.float32)
+        self._cache_ht = ht
+        self._cache_y = y
+        return y
 
     # ---------- 学习（softmax 感知器，局部梯度 p − t）----------
     def learn_softmax(self, h, target, eta: float, y_pre=None,
                       accumulate: int = 1) -> float:
-        ht = self._to_dev(h)
-        # y_pre 既可能是设备张量，也可能是 `forward()` 返回的 **numpy**（生产用法：
-        # model.step 先 y = self.readout(h) 再把 y 传回来省一次 W@h）——两者都要收。
+        """P6 感知器更新（softmax 交叉熵的局部梯度 ∂L/∂y = p − t）。
+
+        P28 的三处性能修正（数值语义不变，仍属「容差一致」）：
+          ① `W.addmm_(dp⊗ht, alpha=-eta)` 取代 `W.add_(torch.outer(dp, ht))`——
+             后者会**物化一个与 W 同尺寸的临时张量**（1B 档 867 MiB），再被 add_
+             读回来 → 单步多出 1.73 GiB 设备带宽（实测占总流量 40%）。addmm_ 是
+             一步 rank-1 AXPY，不产生临时张量。
+          ② y/h 复用：优先用 `forward`/`forward_dev` 缓存的设备张量，省掉
+             「y D2H 289 KiB → H2D 传回」与 h 的重复上传。
+          ③ 同步点 3 → 1：`correct` 在主机侧算（target 本来就在主机，零设备交互），
+             nll 合并成唯一一次 `.item()`。
+        """
+        ht, cache_hit = self._lookup_ht(h)
+        # y_pre 既可能是设备张量（推荐路径）、numpy（旧接口），或 None（自算）
         if y_pre is None:
             y = self.W @ ht
         elif torch.is_tensor(y_pre):
-            y = y_pre.to(device=self.device)
+            y = y_pre if y_pre.device == ht.device else y_pre.to(ht.device)
+        elif cache_hit and self._cache_y is not None:
+            # 缓存命中 = 本次 h 与 forward 时的 h 相同 → y_pre 就是那次的前向结果
+            # （生产热路径 forward → learn_softmax 的形状），直接复用设备张量，
+            # 省掉「D2H 289 KiB + H2D 传回 + 一次硬同步」。
+            y = self._cache_y
         else:
             y = torch.as_tensor(np.ascontiguousarray(y_pre, dtype=np.float32),
-                                device=self.device, dtype=self.tdtype)
+                                device=ht.device, dtype=self.tdtype)
         y32 = y.float()
         p = torch.softmax(y32, dim=0)
         t = self._to_dev(target).float()
-        correct = int(torch.argmax(t).item())
-        nll = float(-torch.log(p[correct] + 1e-12).item())
+        # correct 在主机侧求（target 是 host 数组）——省一次 .item() 硬同步
+        correct = int(np.argmax(np.asarray(target)))
         dp = (p - t).to(self.tdtype)
-        self.W.add_(torch.outer(dp, ht), alpha=-eta)
+        # rank-1 AXPY：W -= eta · dp ⊗ h（不物化 (n_out × n_in) 临时张量）
+        self.W.addmm_(dp.reshape(-1, 1), ht.reshape(1, -1), alpha=-float(eta))
         if self.w_clip > 0.0:
             self.W.clamp_(-self.w_clip, self.w_clip)
+        # 唯一一次同步：取 nll（训练日志要它）
+        nll = float(-torch.log(p[correct] + 1e-12).item())
         return nll
+
+    def _lookup_ht(self, h):
+        """复用缓存的设备 h（`forward` 刚上传过同一个 h 时省一次 H2D）。
+
+        返回 (设备张量, 是否命中缓存)。h 很小（n_h 个 fp32），逐元素比较成本
+        可忽略，换来的是每步少一次 H2D + 一次分配。
+        """
+        if self._cache_ht is not None and self._cache_h is not None:
+            ha = np.ascontiguousarray(h, dtype=np.float32)
+            if ha.shape == self._cache_h.shape and np.array_equal(ha, self._cache_h):
+                return self._cache_ht, True
+        return self._to_dev(h), False
 
     # ---------- 与 numba Readout 的接口兼容 ----------
     def learn(self, h, target, eta: float) -> None:
@@ -126,10 +180,12 @@ class AccelReadout:
           （P7 遗留，只在融合核不可用时暴露）。本实现以**融合核**（生产默认）为
           准；同时已把该回退分支改正，两条路径现语义一致。
         """
-        ht = self._to_dev(h)
+        ht, _ = self._lookup_ht(h)
         y = (self.W @ ht).to(self.tdtype)
         t = self._to_dev(target).to(self.tdtype)
-        self.W.add_(torch.outer(t - y, ht), alpha=eta)   # W += η·(t − y)⊗h
+        # P28：rank-1 AXPY（W += η·(t − y)⊗h），不物化 (n_out×n_in) 临时张量
+        self.W.addmm_((t - y).reshape(-1, 1), ht.reshape(1, -1),
+                      alpha=float(eta))
         if self.w_clip > 0.0:
             self.W.clamp_(-self.w_clip, self.w_clip)
 
