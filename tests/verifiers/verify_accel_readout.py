@@ -78,6 +78,46 @@ def main() -> None:
           f"{ro_acc.n_synapses():,}")
     check("A W 常驻设备且为 torch 张量", torch.is_tensor(ro_acc.W))
 
+    from phdnet.backends.multi_device import probe_multi
+    _probes = probe_multi()
+    has_accel = any(v.get("ok") and v.get("count")
+                    for k, v in _probes.items() if k != "cpu")
+
+    # ── A2：4 项调用面齐备（P19 生产事故：缺 __call__ → 首个 step 崩）──
+    print("[A2] 调用面齐备（model.step 的 4 个入口）")
+    ro_x = AccelReadout(n_h, n_out, None, device="cpu", dtype="fp32", w0=W0)
+    check("A2 可调用 __call__（model.step 用 readout(h)）",
+          np.array_equal(np.asarray(ro_x(h), dtype=np.float32), ro_x.forward(h)))
+    ro_y = AccelReadout(n_h, n_out, None, device="cpu", dtype="fp32", w0=W0)
+    y_pre = ro_y.forward(h)
+    nll_c = ro_y.learn_softmax(h, tgt, 0.05, y_pre=y_pre)
+    check("A2 learn_softmax 支持 y_pre（省一次 W@h）", isinstance(nll_c, float))
+    ro_z = AccelReadout(n_h, n_out, None, device="cpu", dtype="fp32", w0=W0)
+    ro_z.learn(h, tgt, 0.05)                # 非 softmax 路径（P19 补齐）
+    W_after = ro_z.W_cpu()
+    check("A2 learn（非 softmax）改变 W 且形状不变",
+          W_after.shape == (n_out, n_h) and not np.array_equal(W_after, W0))
+    ro_r = Readout(n_h, n_out, rng, w_clip=0.0, dtype="fp32")
+    ro_r.W[:] = W0
+    ro_r.learn(h, tgt, 0.05)
+    d_learn = float(np.abs(ro_r.W.copy() - W_after).max())
+    sc = max(1e-12, float(np.abs(ro_r.W).max()))
+    check("A2 learn 与 Readout.learn 容差一致", d_learn <= 1e-5 * sc,
+          f"max|Δ|={d_learn:.3e}")
+    check("A2 W 为设备张量（保存路径用 W_cpu）", torch.is_tensor(ro_x.W))
+
+    # ── A3：配置不兼容必须回落（两级/稀疏/量化读出未实现）──
+    print("[A3] 配置兼容性 → 强制回落")
+    for label, kw in (("readout_hidden", {"readout_hidden": 8}),
+                      ("readout_conn_k", {"readout_conn_k": 16}),
+                      ("readout_dtype=fp8", {"readout_dtype": "fp8"})):
+        cfg_x = PHDNetConfig(accel_readout="cuda" if has_accel else "auto", **kw)
+        ro_c, backend_c = pick_readout_backend(cfg_x, n_h, n_out, rng)
+        reason = getattr(ro_c, "_accel_fallback_reason", "")
+        check(f"A3 {label} 回落 numba 并记录原因",
+              isinstance(ro_c, Readout) and label.split("=")[0] in reason,
+              f"backend={backend_c} reason={reason[:40]}")
+
     # ── C：状态往返 ──
     print("[C] 检查点往返")
     W_ck = rng.normal(0, 0.03, (n_out, n_h)).astype(np.float32)
@@ -91,10 +131,7 @@ def main() -> None:
 
     # ── D：后端选择（无加速器 → 回落 numba）──
     print("[D] 后端选择与回落")
-    from phdnet.backends.multi_device import probe_multi
-    probes = probe_multi()
-    has_accel = any(v.get("ok") and v.get("count")
-                    for k, v in probes.items() if k != "cpu")
+    probes = _probes
     cfg = PHDNetConfig()
     ro, backend = pick_readout_backend(cfg, n_h, n_out, rng)
     check("D auto 在无加速器时回落 numba",

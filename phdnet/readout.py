@@ -861,7 +861,10 @@ class Readout:
         if self.conn_k > 0:                     # ΔW = η·(t − y) ⊗ h（只更新存在的边）
             _csr_add_outer(*self._csr, target - y, h, eta)
         elif not self._apply_update(y - target, h, eta):
-            self.W = self.W - eta * np.outer(target - y, h)   # numpy 回退（含量化模式）
+            # P19 修正：原为 `W - eta * outer(target - y, h)`，与 numba 融合核
+            # （dp = y − t，核内取负 → W += η·(t − y)⊗h）**符号相反** —— 只在融合核
+            # 不可用（无 numba）时暴露，会让非 softmax 感知器朝错误方向学。
+            self.W = self.W + eta * np.outer(target - y, h)
         self._clip()
 
     def learn_softmax(self, h: np.ndarray, target: np.ndarray, eta: float,

@@ -69,13 +69,24 @@ class AccelReadout:
                     else np.asarray(g).reshape(self.n_out, self.n_h))
         else:
             init = np.asarray(w0, dtype=np.float32)
-        self.W = torch.as_tensor(np.ascontiguousarray(init, dtype=np.float32),
-                                 device=self.device, dtype=self.tdtype)
+        # ⚠ 必须**复制**：torch.as_tensor / torch.from_numpy 会与传入数组共享内存，
+        # 而 W 是原位更新的 → 调用方（例如比较用的参考权重）会被静默改掉。
+        self.W = torch.tensor(np.ascontiguousarray(init, dtype=np.float32),
+                              device=self.device, dtype=self.tdtype)
 
     # ---------- 前向 ----------
     def forward(self, h) -> np.ndarray:
         ht = self._to_dev(h)
         return (self.W @ ht).float().cpu().numpy()
+
+    def __call__(self, h) -> np.ndarray:
+        """与 `Readout.__call__` 同协议（model.step 里是 `self.readout(h)`）。
+
+        P19 修复：早先只提供 `forward()`，导致 `TypeError: 'AccelReadout' object
+        is not callable`（生产训练首个 step 即崩）。`Readout` 的调用面共 4 个：
+        `__call__` / `learn_softmax` / `learn` / `W`，此处全部对齐。
+        """
+        return self.forward(h)
 
     def forward_dev(self, h):
         """设备内前向（返回设备张量，省一次回传；供流水/批量场景）。"""
@@ -85,7 +96,15 @@ class AccelReadout:
     def learn_softmax(self, h, target, eta: float, y_pre=None,
                       accumulate: int = 1) -> float:
         ht = self._to_dev(h)
-        y = self.W @ ht if y_pre is None else y_pre
+        # y_pre 既可能是设备张量，也可能是 `forward()` 返回的 **numpy**（生产用法：
+        # model.step 先 y = self.readout(h) 再把 y 传回来省一次 W@h）——两者都要收。
+        if y_pre is None:
+            y = self.W @ ht
+        elif torch.is_tensor(y_pre):
+            y = y_pre.to(device=self.device)
+        else:
+            y = torch.as_tensor(np.ascontiguousarray(y_pre, dtype=np.float32),
+                                device=self.device, dtype=self.tdtype)
         y32 = y.float()
         p = torch.softmax(y32, dim=0)
         t = self._to_dev(target).float()
@@ -98,6 +117,22 @@ class AccelReadout:
         return nll
 
     # ---------- 与 numba Readout 的接口兼容 ----------
+    def learn(self, h, target, eta: float) -> None:
+        """非 softmax 感知器更新：**W += η·(t − y) ⊗ h**（对齐生产实际路径）。
+
+        P19 踩坑记录（两处符号不一致，已统一）：
+        - `Readout.learn` 走 numba 融合核时是 `W += η·(t−y)⊗h`（dp = y−t，核内取负）；
+        - 它的 numpy 回退分支却写成 `W − η·(t−y)⊗h` —— **与融合核符号相反**
+          （P7 遗留，只在融合核不可用时暴露）。本实现以**融合核**（生产默认）为
+          准；同时已把该回退分支改正，两条路径现语义一致。
+        """
+        ht = self._to_dev(h)
+        y = (self.W @ ht).to(self.tdtype)
+        t = self._to_dev(target).to(self.tdtype)
+        self.W.add_(torch.outer(t - y, ht), alpha=eta)   # W += η·(t − y)⊗h
+        if self.w_clip > 0.0:
+            self.W.clamp_(-self.w_clip, self.w_clip)
+
     def n_synapses(self) -> int:
         """稠密读出的「连接数」= 元素数（与 Readout.dense 口径一致）。"""
         return int(self.W.numel())
@@ -122,18 +157,49 @@ class AccelReadout:
                                device=self.device, dtype=self.tdtype)
 
 
+def _unsupported_reason(cfg) -> str | None:
+    """返回**不可用原因**（None = 加速读出可用）。
+
+    P19 教训：换后端前必须核对配置——两级读出（`readout_hidden`）、结构性稀疏
+    读出（`readout_conn_k`）、量化码本（fp8/fp4）三条路径 `AccelReadout` **未
+    实现**（它只做稠密 fp32/fp16/bf16）。强行上会「能跑但语义不同」——比回落
+    到 numba 原路径更糟。命中任一项即回落，并记录原因供日志如实报告。
+    """
+    if int(getattr(cfg, "readout_hidden", 0) or 0) > 0:
+        return "readout_hidden>0（两级读出未在加速后端实现）"
+    if int(getattr(cfg, "readout_conn_k", 0) or 0) > 0:
+        return "readout_conn_k>0（稀疏读出未在加速后端实现）"
+    if str(getattr(cfg, "readout_dtype", "fp32")) in ("fp8", "fp4"):
+        return (f"readout_dtype={cfg.readout_dtype}（量化码本未在加速后端实现）")
+    if bool(getattr(cfg, "lognormal_init", False)):
+        return None                            # 初始化分布不同但结构兼容，不阻断
+    return None
+
+
 def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
     """按 `cfg.accel_readout` 选读出后端；不可用时**回落 numba 原路径**。
 
     返回 (readout, 后端名)。回落必须静默安全：无加速器 / torch 缺失 /
-    构造异常 → 原 `Readout`（默认路径逐位不变）。
+    配置不兼容 / 构造异常 → 原 `Readout`（默认路径逐位不变），并把原因记在
+    `readout._accel_fallback_reason` 上（不静默）。
     """
+    def _fallback(reason: str):
+        from ..readout import Readout
+        ro = Readout(n_h, n_out, rng, w_clip=cfg.readout_w_clip,
+                     dtype=cfg.readout_dtype, conn_k=cfg.readout_conn_k,
+                     lognormal_init=cfg.lognormal_init)
+        ro._accel_fallback_reason = reason
+        return ro, "numba-cpu(回落)"
+
     spec = str(getattr(cfg, "accel_readout", "auto") or "auto").lower()
     if spec in ("", "cpu", "off", "numba"):
         from ..readout import Readout
         return Readout(n_h, n_out, rng, w_clip=cfg.readout_w_clip,
                        dtype=cfg.readout_dtype, conn_k=cfg.readout_conn_k,
                        lognormal_init=cfg.lognormal_init), "numba-cpu"
+    bad = _unsupported_reason(cfg)
+    if bad is not None:
+        return _fallback(bad)
     if spec == "auto":
         try:
             from .multi_device import probe_multi
@@ -153,9 +219,4 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
                             dtype=cfg.readout_dtype,
                             w_clip=cfg.readout_w_clip), f"accel:{spec}"
     except Exception as e:                                   # noqa: BLE001
-        from ..readout import Readout
-        fb = Readout(n_h, n_out, rng, w_clip=cfg.readout_w_clip,
-                     dtype=cfg.readout_dtype, conn_k=cfg.readout_conn_k,
-                     lognormal_init=cfg.lognormal_init)
-        fb._accel_fallback_reason = f"{type(e).__name__}: {e}"   # 供日志如实报告
-        return fb, "numba-cpu(回落)"
+        return _fallback(f"{type(e).__name__}: {e}")
