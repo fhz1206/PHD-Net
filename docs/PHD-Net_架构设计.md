@@ -592,3 +592,19 @@ Transformer 对照为自建 nanoGPT 级模型（PyTorch，**0.52M（96d×2L）/ 
 numpy / torch（含 CUDA·NPU·ROCm 设备张量）转 numpy 再统计或存档。
 动机：昇腾机器（CANN 8.5 aarch64 + torch_npu）实测 `np.asarray(npu_tensor)`
 直接抛错，会让参数统计与检查点保存双双失败。
+
+## 附：部件 × 执行后端总览（P22，2026-09-28）
+
+| 部件 | 执行后端 | 并行方式 | 备注 |
+|---|---|---|---|
+| 词涌现（`_induce_length`） | numba nogil 核 | 层间线程池（5 个 L 各占一核） | 核内串行（prange 已回退：实测 1→6 线程仅 1.16×，内存带宽饱和） |
+| 词表全量扫描（锚点链） | numba nogil 核 | `ThreadPoolExecutor`（组间，零 pickle） | 小词表 CSR 二分 / 大词表边哈希自适应 |
+| 语料解码（parquet） | pyarrow（释放 GIL） | 单进程内多线程（默认 1 进程） | 多进程只增内存，不增吞吐 |
+| 分词（训练循环内） | 纯 Python | — | 占端到端 ~0.0%，不优化 |
+| 读出（M6，占 1B 预设 ~89%） | **auto**：torch 设备（cuda/cann-npu/rocm/dml）→ 否则 numba CPU | 单设备（W 常驻设备） | `PHDNetConfig.accel_readout`，W 巨大且逐 token 只传 h |
+| PC 栈 / STDP / LTM | numba（事件驱动稀疏 + 在线 CSR） | 单核（内含 prange 融合核） | torch 栈缺 `big_ltm` 等 7 项机制，迁移会**丢机制** |
+
+**为什么是这个组合**：numba 只能编译到 CPU 机器码（物理限制），所以「能上设备的部件」
+必须用 torch 写。当前只有读出满足（纯矩阵、W 大、每步通信 ~12 KB）。其余部件要么是
+变长字符串（分词/词表扫描，设备不划算且占比极低），要么是事件驱动稀疏结构
+（迁移会丢机制）——这是当前的诚实边界，不是未做清单。

@@ -35,3 +35,10 @@
 
 - 训练入口只保留 `train_1b/` 一条生产轨（`tools/train_production.py` 已于 P11 删除）；
 - 一次性脚本带 `experiment_` / `audit_` 前缀，基准带 `bench_`，语料带 `convert_` / `prepare_`。
+
+## 硬件与加速器
+
+- `backend_probe.py`：设备探针（CUDA / ROCm / CANN·昇腾 / DirectML / CPU）；
+- `bench_accel.py`：加速器读出基准（各设备 × 各精度档）；
+- `accel_doctor.py`（P20）：**一次性诊断**「探测到 ≠ 能用」——环境矩阵与版本配对 →
+  设备解析 → 真实读出规模试分配 + matvec → 与 numba 基线的 ms/token 对照。

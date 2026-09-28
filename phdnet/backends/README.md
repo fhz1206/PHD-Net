@@ -9,7 +9,8 @@ device/dtype 不同），跨设备判据为**容差一致**（不宣称逐位—
 |---|---|
 | `torch_backend.py` | 基础层：设备探针、STDP 核、读出热路径、自检、基准 |
 | `torch_lm.py` | 词级 LM 全栈（M1–M6）torch 化：`TorchWordLM` / `TorchPHDNet` |
-| `multi_device.py` | 多卡自动适配（P14）：`resolve_devices` / `probe_multi` / `shard_ranges` / `plan_parallel` / `MultiDeviceReadout`（读出列并行，权重按词表行切分） |
+| `multi_device.py` | 多卡自动适配（P14）：`resolve_devices` / `probe_multi` / `shard_ranges` / `plan_parallel` / `MultiDeviceReadout`（读出列并行）+ `capability_report`（后端×设备能力矩阵） |
+| `accel_readout.py` | 读出加速后端（P19）：`AccelReadout`（torch，W 常驻设备）+ `pick_readout_backend`（auto 选设备 / 不兼容时回落并记原因） |
 | `__init__.py` | 公共 API re-export |
 
 多卡（P14）：PHD-Net 无 batch 维/无梯度 → DDP/DP 不适用，走**模型并行**：

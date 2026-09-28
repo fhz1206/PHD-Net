@@ -33,7 +33,6 @@ except Exception:                                            # pragma: no cover
 
 _P1 = 1000003               # 滚动 hash 乘子（< 2^31，避开 numba 大常量陷阱）
 
-
 if NUMBA_WORD_OK:
     @njit(cache=True, nogil=True, fastmath=False)
     def _win_hash(inv, i, L):
@@ -47,8 +46,12 @@ if NUMBA_WORD_OK:
     def induce_words_kernel(inv, n, L, B, min_count, min_entropy, nthreads):
         """单层 L-gram 涌现核（nogil + prange 多核）。返回 (K, L) 字符 id 矩阵。
 
-        无原子竞争的并行策略：prange 块内用**局部表**，块末逐槽合并进全局表
-        并清零局部表（每槽最多被 nthreads 个块写，故冲突面 = 槽数 × 块数）。
+        P22（fhz「prange 回退」）：调用方固定传 nthreads=1（核内实为串行）。
+        实测依据——生产规模 4.7M 字符，1→6 线程仅快 1.16×（1516 → 1307 ms），
+        瓶颈在**内存流量**（两张 ~64 MB 哈希表远超 L3，多线程共享带宽饱和）；
+        局部表复用（P21 尝试）经对拍证明会破坏正确性（词集合不一致），已放弃。
+        prange 结构保留（传 nthreads>1 即可重新启用），nogil 保留供**层间线程池**
+        真并行（5 个 L 各占一核）。
         """
         m = n - L + 1
         if m <= 0:
@@ -267,8 +270,11 @@ def induce_length_numba(codes, inv_codes, n: int, L: int, min_count: int,
                         min_entropy: float, nthreads: int = 0) -> set[str]:
     """单层词涌现（nogil + prange 多核核 + Python 侧字符串还原）。"""
     B = int(codes.shape[0])
-    if nthreads <= 0:
-        nthreads = default_nthreads()
+    # P22（fhz「prange 回退」）：核内固定单块 → 实际串行。依据：生产规模
+    # 4.7M 字符下 1→6 线程仅 1.16×（1516 → 1307 ms），瓶颈在内存流量
+    # （两张 ~64 MB 哈希表远超 L3，多线程共享带宽饱和）。prange 结构保留，
+    # 传 nthreads>1 即可重新启用；nogil 保留供**层间线程池**真并行。
+    nthreads = 1
     words = induce_words_kernel(inv_codes, n, L, B, min_count, min_entropy,
                                 nthreads)
     codes_list = [str(c) for c in codes]

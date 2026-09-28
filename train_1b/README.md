@@ -126,3 +126,40 @@ python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 - `tools/bench_1b_migrate.py` —— dict 版 vs 在线 CSR 版的性能对拍（容量口径同源）。
 - `--preset 1b_max`：主干 4096（连接率不变）+ 读出稀疏化建议
   `--readout-conn-k 512`，供大内存机器放大固定突触部分。
+
+## 词表与设备（P13–P22，2026-09-28）
+
+### 词表来源（四选一，优先级从高到低）
+
+| 来源 | 触发 | 说明 |
+|---|---|---|
+| 检查点自包含 | `--resume` 且 ckpt 存在 | **完全跳过词表阶段**（旧实现 resume 也会白扫一遍 full，几十分钟） |
+| 已有快照（自动） | `outputs/models/vocab_<preset>_<data>.json` 存在 | 词表做出来时即落盘，下次启动**自动复用**，免重扫 |
+| 外部词表 | `--vocab-file vocab.json` | JSON 权威格式（含 `words` + `seg_vocab` + `max_len`） |
+| 扫描 | `--vocab-scan head\|full` | head = 采样文本（默认）；full = 全量锚点链扫描 |
+
+- **JSON 是唯一权威格式**：词表含跨行 token（如 `\n的`），纯文本每行一词会切碎
+  （实测 2,610 词读回只剩 2,571）。`.txt` 镜像可选（`txt_mirror=True`，不可回读）。
+- 词表一确定就落盘 `outputs/models/`（模型构建之前）→ 训练崩溃不丢词表。
+- 推理侧 `infer.py` 自动定位快照并与 `tok_tokens` **交叉校验**，不一致即报错退出。
+
+### 词表构建性能（numba nogil）
+
+| 阶段 | 实现 | 实测（4.7M 字符生产规模） |
+|---|---|---|
+| 词涌现 | nogil 核：开放寻址 hash 去重（取代 `np.unique(W, axis=0)` 整行排序）+ 边逐元素回比（精确非概率）+ 解析式熵；**层间线程池**并行 5 个 L | 63.1s → **9.0s（7.00×）**，逐位一致 |
+| 全量扫描 | nogil 核 + `ThreadPoolExecutor`（共享内存零 pickle）；小词表 CSR 二分 / 大词表边哈希自适应 | 33.4 亿 tokens / 520s（191 核机器） |
+
+核内 prange 曾实现并**已回退**（实测 1→6 线程仅 1.16×，瓶颈是内存带宽）。
+
+### 设备与并行度
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `--accel` | `auto` | 读出计算设备：auto = 有 cuda/cann(npu)/rocm 就用，否则回落 numba CPU（**默认路径逐位不变**） |
+| `--prefetch-workers` | `0`（自动 = **1 进程**） | parquet 解码在 pyarrow 内多线程且释放 GIL，单进程即吃满核；多进程只增内存 |
+| `--vocab-workers` | `0`（核数×0.8） | 词表扫描线程数（nogil 真并行） |
+| 读出计时 | 日志 | `token N … \| 读出 X ms/tok（后端@设备，占 Y%）` |
+
+启动日志会打印并行度预算、能力矩阵（numba 只能上 CPU）与读出后端（回落时给原因）。
+诊断加速器：`python tools/accel_doctor.py`。
