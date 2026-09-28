@@ -509,8 +509,17 @@ def main() -> None:
                 ppl = float(np.exp(np.mean(seg_nll[-k:])))
                 spent = time.perf_counter() - t_start
                 ms = spent / max(1, i - done) * 1000
+                # P20：读出分项（后端 + 设备 + 占比）——直接看出加速是否生效、
+                # 以及耗时是否已转移到 PC 栈等其余部件
+                _ro_ms = float(getattr(lm.net, "_ro_ms_accum", 0.0))
+                _ro_n = max(1, int(getattr(lm.net, "_ro_calls", 0)))
+                _ro_dev = (getattr(lm.net.readout, "device", "cpu")
+                           if _rb.startswith("accel:") else "cpu")
                 print(f"  token {i:>12,}  滑动 PPL {ppl:>9.3f}  {ms:>8.2f} ms/tok"
-                      f"  已用 {spent / 60:.1f} min", flush=True)
+                      f"  已用 {spent / 60:.1f} min"
+                      f"  | 读出 {_ro_ms / _ro_n:>7.3f} ms/tok"
+                      f"（{_rb.split('(')[0]}@{_ro_dev}，占 {_ro_ms / 1000 / max(1e-9, spent) * 100:>5.1f}%）",
+                      flush=True)
             if args.ckpt_every and (i - done) and (i - done) % args.ckpt_every == 0:
                 save_model(ckpt, lm, cfg, i)
                 print(f"  [检查点] 已保存 {i:,} tokens → {ckpt}", flush=True)

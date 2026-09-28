@@ -8,6 +8,7 @@
 
 注：Readout（M6 读出头）已拆分至 phdnet/readout.py，此处再导出以兼容旧引用。"""
 
+import time
 import warnings
 
 import numpy as np
@@ -285,6 +286,9 @@ class PHDNet:
                 self.wm.summarize(self.ltm)
 
         h = self._build_h(r2, pred_feat, fused)              # 7. M6 读出（拼装见 _build_h）
+        # P20：读出计时（后端可能是 numba CPU 或加速器设备）。两次 perf_counter
+        # ≈ 0.2 μs，相对读出本身（ms 级）可忽略；只累计时间不改变任何数值。
+        _t_ro = time.perf_counter()
         y = self.readout(h)
         nll = 0.0
         if target is not None and learn:
@@ -302,6 +306,9 @@ class PHDNet:
             yv = y - y.max()
             p_ = np.exp(yv); p_ /= p_.sum()
             nll = float(-np.log(p_[int(np.argmax(target))] + 1e-12))
+        self._ro_ms_accum = getattr(self, "_ro_ms_accum", 0.0) \
+            + (time.perf_counter() - _t_ro) * 1000.0
+        self._ro_calls = getattr(self, "_ro_calls", 0) + 1
 
         # PC 突破②：储备库登记 + 周期回放（readout_replay=True 才启用；
         # 只写 readout.W，不动任何持久状态，默认路径零参与）

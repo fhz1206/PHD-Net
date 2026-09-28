@@ -79,6 +79,7 @@ numba 不可用时自动回退进程池（逐位一致）。P7 融合读出核�
 | 词表快照（P17/P18） | 词表一确定即落盘 `outputs/models/vocab_*.json`（**唯一权威**） | 崩溃不丢；含跨行 token（`words` + `seg_vocab` + `max_len` + sha1）；`.txt` 镜像改为可选（`txt_mirror=True`，**不可回读**）；推理侧自动交叉校验 |
 | 词涌现（P18） | numba **nogil + prange**（核数/10 线程）+ 层间线程池 | 4.7M 字符生产规模：64.8s → **14.5s（4.5×）**，逐位一致（verify A 例）；L=2/3 单层 6.9×/7.7× |
 | 加速器可用性（P18） | 能力矩阵显式声明 | **numba 只能编译到 CPU**（物理限制），故 NPU/CUDA 机器上生产入口仍走 CPU；加速器需走 torch 栈（权重不通用） |
+| 读出计时（P20） | 训练日志 `[计时] 读出 X ms/tok（后端@设备，占 Y%）` | 直接看出加速是否生效、耗时是否转移到 PC 栈；配 `tools/accel_doctor.py` 做设备侧一次性诊断 |
 | 设备张量兼容（P17） | `to_numpy()` / `_nelem()` 统一转换 | 昇腾机器实测：`np.asarray(npu:0 tensor)` 抛 "can't convert npu:0 device type tensor" → 参数统计与检查点保存双崩，现已兼容 torch 设备张量 |
 | 顺序归并保序 | 按全局文件序号 reorder | 与串行产出逐位一致（`verify_vocab_parallel` D 例）；mix 模式样本级轮转 |
 | 零等待代码 | 主循环无 sleep/轮询/忙等 | 仅 OS 级阻塞 |
