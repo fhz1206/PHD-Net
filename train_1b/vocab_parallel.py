@@ -48,7 +48,8 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import numpy as np
 
 try:
-    from tokenizer_core import (NUMBA_TOK_OK, OOV_FLAG, build_trie,
+    from tokenizer_core import (EDGE_HASH_THRESHOLD, NUMBA_TOK_OK, OOV_FLAG,
+                                build_edge_hash, build_trie,
                                 scan_group_numba, text_to_codes)
 except Exception:                                            # pragma: no cover
     NUMBA_TOK_OK = False
@@ -59,12 +60,17 @@ _TRIE_CACHE: dict = {}                                       # (max_len, frozens
 def _trie_for(vocab, max_len: int):
     """trie 一次性构建（同词表跨组复用；frozenset 哈希做缓存键）。"""
     key = (max_len, frozenset(vocab))
-    t = _TRIE_CACHE.get(key)
-    if t is None:
-        t = build_trie(vocab)
+    ent = _TRIE_CACHE.get(key)
+    if ent is None:
+        # trie +（大词表时）边哈希一次性构建并缓存（P15：大词表下二分退化
+        # 32×，边哈希 O(1) 且带乘法混合；建表 265s -> 0.28s）
+        tr = build_trie(vocab)
+        n_edges = int(tr[1][-1]) if len(tr[1]) else 0
+        eh = build_edge_hash(tr) if n_edges > EDGE_HASH_THRESHOLD else None
+        ent = (tr, eh)
         _TRIE_CACHE.clear()                  # 只保留最新词表（生产场景词表唯一）
-        _TRIE_CACHE[key] = t
-    return t
+        _TRIE_CACHE[key] = ent
+    return ent
 
 
 def auto_workers() -> int:
@@ -216,9 +222,13 @@ def _group_iter(samples, group_chars: int, lookahead: int):
         yield body + la, len(body)
 
 
-def _scan_task_numba(text: str, body_len: int, max_len: int, trie):
-    """线程池任务体：文本 → 码点 → nogil 轨道（encode/nogil 均释放 GIL）。"""
-    return scan_group_numba(text_to_codes(text), body_len, max_len, trie)
+def _scan_task_numba(text: str, body_len: int, max_len: int, ent):
+    """线程池任务体：文本 → 码点 → nogil 轨道（encode/nogil 均释放 GIL）。
+
+    ent = (trie, edge_hash|None) 由 _trie_for 一次性构建并缓存。
+    """
+    tr, eh = ent
+    return scan_group_numba(text_to_codes(text), body_len, max_len, tr, eh)
 
 
 def _iter_group_tokens(vocab, max_len: int, samples, workers: int,
@@ -234,10 +244,10 @@ def _iter_group_tokens(vocab, max_len: int, samples, workers: int,
     """
     groups = _group_iter(samples, group_chars, 2 * max_len)
     if NUMBA_TOK_OK:
-        trie = _trie_for(vocab, max_len)
+        ent = _trie_for(vocab, max_len)
         ex = ThreadPoolExecutor(max_workers=workers)
         submit = _scan_task_numba
-        targs = (max_len, trie)
+        targs = (max_len, ent)
     else:
         ex = ProcessPoolExecutor(max_workers=workers,
                                  initializer=_scan_init,

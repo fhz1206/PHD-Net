@@ -119,6 +119,27 @@ def main() -> None:
     check("B2 scan_vocab_parallel 集合/计数一致",
           seen_p == set(ref_x) and n_p == len(ref_x))
 
+    # ── B3：极小词表 / 低扇出节点（2026-09-28 补）──
+    # 教训：trie 二分旧实现（`hi=-2` 哨兵）在 lo==hi 收敛时无法区分「未找到」，
+    # 对**单孩子节点**会漏匹配；真实涌现词表扇出大，该路径几乎不触发，
+    # 对拍侥幸通过 → 小词表/低扇出用例必须常驻对拍集。
+    print("[B3] 极小词表 / 低扇出节点（回归防线）")
+    tiny_cases = [
+        ({'的会', '会这', '己我'}, '的会这'),          # 全部单孩子节点
+        ({'的会', '会这', '己我'}, '这会的我己'),        # 逆序 + 未命中
+        ({'ab', 'bc', 'cd'}, 'abcd'),                 # 全不命中前缀组合
+        ({'a' * 2}, 'aa' * 5),                        # 单字符词表（不进 trie）
+        ({'中'}, '中文中文中'),                        # 单字符词表
+        (set('的一是不了人我在有他这中大来'), '的一是不了'),
+    ]
+    for vi, (tv, tt) in enumerate(tiny_cases, 1):
+        tstub = _StubSeg(tv, SEG_KWARGS["max_len"])
+        tref = tstub.tokenize(tt)
+        tpar = list(iter_tokens_parallel(tv, tstub.max_len, iter([tt]),
+                                         workers=2, group_chars=64))
+        check(f"B3.{vi} 极小词表（|vocab|={len(tv)}）流一致",
+              tpar == tref, f"{len(tref)} tokens")
+
     # ── C：eval 语料端到端（并行流 ≡ 串行 StreamingTokenizer 流）──
     print("[C] eval 内置语料端到端对拍")
     ref_c = list(StreamingTokenizer(seg_eval, char_chunks(EVAL)))
