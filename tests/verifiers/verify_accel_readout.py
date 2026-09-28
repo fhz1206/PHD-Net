@@ -118,6 +118,51 @@ def main() -> None:
               isinstance(ro_c, Readout) and label.split("=")[0] in reason,
               f"backend={backend_c} reason={reason[:40]}")
 
+    # ── A4：接口完整性自动扫描（P23 根治：三次崩溃都是漏属性）──
+    print("[A4] 接口完整性（扫描全仓库 readout.X 访问面）")
+    import re
+    from pathlib import Path as _P
+    root = _P(__file__).resolve().parents[2]
+    import os
+    os.chdir(root)
+    used = set()
+    for pat in ("phdnet/**/*.py", "train_1b/*.py", "tools/*.py", "tests/**/*.py"):
+        for f in root.glob(pat):
+            try:
+                txt = f.read_text(encoding="utf-8", errors="ignore")
+            except Exception:                                # noqa: BLE001
+                continue
+            for m in re.finditer(r"readout\.([a-zA-Z_][a-zA-Z_0-9]*)", txt):
+                used.add(m.group(1))
+    # 本模块自身定义的属性不算；只检查**外部访问面**
+    own = set(re.findall(r"def ([a-zA-Z_][a-zA-Z_0-9]*)",
+                         (_P(root / "phdnet" / "backends" /
+                             "accel_readout.py").read_text(encoding="utf-8"))))
+    own |= set(re.findall(r"\n    def ([a-zA-Z_][a-zA-Z_0-9]*)",
+                          (_P(root / "phdnet" / "backends" /
+                              "accel_readout.py").read_text(encoding="utf-8"))))
+    import importlib
+    mod = importlib.import_module("phdnet.backends.accel_readout")
+    inst = AccelReadout(8, 8, None, device="cpu", w0=np.zeros((8, 8), np.float32))
+    missing = []
+    for name in sorted(used):
+        if name in ("py", "Readout", "forward", "device", "X",
+                    "_accel_fallback_reason", "backends", "_csr"):
+            continue                                    # 模块名/自身属性/诊断用
+        if not hasattr(inst, name):
+            missing.append(name)
+    check("A4 访问面无缺失（" + ", ".join(sorted(used - {'py'})[:8]) + " …）",
+          not missing, f"缺失={missing}" if missing else "")
+    check("A4 stats() 可用", isinstance(inst.stats(), dict)
+          and inst.stats()["dtype"] == "fp32")
+    check("A4 conn_k/hidden 为 0（稠密单级）",
+          inst.conn_k == 0 and inst.hidden == 0)
+    try:
+        _ = inst._csr
+        check("A4 _csr 显式拒绝（稀疏未实现）", False, "未抛异常")
+    except NotImplementedError:
+        check("A4 _csr 显式拒绝（稀疏未实现）", True, "NotImplementedError")
+
     # ── C：状态往返 ──
     print("[C] 检查点往返")
     W_ck = rng.normal(0, 0.03, (n_out, n_h)).astype(np.float32)

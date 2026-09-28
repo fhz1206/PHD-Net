@@ -158,6 +158,7 @@ python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 |---|---|---|
 | `--accel` | `auto` | 读出计算设备：auto = 有 cuda/cann(npu)/rocm 就用，否则回落 numba CPU（**默认路径逐位不变**） |
 | `--prefetch-workers` | `0`（自动 = **1 进程**） | parquet 解码在 pyarrow 内多线程且释放 GIL，单进程即吃满核；多进程只增内存 |
+| `--prefetch-depth` | `0`（缺省 **256** = 在途数据量 4×） | 预取队列深度（批数）；缓冲 4× 防数据供给饿死，仍有界（背压成立） |
 | `--vocab-workers` | `0`（核数×0.8） | 词表扫描线程数（nogil 真并行） |
 | 读出计时 | 日志 | `token N … \| 读出 X ms/tok（后端@设备，占 Y%）` |
 

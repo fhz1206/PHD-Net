@@ -145,11 +145,17 @@ class PrefetchChars:
 
     「训练过程不要存在等待代码」：主进程只做 queue.get()（OS 级阻塞，
     无 sleep/轮询/忙等）；队列有界（depth 批 × batch_samples 样本）→
-    背压自动限内存（缺省 ≈ 64×64×样本均长 ≈ 数十 MB）。
+    背压自动限内存。
+
+    **depth 64 → 256（P24，fhz「内存没咋占用，提高数据提供量，默认现有量 4×」）**：
+    在途数据量 = depth × batch_samples，256×64 = 16,384 样本（4×）。目标是让
+    1B 训练（读出在设备上、单步更慢）**不被数据供给饿死**——解码抖动/文件切换
+    时队列仍有充足存货。内存代价 ≈ 4× 原缓冲（本机数十 MB → 数百 MB；服务器
+    内存充裕，MEMORY 实测约 500 GB 级，充裕）。仍为有界队列 → 背压依旧成立。
     单文件语料自动退化为 1 个生产者（与旧单进程版等价）。
     """
 
-    def __init__(self, path, sep: str = SEP, depth: int = 64,
+    def __init__(self, path, sep: str = SEP, depth: int = 256,
                  batch_samples: int = 64, workers: int = 0,
                  lang: str | None = None):
         import multiprocessing as mp

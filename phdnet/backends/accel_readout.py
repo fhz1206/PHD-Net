@@ -137,6 +137,46 @@ class AccelReadout:
         """稠密读出的「连接数」= 元素数（与 Readout.dense 口径一致）。"""
         return int(self.W.numel())
 
+    # ---- 与 Readout 的属性/方法面对齐（P23：三次崩溃的根治）----
+    # 全仓库对 `readout.X` 的访问面（见 tests/verifiers/verify_accel_readout.py
+    # 的接口扫描用例）：W / learn_softmax / learn / __call__ / n_synapses /
+    # **conn_k** / **hidden** / **stats()**。前五项首版已实现，conn_k（ckpt 保存
+    # 会访问）与 stats（诊断脚本会访问）缺失 → 生产保存检查点时崩溃。
+    @property
+    def _csr(self):
+        """稀疏读出的内部结构——加速后端**未实现**（稀疏配置会先回落）。
+
+        显式报错优于静默返回 None：真被访问到时能立刻定位，而不是在别处
+        变成一个更费解的 AttributeError/TypeError。
+        """
+        raise NotImplementedError(
+            "加速读出不提供稀疏 CSR 结构（conn_k>0 / readout_conn_k>0 的配置"
+            "已在 pick_readout_backend 回落 numba 路径）")
+
+    @property
+    def conn_k(self) -> int:
+        """加速后端只实现稠密路径（稀疏路径在 pick_readout_backend 回落）。"""
+        return 0
+
+    @property
+    def hidden(self) -> int:
+        """加速后端只实现单级读出（两级在 pick_readout_backend 回落）。"""
+        return 0
+
+    @property
+    def dtype_name(self) -> str:
+        return {torch.float32: "fp32", torch.float16: "fp16",
+                torch.bfloat16: "bf16"}.get(self.W.dtype, str(self.W.dtype))
+
+    def stats(self) -> dict:
+        """统计信息（键与 `Readout.stats` 对齐，供诊断/表格使用）。"""
+        n = self.n_synapses()
+        dense = self.n_out * self.n_h
+        return {"synapses": n, "dense_equivalent": dense,
+                "connectivity": n / dense if dense else 1.0,
+                "k": self.conn_k, "dtype": self.dtype_name,
+                "storage_MB": self.W.numel() * self.W.element_size() / 1e6}
+
     def W_cpu(self) -> np.ndarray:
         """权重拉回主机（检查点 / 统计用）。"""
         return self.W.detach().float().cpu().numpy()
