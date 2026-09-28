@@ -6,7 +6,7 @@ Part 1 对拍：用稠密读出的权重构造稀疏读出（k = 全列，**权�
 Part 2 端到端：词级 LM 训练+评估（4,000 字符口径，稠密基线 97.2596），
            读出连接率 3.1% / 6.2% / 12.5% 的 PPL / 速度 / 参数对比。
 
-用法：python tools/verify_readout_sparse.py
+用法：python tests/verifiers/verify_readout_sparse.py
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 

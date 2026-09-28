@@ -105,7 +105,7 @@ class WordSegmenter:
         - 自然对数 Shannon 熵按候选向量化计算，阈值比较用掩码。
       2026-09-25 重构：per-L 体抽为模块级 `_induce_length`（串行/多核共用一份
       实现，各 L 相互独立可安全并行）；串行路径运算序列逐位不变。
-      详见 ci/verifiers/verify_seg_equiv.py 的对拍验证。
+      详见 tests/verifiers/verify_seg_equiv.py 的对拍验证。
     """
 
     def __init__(self, text: str, max_len: int = 6, min_count: int = 5,

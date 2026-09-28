@@ -28,7 +28,7 @@
 
 5. **数值协议**：网络状态默认 fp32（cfg.torch_dtype）；softmax/NLL 在 fp32
    主回路（numpy 版为 fp64 主回路——这是跨实现数值差异的主来源，容差判据
-   见 ci/verifiers/verify_torch_lm.py：PPL 相对差 <1%，权重范数轨迹强相关）。
+   见 tests/verifiers/verify_torch_lm.py：PPL 相对差 <1%，权重范数轨迹强相关）。
 
 已知限制（诚实）：
   - `readout_dtype` 支持 fp32/fp16/bf16 三档（2026-09-28 修复：此前 fp16/bf16

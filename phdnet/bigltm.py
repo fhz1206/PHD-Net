@@ -20,7 +20,7 @@ class SparseLTM:
 
     O1/O3（2026-09-22）：`csr_online=True` 时底层切换为在线可写 CSR 表
     （`OnlineCSRTable`，定长行 + 预留槽）；默认 False = dict 邻接表，
-    默认路径逐位不变。两版 predict/learn 逐位等价（ci/verifiers/verify_csr_equiv.py）。
+    默认路径逐位不变。两版 predict/learn 逐位等价（tests/verifiers/verify_csr_equiv.py）。
     """
 
     def __init__(self, n_dim: int, n_neurons: int = 1 << 24, m_out: int = 60,

@@ -69,7 +69,7 @@ device/dtype 不同），跨设备判据为**容差一致**（不宣称逐位—
 
 ```bash
 # 等价性验证（torch vs numpy 主实现，同 seed、冻结语料；逐设备对比）
-python ci/verifiers/verify_torch_lm.py --device cpu          # 或 --device all / cuda,npu
+python tests/verifiers/verify_torch_lm.py --device cpu          # 或 --device all / cuda,npu
 
 # 独立训练入口（数据侧 CPU 多进程留 numpy，网络计算在指定设备）
 python tools/train_torch_lm.py --device cpu --preset smoke --data eval --tokens 2000

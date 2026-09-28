@@ -9,7 +9,7 @@ B  全量扫描并行（锚点链） vs 串行贪心 —— token 流逐位一�
    多种切批粒度 / 进程数下仍逐位一致（锚点链机制的关键压力测试）
 C  eval 内置语料端到端：并行流 ≡ 串行 StreamingTokenizer 流
 
-任何一例 FAIL 即退出码非 0。运行：python train_1b/verify_vocab_parallel.py
+任何一例 FAIL 即退出码非 0。运行：python tests/verifiers/verify_vocab_parallel.py
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ import time
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent
-for p in (str(_HERE), str(_ROOT)):
+_ROOT = _HERE.parents[1]
+for p in (str(_HERE), str(_ROOT), str(_ROOT / "train_1b")):
     if p not in sys.path:
         sys.path.insert(0, p)
 

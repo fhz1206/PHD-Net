@@ -185,7 +185,7 @@ class OnlineCSRTable(SparseSynapseTable):
 
     逐位等价（关键设计）：行的槽位顺序 = 首次生长顺序，与 dict 版的插入顺序一致；
     `predict` 按槽位顺序累加、`learn` 逐键独立更新 → 与 dict 版**逐位相同**，
-    可用 `ci/verifiers/verify_csr_equiv.py` 对拍验证。
+    可用 `tests/verifiers/verify_csr_equiv.py` 对拍验证。
 
     行扩容：满 `row_cap` 后按 2× 增长（amortized O(1)），上限 m_out（硬容量）。
     """

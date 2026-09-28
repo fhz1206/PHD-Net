@@ -10,7 +10,7 @@
 （eta_readout=0.15、读出 fp32）。numpy 主实现基线（全 4K token）ppl_char=90.2480，
 本脚本 1,500 token 短训的绝对值与该锚点不可比——**只做 torch vs numpy 的同口径对比**。
 
-用法：python tools/verify_torch_lm.py [--tokens 1500] [--device auto|all|cpu,cuda]
+用法：python tests/verifiers/verify_torch_lm.py [--tokens 1500] [--device auto|all|cpu,cuda]
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import os
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_HERE)
+_ROOT = os.path.dirname(os.path.dirname(_HERE))
 os.chdir(_ROOT)
 sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "tests"))

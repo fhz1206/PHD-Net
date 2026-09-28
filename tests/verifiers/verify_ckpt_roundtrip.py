@@ -9,8 +9,8 @@ import sys
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-_ROOT = _HERE.parent
-for p in (str(_HERE), str(_ROOT)):
+_ROOT = _HERE.parents[1]
+for p in (str(_HERE), str(_ROOT), str(_ROOT / "train_1b")):
     if p not in sys.path:
         sys.path.insert(0, p)
 

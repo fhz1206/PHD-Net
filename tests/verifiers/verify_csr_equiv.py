@@ -9,7 +9,7 @@
 覆盖 3 组配置：float 权重、int8 量化、growth_guidance + int8。
 退出码 0 = 全部一致；非 0 = 存在不一致。
 
-用法：python tools/verify_csr_equiv.py
+用法：python tests/verifiers/verify_csr_equiv.py
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 

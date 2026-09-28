@@ -45,7 +45,7 @@ if NUMBA_OK:                                        # pragma: no cover
 
     # 注：`y = W·h` **没有**换成 numba 并行核——实测它比 OpenBLAS 的 dgemv
     # 慢 0.68×（1540×768）且**不逐位等价**（BLAS 的分块求和顺序不同，最大偏差
-    # 1.4e-14）。故前向仍走 BLAS，融合核只用于更新（ci/verifiers/verify_readout_fused.py）。
+    # 1.4e-14）。故前向仍走 BLAS，融合核只用于更新（tests/verifiers/verify_readout_fused.py）。
 else:                                               # pragma: no cover
     _ro_dense_update = None
 

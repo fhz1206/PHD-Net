@@ -1,6 +1,6 @@
 """O4 验收：WordSegmenter 向量化改造的正确性对拍 + 加速比实测。
 
-用法：python tools/verify_seg_equiv.py
+用法：python tests/verifiers/verify_seg_equiv.py
   - 正确性对拍：在 3 组超参下，对比「原实现（内联参考）」与「新实现」的
       vocab 集合（set==set）与 tokenize(text) 输出列表（逐元素 ==）。
       语料 = eval_corpus/internal_corpus.txt 前 6000 字符。
@@ -139,7 +139,7 @@ def main():
     print(report)
 
     # 同时写证据日志
-    with open("D:/AiModel/train/outputs/verify_seg_equiv.log", "w", encoding="utf-8") as f:
+    with open("D:/AiModel/train/outputs/test/verify_seg_equiv.log", "w", encoding="utf-8") as f:
         f.write(report + "\n")
 
     sys.exit(0 if all_ok else 1)

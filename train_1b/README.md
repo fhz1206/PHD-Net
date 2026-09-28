@@ -115,7 +115,7 @@ python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 
 | 项 | 需求 |
 |---|---|
-| 内存 | 静态 ≈0.5–0.6 GB（读出占大头）+ 大空间表已生长突触（dict 版 ≈100 B/条；`--csr-online` 切在线 CSR ≈10 B/条，逐位等价已由 `ci/verifiers/verify_csr_equiv.py` 验证） |
+| 内存 | 静态 ≈0.5–0.6 GB（读出占大头）+ 大空间表已生长突触（dict 版 ≈100 B/条；`--csr-online` 切在线 CSR ≈10 B/条，逐位等价已由 `tests/verifiers/verify_csr_equiv.py` 验证） |
 | 磁盘 | 检查点 ≈0.3–0.6 GB/份（npz 未压缩，速度优先） |
 | 吞吐 | 本机纯 CPU 实测见日志 `ms/token`；10^9 token 生产训练需 GPU/集群（参考 `tools/estimate_scale.py` 外推：256M 档本机 157 ms/token ⇒ 10^9 token ≈ 5 年，1B 档生产训练必须换硬件） |
 
