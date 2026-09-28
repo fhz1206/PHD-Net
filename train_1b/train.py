@@ -205,6 +205,15 @@ def main() -> None:
                     help="外部词表文件（每行一个词；# 注释与空行忽略）。"
                          "给了它就**跳过** head/full 扫描阶段。"
                          "另：--resume 时词表直接取自检查点（自包含），同样跳过扫描")
+    ap.add_argument("--assistant-marker", type=str, default="",
+                    help="SFT 回复掩码标记（P26，如 '助手：' / 'Assistant:'）。"
+                         "设置后只对该标记之后的**助手回复**计算损失；"
+                         "其前的系统/用户 prompt 用 learn=False 推进状态、"
+                         "不更新权重。留空 = 全 token 计损失（旧行为）")
+    ap.add_argument("--init-from", type=Path, default=None,
+                    help="两阶段微调（P26）：从该检查点**初始化权重**但步数归零"
+                         "（= 在预训练权重上做 SFT）；与 --resume（继续同一状态"
+                         "并保留步数）不同")
     ap.add_argument("--prefetch-depth", type=int, default=0,
                     help="预取队列深度（批数，P25：缺省 8192）。注意深度受"
                          "**按文件序归并**约束——单生产者时囤积≈0，depth 不是"
@@ -460,6 +469,15 @@ def main() -> None:
     print("[context] 状态全程不重置（WM/STDP/LTM 跨样本/分片/epoch 连续携带）；"
           "长程依赖由 big_ltm 印迹承载 → 支持任意长连续序列（目标 ≥1M tokens）")
 
+    if args.init_from is not None and Path(args.init_from).exists():
+        meta = load_model(Path(args.init_from), lm)
+        print(f"[两阶段] 已从 {args.init_from} 初始化权重"
+              f"（{meta.get('when', '?')}），步数归零 → 进入 "
+              f"{'SFT 微调' if args.assistant_marker else '继续训练'}"
+              f"（与 --resume 不同：不恢复步数）")
+    elif args.init_from is not None:
+        print(f"[两阶段] 未找到 {args.init_from}，按从头开始处理（如实报告）")
+
     done = 0
     if args.resume and ckpt.exists():
         meta = load_model(ckpt, lm)
@@ -476,6 +494,7 @@ def main() -> None:
     # ── 流式训练主循环（1M context：状态永不重置）──
     seg_nll: list[float] = []
     oov_skipped = 0
+    prompt_masked = 0                        # P26：prompt 段（未计损失）步数
     t_start = time.perf_counter()
     i = done                       # 全局训练步（= 已处理的 token 流位置）
     last_mile = done // args.context_milestone if args.context_milestone else 0
@@ -491,11 +510,22 @@ def main() -> None:
             src = PrefetchChars(data_path, SEP, depth=PREFETCH_DEPTH,
                                 batch_samples=PREFETCH_BATCH or 64,
                                 workers=PREFETCH_W)
-        stream = StreamingTokenizer(lm.tok.seg, src)
+        stream = StreamingTokenizer(lm.tok.seg, src,
+                                   assistant_marker=(args.assistant_marker
+                                                     or None))
         it = iter(stream)
-        p2 = None                                          # t_{i-1}（epoch 首步 prev 断开）
-        p1 = next(it, None)                                # t_i
-        t0 = next(it, None) if p1 is not None else None    # t_{i+1}（训练目标）
+        # P26：掩码模式下 next() 返回 (token, trainable)，否则是纯 token
+        def _next_tok():
+            item = next(it, None)
+            if item is None:
+                return None, True
+            if isinstance(item, tuple):
+                return item
+            return item, True
+
+        p2, _ = None, True                                 # t_{i-1}（epoch 首步 prev 断开）
+        p1, trainable = _next_tok()                        # t_i
+        t0, _ = _next_tok() if p1 is not None else (None, True)   # t_{i+1}（训练目标）
         if args.epochs > 1 and ep > 0 and i > 0:
             print(f"[epoch {ep + 1}/{args.epochs}] 跨 epoch 续流：状态连续"
                   f"（net 不重置），首步 prev 断开", flush=True)
@@ -512,12 +542,18 @@ def main() -> None:
                 # 2026-09-25 审计修复：原条件漏查 p2，OOV 落在 p2 位会 KeyError 崩溃
                 x = lm.tok.encode_composite(p1, p2)
                 tgt = lm.tok.onehot(lm.tok.stoi[t0])
-                d = lm.net.step(x, target=tgt, learn=True)
-                seg_nll.append(d["nll"])
+                # P26 SFT：p1（当前 token）属 prompt 段 → 只推进状态不学习。
+                # 损失由 (p1, p2) → p0 这一步产生，故用 **p0** 的可训练标记。
+                d = lm.net.step(x, target=tgt, learn=trainable)
+                if trainable:
+                    seg_nll.append(d["nll"])
+                else:
+                    prompt_masked += 1
             else:
                 oov_skipped += 1                          # OOV：跳过该步，流不断
             i += 1
-            p2, p1, t0 = p1, t0, next(it, None)
+            _nxt, _flag = _next_tok()
+            p2, p1, t0, trainable = p1, t0, _nxt, _flag
 
             if args.context_milestone and i // args.context_milestone > last_mile:
                 last_mile = i // args.context_milestone
@@ -558,6 +594,10 @@ def main() -> None:
     spent = time.perf_counter() - t_start
     oov_rate = oov_skipped / max(1, i - done)
     print("-" * 76)
+    if args.assistant_marker:
+        print(f"[SFT] 回复掩码生效（标记 {args.assistant_marker!r}）："
+              f"prompt 段 {prompt_masked:,} 步只推进状态不更新权重，"
+              f"仅助手回复计损失")
     print(f"本次训练 {i - done:,} tokens，用时 {spent / 60:.1f} min"
           f"（{spent / max(1, i - done) * 1000:.2f} ms/token）| "
           f"OOV 跳过 {oov_skipped:,}（{oov_rate:.4%}）")

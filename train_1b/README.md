@@ -164,3 +164,26 @@ python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 
 启动日志会打印并行度预算、能力矩阵（numba 只能上 CPU）与读出后端（回落时给原因）。
 诊断加速器：`python tools/accel_doctor.py`。
+
+## SFT（监督微调，P26）
+
+之前 `--data sft` 是**把 SFT 语料当普通语料训练**（所有 token 都计损失）——
+那是指令微调的数据、却是预训练的训练方式。现在补齐：
+
+| 能力 | 用法 | 说明 |
+|---|---|---|
+| **回复掩码** | `--assistant-marker "助手："` | 只对**助手回复**计损失；系统/用户 prompt 段用 `learn=False` 推进状态、不更新权重（对 prompt 计损失会把模型往「复读用户问题」的方向拉） |
+| **两阶段微调** | `--init-from outputs/models/xxx.npz` | 从预训练检查点**初始化权重但步数归零** → 在其上做 SFT；与 `--resume`（继续同一状态并保留步数）不同 |
+
+多轮对话用**双标记状态机**（遇「用户：」退出可训练段、遇「助手：」进入）：
+对话语料实测约 **50%** 的 token 参与损失。掩码判定是**零滞后**的（marker 跨 token
+边界也正确）——早期版本用「最后一个 marker 之后」会漏掉前几轮（仅 0.2% 步计损失）。
+
+```bash
+# 阶段 2：在预训练权重上做 SFT
+python train_1b/train.py --preset 1b --data sft \
+    --init-from outputs/models/phdnet1b_1b_pretrain_zh.npz \
+    --assistant-marker "助手：" --vocab-file outputs/models/vocab_1b_pretrain_zh.json
+```
+
+未设 `--assistant-marker` 时行为与旧版**逐位一致**（全 token 计损失）。

@@ -263,12 +263,29 @@ class StreamingTokenizer:
             ...  # 逐 token 训练，语料任意长
     """
 
-    def __init__(self, seg, chunks: Iterable[str]):
+    def __init__(self, seg, chunks: Iterable[str],
+                 assistant_marker: str | None = None):
+        """`assistant_marker`（P26，如 "助手："）：启用 **SFT 回复掩码**。
+
+        开启后 `__next__` 返回 `(token, trainable)`：
+        - 文本中**最后一个** assistant_marker 之前的部分（系统/用户 prompt）
+          → `trainable=False`（用 `learn=False` 推进状态，不更新权重）；
+        - marker 之后的助手回复 → `trainable=True`（正常计算损失）。
+        无 marker 时行为与原来**逐位一致**（仍 yield 纯 str）。
+        语义正确性：SFT（instruction tuning）只应对**回复**计损失，对 prompt
+        计损失会把模型往「复读用户问题」的方向拉。
+        """
         self.seg = seg
         self._src = iter(chunks)
         self._cur = ""            # 当前字符块未消费部分
         self.buf = ""             # 分词缓冲
         self.src_done = False     # 源耗尽标志
+        self.assistant_marker = assistant_marker
+        # P26：用户侧标记（多轮对话里用于**退出**可训练段）
+        self.user_marker = "用户："
+        self._mode = False         # 当前是否处于助手回复段（计损失）
+        self._pending = 0          # 正在匹配的 marker 剩余字符数
+        self._pending_mode = False # 该 marker 匹配完成后的模式
 
     def _ensure(self, need: int) -> bool:
         """把缓冲补到 ≥ need 字符；源耗尽则尽力填并返回 False。"""
@@ -288,7 +305,48 @@ class StreamingTokenizer:
     def __iter__(self) -> "StreamingTokenizer":
         return self
 
-    def __next__(self) -> str:
+    def _consume(self, tok: str):
+        """消费一个 token，返回 (token, trainable)（P26 零滞后状态机）。
+
+        之前的「rfind + 游标」实现会**滞后 1~2 个 token**（marker 跨 token 边界时），
+        导致 SFT 掩码错位（实测首个可训练 token 是回复中间的「诗。」而不是开头）。
+        现在改为**前缀匹配**：任何 token 若落在 marker 字符序列内 → 不可训练；
+        marker 刚被消费完的那一步立即切换模式。规则：
+
+            用户标记 → mode=False（不计损失）   助手标记 → mode=True（计损失）
+
+        未设置 assistant_marker 时行为与旧版**逐位一致**（yield 纯 str）。
+        """
+        if not self.assistant_marker:
+            self.buf = self.buf[len(tok):]   # 无掩码模式也必须推进缓冲
+            return tok
+        buf = self.buf
+        # ① 正处于某个 marker 的字符序列中（marker 跨 token 边界）
+        if self._pending:
+            if buf.startswith(tok):
+                self._pending -= len(tok)
+                if self._pending == 0:
+                    self._mode = self._pending_mode      # marker 消费完 → 切模式
+                self.buf = buf[len(tok):]
+                return (tok, False)                     # marker 本身不计损失
+            self._pending = 0                           # 失配 → 回到普通判定
+        # ② 待消费的 buf 前缀是否命中某个 marker（完整或前缀）
+        for mk, mode in ((self.assistant_marker, True),
+                         (self.user_marker, False)):
+            head = buf[:len(mk)]
+            if mk.startswith(head):
+                self.buf = buf[len(head):]
+                if len(head) == len(mk):
+                    self._mode = mode                    # 完整命中 → 立即切换
+                    return (head, False)                 # marker 字符不计损失
+                self._pending = len(mk) - len(head)      # 部分命中 → 待续
+                self._pending_mode = mode
+                return (head, False)
+        # ③ 普通 token：按当前模式
+        self.buf = buf[len(tok):]
+        return (tok, self._mode)
+
+    def __next__(self):
         max_len = self.seg.max_len
         if not self.src_done:
             self._ensure(max_len)                 # 决策前保证完整右侧上下文
@@ -296,13 +354,9 @@ class StreamingTokenizer:
             raise StopIteration
         for L in range(min(max_len, len(self.buf)), 1, -1):
             if self.buf[:L] in self.seg.vocab:    # 与全量版同一贪心判定
-                tok = self.buf[:L]
-                self.buf = self.buf[L:]
-                return tok
+                return self._consume(self.buf[:L])
         # 单字符回退：源未耗尽且缓冲不满 max_len 时，先补满再决策
         # （否则 L 上界与全量版不一致，可能过早回退）
         if len(self.buf) < max_len and not self.src_done and self._ensure(max_len):
             return self.__next__()
-        tok = self.buf[0]
-        self.buf = self.buf[1:]
-        return tok
+        return self._consume(self.buf[0])
