@@ -28,7 +28,8 @@ CKPT_VERSION = 1
 
 # ────────────────────────────── 保存 ──────────────────────────────
 def save_vocab_snapshot(path: Path, tokens, max_len: int,
-                        seg_vocab=None, meta: dict | None = None) -> Path:
+                        seg_vocab=None, meta: dict | None = None,
+                        txt_mirror: bool = False) -> Path:
     """词表**快照**落盘（P17，fhz「词表做出来第一时间存入 outputs/models」）。
 
     ⚠ 存**两个**词集合，缺一不可（它们语义不同）：
@@ -56,12 +57,14 @@ def save_vocab_snapshot(path: Path, tokens, max_len: int,
     jpath.write_text(json.dumps({**info, "words": toks, "seg_vocab": segv},
                                 ensure_ascii=False, indent=1),
                      encoding="utf-8")
-    def _esc(w: str) -> str:
-        return w.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
-    path.write_text("# " + json.dumps({**info, "note": "seg_vocab 见同名 .json"},
-                                     ensure_ascii=False) + "\n"
-                    + "\n".join(_esc(w) for w in toks) + "\n",
-                    encoding="utf-8")
+    if txt_mirror:                         # 可选人读镜像（不可回读）
+        def _esc(w: str) -> str:
+            return w.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+        path.write_text(
+            "# " + json.dumps({**info, "note": "仅供查看，不可回读"},
+                              ensure_ascii=False) + "\n"
+            + "\n".join(_esc(w) for w in toks) + "\n",
+            encoding="utf-8")
     return jpath
 
 

@@ -147,3 +147,32 @@ V=9,219 时约 37 KB×2 ≈ 数 μs，不构成瓶颈。softmax 主回路在主�
 - E 计划报告字段；F host 线程收敛。
 - **诚实边界**：本机无加速器，跨**不同**卡的路径仅做结构验证（判据为容差一致，
   非逐位）；同设备分片为逐位一致。多卡真机回归待硬件到位后按 D 例扩到真机执行。
+
+## 七、为什么昇腾机器上没有用 NPU（P18，2026-09-28）
+
+**根因不是探测失败，而是后端选择**：
+
+| 后端 | CPU | 昇腾 NPU | CUDA | ROCm | DirectML |
+|---|---|---|---|---|---|
+| numba（**生产**：`train_1b/train.py`、`infer.py`） | ✓ | ✗ | ✗ | ✗ | ✗ |
+| torch 栈（`tools/train_torch_lm.py`、`phdnet.backends`） | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+numba 的 `@njit` **只能编译到 CPU 机器码**（物理限制）。生产路径的分词核、读出
+融合核、稀疏主循环全部是 numba，因此 NPU 机器上它们依然跑在 CPU 上——日志里
+的「numba nogil 线程 ×N」指的是 CPU 线程，不是 NPU。
+
+**为什么此前不提示**：静默走 CPU 且不说明，容易被误判为「NPU 没被识别」。现已在
+`phdnet.backends.multi_device.capability_report()` 显式给出矩阵 + 行动建议，
+并在 train / infer 启动日志中提示（仅当探测到加速器时）。
+
+**要用上 NPU 的实际路径**（诚实边界）：
+
+```bash
+python tools/train_torch_lm.py --device auto      # auto 择优：昇腾 → ROCm → CUDA → DirectML → CPU
+python tools/train_torch_lm.py --devices auto     # 多卡：读出列并行（见 §六）
+python tests/verifiers/verify_torch_lm.py --device all   # 三平台等价性自检（容差判据）
+```
+
+限制：torch 栈机制覆盖不全（M1–M6 + 部分 M7；`big_ltm`、自适应 LR 等 7 项显式
+`NotImplementedError`），且**权重与生产 npz 检查点不通用**。生产 1B 模型的
+numba 路径暂未提供 NPU 移植方案（需要重写全部算子，工作量以周计）。

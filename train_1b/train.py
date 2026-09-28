@@ -227,6 +227,17 @@ def main() -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     sys.stdout = TeeLogger(log_path)
 
+    # 后端 × 设备能力矩阵：显式说明「numba 只能上 CPU」这一物理限制，
+    # 避免在 NPU/CUDA 机器上被误判为「加速器没被识别」（P18）。
+    try:
+        from phdnet.backends.multi_device import capability_report
+        _cap = capability_report(verbose=False)
+        if _cap["accelerators_present"]:
+            print(f"[能力] 检测到加速器 {_cap['accelerators_present']}，但生产训练走 "
+                  f"numba/CPU（numba 只能编译到 CPU 机器码）；要用加速器请走 torch 栈："
+                  f"tools/train_torch_lm.py --device auto（权重不通用）")
+    except Exception:                                       # noqa: BLE001
+        pass
     print(f"[并行] 分词线程（numba nogil）={vw} | 预取进程={_pf}"
           f"（解码核/进程≈{max(1, _cpu // _pf)}，合计≈{_pf * max(1, _cpu // _pf)}）"
           f" | 数据侧并行不与分词线程叠加争抢")
@@ -379,7 +390,7 @@ def main() -> None:
                       "\n".join(sorted(set(tokens))).encode("utf-8")
                   ).hexdigest()[:12]})
         print(f"[词表] 快照已落盘：{_vp.name}（{_vp.stat().st_size / 1024:.0f} KB，"
-              f"来源={_src}，人读镜像 {_vp.with_suffix('.txt').name}）"
+              f"来源={_src}；唯一权威格式 = 词表 + 分词候选集 + max_len + sha1）"
               f"—— 崩溃后续训直接 --vocab-file {_vp.name}，免重扫", flush=True)
 
     # ── 构建 LM（注入式 tokenizer；n_readout = 词表大小）──

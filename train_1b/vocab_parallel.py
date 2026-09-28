@@ -82,8 +82,21 @@ def auto_workers() -> int:
 
 def build_segmenter_parallel(text: str, seg_kwargs: dict | None = None,
                              workers: int = 0):
-    """词涌现多核构建；workers≤1 或退化输入时走串行原路径（逐位一致）。"""
+    """词涌现多核构建（P18：numba nogil + prange，层间**线程池**零 pickle）。
+
+    引擎二选一（词集合逐位一致，verify_vocab_parallel A 例把关）：
+      - numba 可用 → `phdnet.word_induce_numba`：层内 prange（默认核数/10 线程）
+        + 层间 ThreadPoolExecutor（nogil 释放 GIL → 真并行）；
+      - 否则 → 原 numpy `_induce_length` + ProcessPoolExecutor（回退路径）。
+    workers≤1 或退化输入时走串行原路径。
+    """
     from phdnet.word_encoder import WordSegmenter, _induce_length
+    try:
+        from phdnet.word_induce_numba import (NUMBA_WORD_OK,
+                                              default_nthreads,
+                                              induce_length_numba)
+    except Exception:                            # pragma: no cover
+        NUMBA_WORD_OK = False
 
     kwargs = dict(seg_kwargs or {})
     max_len = int(kwargs.get("max_len", 6))
@@ -99,14 +112,23 @@ def build_segmenter_parallel(text: str, seg_kwargs: dict | None = None,
     n = len(text)
     codes, inv_codes = np.unique(list(text), return_inverse=True)
     inv_codes = inv_codes.astype(np.int64)
-
     nw = min(workers, max_len - 1)               # 任务数只有 max_len-1 个
-    with ProcessPoolExecutor(max_workers=nw) as ex:
-        futs = [ex.submit(_induce_length, codes, inv_codes, n, L,
-                          min_count, min_entropy)
-                for L in range(2, max_len + 1)]
-        for f in futs:                           # 按提交序归并（集合无序，结果确定）
-            seg.vocab |= f.result()
+
+    if NUMBA_WORD_OK:
+        nth = default_nthreads()                # 核内 prange 线程（核数/10）
+        with ThreadPoolExecutor(max_workers=nw) as ex:
+            futs = [ex.submit(induce_length_numba, codes, inv_codes, n, L,
+                              min_count, min_entropy, nth)
+                    for L in range(2, max_len + 1)]
+            for f in futs:                       # 按提交序归并（集合无序，确定）
+                seg.vocab |= f.result()
+    else:
+        with ProcessPoolExecutor(max_workers=nw) as ex:
+            futs = [ex.submit(_induce_length, codes, inv_codes, n, L,
+                              min_count, min_entropy)
+                    for L in range(2, max_len + 1)]
+            for f in futs:
+                seg.vocab |= f.result()
     return seg
 
 

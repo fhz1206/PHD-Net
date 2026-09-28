@@ -311,3 +311,59 @@ class MultiDeviceReadout:
         arr = np.ascontiguousarray(target, dtype=np.float32)
         t = torch.as_tensor(arr, device=self.main, dtype=torch.float32)
         return t.to(dev)
+
+
+# ────────────────────── 能力矩阵（P18，2026-09-28）──────────────────────
+# fhz 问「有 NPU 的环境为什么不用 NPU」——根因：生产训练/推理走的是 **numba**，
+# 而 numba 只能编译到 **CPU 机器码**（物理限制，不支持 NPU/CUDA/ROCm）；支持
+# 昇腾的是 **torch 栈**（torch_npu 插件）。此前生产入口静默走 CPU 不作提示，
+# 易误判为「NPU 没被识别」。本函数给出显式矩阵与行动建议。
+
+BACKEND_MATRIX = {
+    "numba（生产：train_1b/train.py、train_1b/infer.py）": {
+        "cpu": "yes",
+        "npu": "no", "cuda": "no", "rocm": "no", "dml": "no",
+        "note": "numba njit 只能编译到 CPU 机器码；分词核/读出融合核/稀疏主循环"
+                "全部 CPU。NPU 上它表现为『已启用（numba nogil 线程）』但实际是 CPU。",
+    },
+    "torch 栈（tools/train_torch_lm.py、phdnet.backends）": {
+        "cpu": "yes", "npu": "yes", "cuda": "yes", "rocm": "yes",
+        "dml": "yes",
+        "note": "torch_npu / CUDA / ROCm / DirectML 均支持（--device auto 自动"
+                "择优：昇腾 → ROCm → CUDA → DirectML → CPU）。限制：机制覆盖"
+                "不全（M1–M6 + 部分 M7；big_ltm / 自适应 LR 等显式拒绝），"
+                "且**权重与生产 npz 检查点不通用**。",
+    },
+}
+
+
+def capability_report(verbose: bool = True) -> dict:
+    """返回（并可打印）后端 × 设备能力矩阵 + 本机探测结果 + 建议动作。"""
+    probes = probe_multi()
+    avail = [k for k, v in probes.items() if v.get("ok") and v.get("count")]
+    accel = [k for k in avail if k != "cpu"]
+    report = {
+        "matrix": BACKEND_MATRIX,
+        "probed": {k: v.get("count") for k, v in probes.items()},
+        "accelerators_present": accel,
+        "production_backend": "numba/CPU",
+        "accelerator_backend": "torch 栈",
+        "action": (None if not accel else
+                   f"检测到加速器 {accel}：生产入口（train_1b）仍走 numba/CPU，"
+                   f"这是 numba 的物理限制，非探测失败。若要真正用上 {accel}，"
+                   f"请走 torch 栈：python tools/train_torch_lm.py --device auto"
+                   f"（注意机制覆盖与权重不通用，见下表 note）。"),
+    }
+    if verbose:
+        print("[能力矩阵] 后端 × 设备：")
+        for backend, row in BACKEND_MATRIX.items():
+            cells = "  ".join(
+                f"{d}={'✓' if row.get(d) == 'yes' else '✗'}"
+                for d in ("cpu", "npu", "cuda", "rocm", "dml"))
+            print(f"  · {backend}\n      {cells}")
+        print(f"[能力矩阵] 本机探测：{report['probed']}")
+        if report["action"]:
+            print(f"[能力矩阵] {report['action']}")
+        else:
+            print("[能力矩阵] 本机无加速器，numba/CPU 为唯一路径（正常）")
+    return report

@@ -218,8 +218,10 @@ def main() -> None:
 
     # ---- 设备探测（诚实声明：1B 生产推理为 numba CPU 单路，不假装多卡）----
     try:
-        from phdnet.backends.multi_device import (plan_parallel, probe_multi,
+        from phdnet.backends.multi_device import (capability_report,
+                                                  plan_parallel, probe_multi,
                                                   resolve_devices)
+        capability_report(verbose=False)
         devs = resolve_devices(args.devices, allow_fallback=True)
         probes = probe_multi()
         accel = ", ".join(f"{k}×{v.get('count')}" for k, v in probes.items()
@@ -228,9 +230,10 @@ def main() -> None:
         if len(devs) > 1:
             print(f"[infer] 多卡计划（参考 torch 栈）："
                   f"{plan_parallel(devs, 0, 0)['strategy']}")
-        print("[infer] 本入口推理走 numba CPU 生产路径（单路）；"
-              "多卡推理请用 torch 栈（phdnet.backends.multi_device），"
-              "两者权重不通用。")
+        _cap = capability_report(verbose=False)
+        print(f"[infer] 本入口推理走 numba CPU 生产路径（numba 只能编译到 CPU 机器码；"
+              f"探测到的加速器 {_cap['accelerators_present'] or '无'} 仅 torch 栈可用）"
+              f"；多卡/加速器推理见 tools/train_torch_lm.py --devices auto，两者权重不通用。")
     except Exception as e:                                   # noqa: BLE001
         print(f"[infer] 设备探测不可用（{type(e).__name__}: {e}），"
               "按 CPU 单路继续。")

@@ -156,6 +156,22 @@ def main() -> None:
     check("F 多卡建议 1 线程", n == 1
           and os.environ.get("OMP_NUM_THREADS") == "1")
 
+    # ── G 能力矩阵（P18：numba 只能上 CPU，必须显式声明）──
+    print("[G] 后端 × 设备能力矩阵")
+    from phdnet.backends.multi_device import (BACKEND_MATRIX, capability_report)
+    rep = capability_report(verbose=False)
+    numba_row = next(r for k, r in BACKEND_MATRIX.items() if k.startswith("numba"))
+    torch_row = next(r for k, r in BACKEND_MATRIX.items() if k.startswith("torch"))
+    check("G.numba 仅 CPU（物理限制）",
+          numba_row["cpu"] == "yes" and all(numba_row[d] == "no"
+                                             for d in ("npu", "cuda", "rocm", "dml")))
+    check("G.torch 栈覆盖 NPU/CUDA/ROCm/DML",
+          all(torch_row[d] == "yes" for d in ("cpu", "npu", "cuda", "rocm", "dml")))
+    check("G 生产后端标注为 numba/CPU", rep["production_backend"] == "numba/CPU")
+    check("G 无加速器时 action 为空（本机预期）",
+          (rep["action"] is None) == (not rep["accelerators_present"]),
+          f"accel={rep['accelerators_present']}")
+
     print("-" * 76)
     if _FAILURES:
         print(f"结果：{len(_FAILURES)} 例 FAIL → {_FAILURES}")
