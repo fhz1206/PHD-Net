@@ -199,3 +199,30 @@ numba 路径暂未提供 NPU 移植方案（需要重写全部算子，工作量
   浮点熵，迁设备需重写并引入容差判据；当前 CPU 已非瓶颈。
 - **PC 栈 / STDP / LTM**：事件驱动稀疏 + 在线 CSR 生长；torch 栈缺 `big_ltm` 等
   7 项机制，整体迁移会**丢机制**。生产 1B 的全 NPU 移植需重写全部算子。
+
+## 九、加速器诊断工具（P20，2026-09-28）
+
+服务器日志出现 `[能力] 检测到加速器 ['npu']` 时，**「探测到」不等于「能用」**。
+`tools/accel_doctor.py` 一次性回答所有关键问题：
+
+```bash
+python tools/accel_doctor.py                          # 默认 1B 读出规模（908 MB）
+python tools/accel_doctor.py --V 20000 --H 3072       # 显存不足时缩小规模
+python tools/accel_doctor.py --device npu             # 强制指定设备
+python tools/accel_doctor.py --no-bench               # 只诊断不跑基准
+```
+
+五段输出：
+
+1. **环境矩阵**：torch / torch_npu / CANN 版本与配对（torch_npu 必须与 torch
+   严格同版本，如 2.5.1 ↔ 2.5.1；不匹配会出现「探测到设备但算子不可用」）；
+2. **设备解析**：`resolve_devices('auto')` 的实际结果（昇腾 → ROCm → CUDA →
+   DirectML → CPU）与各平台 ok/count/name；
+3. **试分配**：在目标设备上分配读出规模的权重并做一次前向 matvec —— 验证
+   设备**真的能算**（而非只是被探测到），并报告显存；
+4. **性能对照**：同一负载在设备 / torch-CPU / numba 生产基线上的 ms/token；
+5. **结论**：能否使用、瓶颈在哪、生产入口为何没走它。
+
+训练/推理启动日志也会打印**读出设备的实际解析结果**（`[能力] 读出设备解析
+（auto）= npu`），失败时给出一行可复制的诊断命令。真正生效的后端仍以
+`[读出] 后端=...` 为准（回落时同行给出原因）。

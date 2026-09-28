@@ -234,6 +234,8 @@ def main() -> None:
 
     # 后端 × 设备能力矩阵：显式说明「numba 只能上 CPU」这一物理限制，
     # 避免在 NPU/CUDA 机器上被误判为「加速器没被识别」（P18）。
+    # P20：同时把**读出设备的实际解析结果**打出来（探测到 ≠ 能用），
+    # 失败时给一行可复制的诊断命令。
     try:
         from phdnet.backends.multi_device import capability_report
         _cap = capability_report(verbose=False)
@@ -241,6 +243,16 @@ def main() -> None:
             print(f"[能力] 检测到加速器 {_cap['accelerators_present']}，但生产训练走 "
                   f"numba/CPU（numba 只能编译到 CPU 机器码）；要用加速器请走 torch 栈："
                   f"tools/train_torch_lm.py --device auto（权重不通用）")
+            try:
+                from phdnet.backends.accel_readout import resolve_accel_device
+                _rd = resolve_accel_device("auto")
+                print(f"[能力] 读出设备解析（auto）= {_rd} —— 读出将跑在此设备上"
+                      f"（其余部件仍为 numba CPU）")
+            except Exception as _e:                          # noqa: BLE001
+                print(f"[能力] 读出设备解析失败：{type(_e).__name__}: "
+                      f"{str(_e)[:120]}")
+                print("[能力] 诊断：python tools/accel_doctor.py "
+                      "（环境矩阵 / 试分配 / 真实负载计时）")
     except Exception:                                       # noqa: BLE001
         pass
     print(f"[并行] 分词线程（numba nogil）={vw} | 预取进程={_pf}"
