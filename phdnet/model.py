@@ -115,14 +115,11 @@ class PHDNet:
         n_h = cfg.n_top * (3 if cfg.pred_in_readout else 2)     # T3.1 预测通路三拼
         if cfg.retrieval_topk > 0:                              # T3.2 top-k 召回线索
             n_h += cfg.retrieval_topk
-        self.readout = Readout(n_h, n_out, rng, w_clip=cfg.readout_w_clip,
-                               dtype=cfg.readout_dtype,                    # C8 / P6b / P9
-                               conn_k=cfg.readout_conn_k,                  # O1-3 结构性稀疏
-                               lognormal_init=cfg.lognormal_init,          # O1-4
-                               exc_ratio=cfg.exc_ratio,
-                               hidden=cfg.readout_hidden,                  # A4 两级群体读出
-                               hid_k=cfg.readout_hid_k,
-                               eta_hid=cfg.readout_eta_hid)
+        from .backends.accel_readout import pick_readout_backend
+        # P19：auto = 有加速器则读出走加速器，否则回落 numba CPU 原路径
+        # （无加速器机器上逐位不变；构造失败亦回落并记原因）
+        self.readout, self._readout_backend = pick_readout_backend(
+            cfg, n_h, n_out, rng)
         self._ro_eta = cfg.eta_readout   # 当前读出学习率（eta_readout_anneal>0 时逐步退火）
         self._prev_rate = np.zeros(cfg.n_top)      # 上一时刻顶层发放率（供 STDP）
         self._prev_pc: dict | None = None          # T1.2：上一步 PC 推理缓存（时序预测目标）

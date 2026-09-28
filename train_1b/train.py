@@ -173,7 +173,12 @@ def main() -> None:
     ap.add_argument("--readout-dtype", default="fp32",
                     choices=["fp32", "fp16", "bf16", "fp8", "fp4"],
                     help="读出精度（P9/P12：默认 fp32；fp64 已停止支持；"
-                         "fp4 = MX 块缩放 e2m1，2026-09-28 解禁）")
+                         "fp4 = MX 块缩放 e2m1，2026-09-28 解禁")
+    ap.add_argument("--accel", default="auto",
+                    help="读出计算设备（P19，fhz「有 cuda/cann(npu)/rocm 就跑"
+                         "对应设备」）：auto = 有加速器就用（昇腾→ROCm→CUDA→"
+                         "DirectML），否则回落 numba CPU 原路径（逐位不变）；"
+                         "亦可显式 cpu/npu/cuda/rocm/dml")
     ap.add_argument("--big-n", type=int, default=0, help="覆盖大空间神经元数（0=用预设）")
     ap.add_argument("--csr-online", action="store_true",
                     help="大空间表切换在线可写 CSR（长跑内存 ≈10×省，逐位等价已验证）")
@@ -252,6 +257,7 @@ def main() -> None:
     cfg = build_cfg(args.preset, args.width, args.big_n,
                     args.csr_online, args.readout_conn_k, args.seed)
     cfg.readout_dtype = args.readout_dtype            # P9 精度（默认 fp32）
+    cfg.accel_readout = args.accel                     # P19 读出设备（默认 auto）
 
     if args.data == "mix":
         try:
@@ -410,6 +416,12 @@ def main() -> None:
           f"minutes={args.minutes or '∞'} | 里程碑={args.context_milestone or '∞'}"
           f" | 词表并行={vw} | 数据预取=多进程×{dl_w}{'+zh过滤' if args.data == 'mix' else ''}"
           f" | 构建耗时 {time.perf_counter() - t0:.1f}s")
+    _rb = getattr(lm.net, "_readout_backend", "numba-cpu")
+    print(f"[读出] 后端={_rb}"
+          + (f"（设备 {lm.net.readout.device}）"
+             if _rb.startswith("accel:") else "")
+          + (f"｜回落原因：{getattr(lm.net.readout, '_accel_fallback_reason', '')}"
+             if hasattr(lm.net.readout, "_accel_fallback_reason") else ""))
     print_capacity_report(capacity_report(cfg, vocab))
     print(f"可塑参数（构建时实际，count_params 口径）: {count_params(lm.net):,}")
     print("[context] 状态全程不重置（WM/STDP/LTM 跨样本/分片/epoch 连续携带）；"

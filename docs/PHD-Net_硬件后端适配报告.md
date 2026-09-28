@@ -176,3 +176,26 @@ python tests/verifiers/verify_torch_lm.py --device all   # 三平台等价性自
 限制：torch 栈机制覆盖不全（M1–M6 + 部分 M7；`big_ltm`、自适应 LR 等 7 项显式
 `NotImplementedError`），且**权重与生产 npz 检查点不通用**。生产 1B 模型的
 numba 路径暂未提供 NPU 移植方案（需要重写全部算子，工作量以周计）。
+
+## 八、计算型部件自动上设备（P19，fhz「有 cuda/cann/rocm 就跑对应设备」）
+
+**已迁移：读出（M6）** —— 1B 预设里占端到端 ~89%（V×H = 73,958×3,072 fp32 ≈ 908 MB），
+且逐 token 只有一个 h 向量参与计算 → 每步通信仅 12 KB 上行 + 少量下行，可忽略。
+
+| 项 | 说明 |
+|---|---|
+| 开关 | `PHDNetConfig.accel_readout`，**默认 `auto`**；CLI `--accel auto\|cpu\|npu\|cuda\|rocm\|dml`（train 与 infer 均支持） |
+| auto 行为 | 探测到加速器（昇腾/CUDA/ROCm/DirectML）即用（择优顺序同 P10）；**无加速器回落 numba CPU 原路径，逐位不变**；构造失败亦回落并记录 `_accel_fallback_reason`（如实报告，不静默） |
+| 实现 | `phdnet/backends/accel_readout.py::AccelReadout`（W 常驻设备，接口对齐 `Readout`：forward / learn_softmax / W / n_synapses / W_cpu / load_W） |
+| 精度 | softmax 主回路恒 fp32（与 P9 协议一致）；低精度档 fp16/bf16 可用 |
+| 等价性 | **容差一致**（跨库 numpy BLAS ↔ torch 内核归约顺序不同，实测 max\|Δ\| ≈ 4e-06）；`tests/verifiers/verify_accel_readout.py` 12 例全 PASS |
+| 日志 | 训练启动打印 `[读出] 后端=accel:<设备>` 或 `numba-cpu`（含回落原因） |
+
+**未迁移（诚实说明）**：
+
+- **分词/词表扫描**：变长字符串 + 状态化锚点链，设备侧不划算（需整段上传 + 变长
+  输出），留 CPU（numba nogil 多核）。实测训练循环内分词占比 ~0.0%。
+- **词涌现统计**：已多核化（numba prange，4.5×），但形态是可精确并行的整数统计 +
+  浮点熵，迁设备需重写并引入容差判据；当前 CPU 已非瓶颈。
+- **PC 栈 / STDP / LTM**：事件驱动稀疏 + 在线 CSR 生长；torch 栈缺 `big_ltm` 等
+  7 项机制，整体迁移会**丢机制**。生产 1B 的全 NPU 移植需重写全部算子。

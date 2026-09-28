@@ -207,6 +207,9 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--milestone", type=int, default=1_000_000,
                     help="预热进度打点间隔 tokens（0=关闭）")
+    ap.add_argument("--accel", type=str, default="auto",
+                    help="读出计算设备（P19）：auto=有 cuda/cann(npu)/rocm 就用；"
+                         "默认 auto")
     ap.add_argument("--vocab-file", type=Path, default=None,
                     help="词表快照（.json 权威 / .txt 镜像）—— 仅用于**交叉校验**，"
                          "推理词表始终取自检查点；不一致即报错退出")
