@@ -82,7 +82,8 @@ train/
 ## 快速开始
 
 ```bash
-# 环境：Python 3.13+（numpy / numba / psutil；torch 可选，缺失自动回退）
+# 环境：Python 3.13+；依赖安装 pip install -r requirements.txt
+# （numpy/numba/psutil/pyarrow；torch 可选——硬件后端栈与对照模型所需，缺失自动回退）
 python tests/run_tests.py fast    # 快速回归（19 项，约 1 分钟）—— 零回归门槛
 python tests/run_tests.py --full  # 全量验收（约 35 分钟）
 

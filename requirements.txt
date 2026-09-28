@@ -1,0 +1,17 @@
+# PHD-Net 依赖清单（实测环境：Python 3.13 / Windows）
+# 安装：pip install -r requirements.txt
+# torch 为可选依赖（缺失自动回退 numpy/numba 路径）；CPU 版安装见下方注释。
+
+# ── 核心依赖（必装）──
+numpy>=2.0          # 实测 2.5.3
+numba>=0.60         # 实测 0.67.0（STDP/CSR/读出融合核；缺失自动回退 numpy）
+psutil>=5.9         # 实测 7.2.2（并行 worker 数探测）
+pyarrow>=14.0       # 实测 25.0.1（语料 parquet 流式读取）
+
+# ── 可选依赖 ──
+# torch：硬件后端栈（CUDA/ROCm/昇腾 NPU/CPU）与 nanoGPT 对照模型所需；
+# 缺失时核心功能自动回退。CPU 版（约 200 MB）：
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# GPU 版按平台选择（CUDA / ROCm / 昇腾需另装 torch_npu），详见
+# docs/PHD-Net_硬件后端适配报告.md
+# torch>=2.1
