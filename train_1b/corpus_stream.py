@@ -35,12 +35,13 @@ from collections.abc import Iterable, Iterator
 
 SEP = "\n\n"
 
-# 预取进程数上限（P16，2026-09-28 fhz「不要那么多进程，主进程已用多核」）：
-# parquet 解码在 pyarrow 内**自身多线程且释放 GIL**，生产者进程数超过解码
-# 并行度只会带来内存（每进程一份 Python+pyarrow 上下文，153 份即 15–30 GB）
-# 与调度开销。真正的并行来自主进程的 numba nogil 线程（分词）+ 这里的
-# 解码线程池，故进程数收敛到 ~8（每进程 pa.set_cpu_count 限核，总量≈核数）。
-PREFETCH_MAX_PROCS = 8
+# 预取进程数（P16，2026-09-28 fhz「默认一个进程」）：
+# ① parquet 解码在 pyarrow 内**自身多线程且释放 GIL**，单进程即可吃满核；
+# ② 进程数越多，每进程一份 Python+pyarrow 上下文（~100–200 MB）线性增长；
+# ③ 主进程的分词/扫描是 numba nogil 线程（真正的多核来源）。
+# 故默认 **1 进程 + 满核解码**；需要跨文件并行时用 --prefetch-workers 调高
+# （进程数 × 每进程解码核 ≈ 核数，仍不超订）。
+PREFETCH_MAX_PROCS = 1
 
 
 def char_chunks(path, sep: str = SEP) -> Iterator[str]:

@@ -27,6 +27,12 @@ CKPT_VERSION = 1
 
 
 # ────────────────────────────── 保存 ──────────────────────────────
+def to_numpy(x, dtype=None):
+    """延迟导入的 to_numpy（避免与 phdnet.model 的导入顺序耦合）。"""
+    from phdnet.model import to_numpy as _tn
+    return _tn(x, dtype)
+
+
 def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None) -> dict:
     """保存完整可续训状态到 path（.npz + 同名 .json 元数据）。返回元数据 dict。"""
     from dataclasses import asdict
@@ -35,9 +41,9 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None) -> dic
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     arrs: dict = {
-        "encoder_W": np.asarray(net.encoder.W), "encoder_b": np.asarray(net.encoder.b),
-        "stdp_W": np.asarray(net.stdp.W),
-        "wm_slots": np.asarray(net.wm.slots), "wm_strength": np.asarray(net.wm.strength),
+        "encoder_W": to_numpy(net.encoder.W), "encoder_b": to_numpy(net.encoder.b),
+        "stdp_W": to_numpy(net.stdp.W),
+        "wm_slots": to_numpy(net.wm.slots), "wm_strength": to_numpy(net.wm.strength),
     }
     # 主干：CSR 存三元组值（结构由 conn_k 决定，重建时形状校验）；稠密存整矩阵
     if hasattr(net.pc, "up0"):
@@ -55,7 +61,7 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None) -> dic
         ip, idx, val = net.readout._csr
         arrs["ro_ip"], arrs["ro_idx"], arrs["ro_val"] = ip, idx, val
     else:
-        arrs["ro_W"] = np.asarray(net.readout.W)
+        arrs["ro_W"] = to_numpy(net.readout.W)
 
     # 大空间事件驱动表（1B 主体）：CSR 快照 + 迹/时间戳 + 步数
     if cfg.big_ltm:
@@ -104,8 +110,8 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None) -> dic
     arrs["net_step_count"] = np.array([net.step_count], dtype=np.int64)
     arrs["net_scalars"] = np.array([net._task_gate, net._last_da, net._exp, net._ro_eta],
                                    dtype=np.float64)
-    arrs["net_prev_rate"] = np.asarray(net._prev_rate, dtype=np.float64)
-    arrs["net_last_rate"] = np.asarray(net._last_rate, dtype=np.float64)
+    arrs["net_prev_rate"] = to_numpy(net._prev_rate, dtype=np.float64)
+    arrs["net_last_rate"] = to_numpy(net._last_rate, dtype=np.float64)
     # 大空间表的 imprint 前值缓存（缺了会丢续训后第一对 learn）
     if cfg.big_ltm:
         prev = net.ltm._prev
@@ -198,6 +204,20 @@ def load_model(path: Path, lm) -> dict:
         net._prev_rate[:] = z["net_prev_rate"]
         net._last_rate[:] = z["net_last_rate"]
     return meta
+
+
+def peek_tokenizer(path: Path):
+    """只读取检查点里的分词器状态（**不建模型**）：返回 (vocab set, tokens, max_len)。
+
+    P17：续训前需要按检查点的词表尺寸构造 LM（cfg.n_readout = len(tokens)），
+    否则读出层形状与检查点不匹配。词表随后仍由 load_model → _restore_tokenizer
+    幂等恢复。
+    """
+    with np.load(path, allow_pickle=False) as z:
+        vocab = {str(w) for w in z["tok_vocab"]}
+        tokens = [str(x) for x in z["tok_tokens"]]
+        max_len = int(z["tok_max_len"][0])
+    return vocab, tokens, max_len
 
 
 def _restore_tokenizer(lm, z) -> None:

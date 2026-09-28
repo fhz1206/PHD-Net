@@ -566,3 +566,19 @@ Transformer 对照为自建 nanoGPT 级模型（PyTorch，**0.52M（96d×2L）/ 
 两条路径**逐位等价**（同一 trie、同一最长匹配规则），由
 `tests/verifiers/verify_vocab_parallel.py` 的 24 例对拍保证（含 6 例
 极小词表/低扇出用例——低扇出正是旧二分实现漏匹配的暴露面）。
+
+## 附：词表来源与设备张量兼容（P17，2026-09-28）
+
+**词表来源三选一**（优先级从高到低，`train_1b/train.py`）：
+
+1. `--resume` + 检查点存在 → **跳过构建**，用检查点内 `tok_vocab` /
+   `tok_tokens` / `tok_max_len`（`ckpt_1b.peek_tokenizer` 只读取词表以对齐
+   `cfg.n_readout`，随后 `load_model` 幂等恢复分词器与 SDR 哈希）；
+2. `--vocab-file vocab.txt` → 外部词表（每行一词，`#` 注释与空行忽略）；
+3. `--vocab-scan head|full` → 原有扫描（head = 采样文本，多核 token 收集；
+   full = 全量锚点链扫描，多核 nogil 线程）。
+
+**设备张量兼容**：`phdnet/model.py::to_numpy()` 与 `_nelem()` 统一把
+numpy / torch（含 CUDA·NPU·ROCm 设备张量）转 numpy 再统计或存档。
+动机：昇腾机器（CANN 8.5 aarch64 + torch_npu）实测 `np.asarray(npu_tensor)`
+直接抛错，会让参数统计与检查点保存双双失败。

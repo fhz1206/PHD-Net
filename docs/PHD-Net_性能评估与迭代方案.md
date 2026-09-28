@@ -74,7 +74,9 @@ numba 不可用时自动回退进程池（逐位一致）。P7 融合读出核�
 | 锚点链合并 | 词表内 bincount 位图 OR + OOV unique | 消除逐 token Python `set.update`（原主进程瓶颈） |
 | 词表结构构建 | 一次遍历邻接表 + BFS 展平 | **修复 O(节点×词表) 的卡死**（5 万词建 trie 265s → 0.48s） |
 | 组大小 | 缺省 32M → **1M 字符** | 32M 组时并行度塌缩（组数 ≪ worker 数），且每组数百万 token 的字符串 pickle 成单点 |
-| 数据加载（P16 收敛） | **预取进程 = min(8, 核数×0.8, 文件数)**，解码核按进程分摊 | 解码在 pyarrow 内多线程且释放 GIL；153 进程只增内存（每进程一份 Python+pyarrow ≈ 100–200 MB）与调度。191 核 → 8 进程 × 19 解码核 ≈ 152 核 |
+| 数据加载（P16 收敛） | **预取默认 1 进程**（满核解码），`--prefetch-workers` 可调 | 解码在 pyarrow 内多线程且释放 GIL，单进程即吃满核；多进程只增内存（每进程 ~100–200 MB）与调度。fhz 2026-09-28 定调「默认一个进程」 |
+| 词表来源（P17） | ① `--resume` 用检查点**自包含**词表 ② `--vocab-file` 外部词表 ③ head/full 扫描 | ① ② **完全跳过扫描**（旧实现 resume 也会白扫一遍 full 词表，几十分钟） |
+| 设备张量兼容（P17） | `to_numpy()` / `_nelem()` 统一转换 | 昇腾机器实测：`np.asarray(npu:0 tensor)` 抛 "can't convert npu:0 device type tensor" → 参数统计与检查点保存双崩，现已兼容 torch 设备张量 |
 | 顺序归并保序 | 按全局文件序号 reorder | 与串行产出逐位一致（`verify_vocab_parallel` D 例）；mix 模式样本级轮转 |
 | 零等待代码 | 主循环无 sleep/轮询/忙等 | 仅 OS 级阻塞 |
 

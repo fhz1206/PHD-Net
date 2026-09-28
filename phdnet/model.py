@@ -457,6 +457,39 @@ class PHDNet:
         return n_done
 
 
+def to_numpy(x, dtype=None):
+    """张量 → numpy：兼容 torch（含 CUDA/NPU/ROCm 设备张量）与惰性数组。
+
+    P17（服务器实测）：昇腾机器上 `np.asarray(npu_tensor)` 抛
+    "can't convert npu:0 device type tensor to numpy"，检查点保存与参数统计
+    都会踩到；torch 张量须先 `.detach().to('cpu')`。
+    """
+    if hasattr(x, "detach"):
+        x = x.detach().to("cpu").numpy()
+    else:
+        x = np.asarray(x)
+    return x if dtype is None else x.astype(dtype, copy=False)
+
+
+def _nelem(x) -> int:
+    """张量元素数：兼容 numpy / torch（含 CUDA / NPU / ROCm 设备张量）。
+
+    P17（服务器实测）：昇腾机器（CANN 8.5 aarch64 + torch_npu）上模型张量在
+    `npu:0`，`np.asarray(tensor)` 直接抛
+    "can't convert npu:0 device type tensor to numpy" → 统计参数崩在训练末尾。
+    torch 张量须先 `.detach().to('cpu')`（或 `.cpu()`）再 asarray。
+    """
+    if hasattr(x, "detach"):                     # torch.Tensor（含设备张量）
+        try:
+            x = x.detach().to("cpu")
+        except Exception:                        # 已是 numpy-like 或后端特殊
+            return int(x.numel()) if hasattr(x, "numel") else int(np.asarray(x).size)
+    try:
+        return int(np.asarray(x).size)
+    except Exception:                            # 其他惰性数组
+        return int(len(x))
+
+
 def count_params(net: "PHDNet") -> int:
     """统计全部可塑参数（权重 + 记忆存储），供效率报告（C6 修复：集中实现，避免手工统计漂移）。
 
@@ -465,16 +498,16 @@ def count_params(net: "PHDNet") -> int:
     不含推理期临时迹/时间戳（视为状态而非参数）—— 报告时须注明此口径。
     """
     n = 0
-    n += int(np.asarray(net.encoder.W).size + np.asarray(net.encoder.b).size)
+    n += _nelem(net.encoder.W) + _nelem(net.encoder.b)
     if hasattr(net.pc, "n_synapses"):
         # O1-2：主干结构性稀疏——按**实际存在的突触**计数（非稠密等价规模）
         n += int(net.pc.n_synapses())
     else:
         for w in (net.pc.W_up0, net.pc.W_up1, net.pc.W_dn0, net.pc.W_dn1):
-            n += int(np.asarray(w).size)
-    n += int(np.asarray(net.stdp.W).size)
+            n += _nelem(w)
+    n += _nelem(net.stdp.W)
     n += int(net.readout.n_synapses())    # O1-3：稀疏读出按存在连接计；稠密 = 元素数
-    n += int(net.wm.slots.size + net.wm.strength.size)
+    n += _nelem(net.wm.slots) + _nelem(net.wm.strength)
     if net.cfg.big_ltm:
         # O1（2026-09-23）：兼容两种大容量表实现——dict 邻接（out）与在线 CSR（size）
         t = net.ltm.table
@@ -483,5 +516,5 @@ def count_params(net: "PHDNet") -> int:
         else:
             n += sum(len(b) for b in t.out.values())   # SparseSynapseTable：事件驱动生长
     else:
-        n += int(net.ltm.W_fast.size + net.ltm.W_slow.size)
+        n += _nelem(net.ltm.W_fast) + _nelem(net.ltm.W_slow)
     return n

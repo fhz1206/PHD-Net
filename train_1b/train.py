@@ -74,6 +74,19 @@ from corpus_stream import PREFETCH_MAX_PROCS                             # noqa:
 # 预取进程数（0=自动；main 里按 --prefetch-workers 覆盖，P16）
 PREFETCH_W = 0
 
+
+def make_external_segmenter(seg_kwargs: dict, words):
+    """由外部词表构造分段器（P17 --vocab-file）。
+
+    只依赖 `tokenize` 用到的两个属性（vocab / max_len），与 `WordSegmenter`
+    的贪心最长匹配语义逐位一致（同实现，仅换词表来源）。
+    """
+    from phdnet.word_encoder import WordSegmenter
+    seg = WordSegmenter.__new__(WordSegmenter)
+    seg.max_len = int(seg_kwargs.get("max_len", 6))
+    seg.vocab = {w for w in words if w}
+    return seg
+
 SAVE_DIR = _ROOT / "outputs" / "models"   # fhz 2026-09-28：生产训练产物统一存 outputs/models/
 LOG_DIR = _ROOT / "outputs" / "models" / "train_logs"
 
@@ -176,6 +189,10 @@ def main() -> None:
                          "full=全量流式扫一遍(零 OOV, 大语料需数小时)")
     ap.add_argument("--vocab-sample-chars", type=int, default=4_000_000,
                     help="head 模式词表采样字符数（只影响词表，训练数据本身不截断）")
+    ap.add_argument("--vocab-file", type=Path, default=None,
+                    help="外部词表文件（每行一个词；# 注释与空行忽略）。"
+                         "给了它就**跳过** head/full 扫描阶段。"
+                         "另：--resume 时词表直接取自检查点（自包含），同样跳过扫描")
     ap.add_argument("--prefetch-workers", type=int, default=0,
                     help="语料预取进程数（P16：0=自动，默认 min(8, 核数×0.8, 文件数)；"
                          "解码在 pyarrow 内多线程，进程过多只增内存/调度）")
@@ -244,7 +261,15 @@ def main() -> None:
 
     # ── 词表构建（采样 or 全量扫描；训练数据本身永不截断）──
     # 词涌现 + token 收集均多核（fhz 2026-09-25：核心数×0.8；=1 时走串行原路径）
-    if args.data == "mix":
+    # P17：--resume（检查点自含词表）或 --vocab-file（外部词表）时**整段跳过**
+    #     —— 旧实现 resume 也会先扫一遍 full 词表（等于白扫几十分钟）。
+    _ckpt_path = SAVE_DIR / f"phdnet1b_{args.preset}_{args.data}.npz"
+    _resume_vocab = args.resume and _ckpt_path.exists()
+    _file_vocab = (args.vocab_file is not None
+                   and Path(args.vocab_file).exists())
+    if _resume_vocab or _file_vocab:
+        vocab_text, seg, tokens = "", None, None      # 下方按来源填充
+    elif args.data == "mix":
         parts: list[str] = []
         nvc = 0
         for c in stream_factory("mix")():
@@ -255,13 +280,37 @@ def main() -> None:
         vocab_text = "".join(parts)[:args.vocab_sample_chars]
     else:
         vocab_text = build_vocab_text(data_path, args.vocab_sample_chars, SEP)
-    t_v0 = time.perf_counter()
-    seg = build_segmenter_parallel(vocab_text, SEG_KWARGS, args.vocab_workers)
-    if vw > 1:
+    if not (_resume_vocab or _file_vocab):
+        t_v0 = time.perf_counter()
+        seg = build_segmenter_parallel(vocab_text, SEG_KWARGS, args.vocab_workers)
+    if not (_resume_vocab or _file_vocab) and vw > 1:
         print(f"[词表] 词涌现多核构建：L=2..{SEG_KWARGS['max_len']} × {vw} 进程，"
               f"涌现词表 {len(seg.vocab):,}（{time.perf_counter() - t_v0:.1f}s）",
               flush=True)
-    if args.vocab_scan == "full":
+    # 词表来源三选一（优先级）：resume 自包含 > 外部文件 > head/full 扫描
+    if _resume_vocab:
+        from ckpt_1b import peek_tokenizer
+        _cv, _ct, _cmax = peek_tokenizer(_ckpt_path)
+        seg = make_external_segmenter({**SEG_KWARGS, "max_len": _cmax}, _cv)
+        tokens = list(_ct)
+        vocab_text = "\n".join(tokens[:4096])   # 仅供分词器注入构造
+        print(f"[词表] --resume：跳过词表构建，直接用检查点自包含词表"
+              f"（{_ckpt_path.name}：{len(_cv):,} 词 / max_len={_cmax}，"
+              f"SDR 哈希确定性重建、逐位一致；读出层按该尺寸对齐）", flush=True)
+    elif _file_vocab:
+        _words = []
+        for _line in Path(args.vocab_file).read_text(
+                encoding="utf-8").splitlines():
+            _w = _line.strip()
+            if _w and not _w.startswith("#"):
+                _words.append(_w)
+        seg = make_external_segmenter(SEG_KWARGS, _words)
+        tokens = sorted(set(_words))
+        vocab_text = "\n".join(_words[:4096])   # 仅供分词器注入构造
+        print(f"[词表] 外部词表文件 {args.vocab_file}：{len(_words):,} 行 → "
+              f"去重 {len(tokens):,} 词（跳过扫描阶段；OOV 步跳过并统计）",
+              flush=True)
+    elif args.vocab_scan == "full":
         from vocab_parallel import NUMBA_TOK_OK as _TOK_NB
         _engine = (f"多核锚点链 ×{vw}"
                    + ("（numba nogil 线程）" if vw > 1 and _TOK_NB
