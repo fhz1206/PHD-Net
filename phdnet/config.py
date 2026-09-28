@@ -282,12 +282,6 @@ class PHDNetConfig:
 
 
     def __post_init__(self):
-        if self.readout_dtype == "fp4":
-            raise ValueError(
-                "readout_dtype='fp4' 已禁用（fhz 2026-09-27）：e2m1 分辨率不足，"
-                "4K 口径 ppl +5.88%；MX 块缩放立项后重新启用。"
-                "实现代码保留于 phdnet/readout.py（_q_fp4/_ro_q_update_fp4）"
-                "与 tools/audit_precision.py。")
         # 2026-09-28 修复：k_sparse > n_sdr 时 SparseEncoder 的 argpartition kth
         # 越界（构造成功、首个 step 才崩）。fail-fast 提前到配置期。
         if self.k_sparse > self.n_sdr:

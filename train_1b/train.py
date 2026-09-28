@@ -153,8 +153,9 @@ def main() -> None:
     ap.add_argument("--data", choices=list(DATA_FILES), default="sft")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
     ap.add_argument("--readout-dtype", default="fp32",
-                    choices=["fp32", "fp16", "bf16", "fp8"],
-                    help="读出精度（P9：默认 fp32；fp64 已停止支持；fp4 已禁用）")
+                    choices=["fp32", "fp16", "bf16", "fp8", "fp4"],
+                    help="读出精度（P9/P12：默认 fp32；fp64 已停止支持；"
+                         "fp4 = MX 块缩放 e2m1，2026-09-28 解禁）")
     ap.add_argument("--big-n", type=int, default=0, help="覆盖大空间神经元数（0=用预设）")
     ap.add_argument("--csr-online", action="store_true",
                     help="大空间表切换在线可写 CSR（长跑内存 ≈10×省，逐位等价已验证）")

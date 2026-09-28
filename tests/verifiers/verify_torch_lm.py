@@ -7,7 +7,7 @@
 
 口径：冻结语料 eval_corpus/internal_corpus.txt，80/20 划分，训练段前 4,000 字符
 （≈2,780 token，本脚本取前 1,500 token 训练）；BASE 配置见 tests/eval_common.py
-（eta_readout=0.15、读出 fp32）。numpy 主实现基线（全 4K token）ppl_char=90.2480，
+（eta_readout=0.15、读出 fp32）。本脚本为 torch vs numpy 的同口径相对对比，
 本脚本 1,500 token 短训的绝对值与该锚点不可比——**只做 torch vs numpy 的同口径对比**。
 
 用法：python tests/verifiers/verify_torch_lm.py [--tokens 1500] [--device auto|all|cpu,cuda]

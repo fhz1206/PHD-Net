@@ -1,6 +1,6 @@
 # GitCode Action 流水线（https://docs.gitcode.com/docs/help/home/org_project/pipeline/quick-start）
 # Workflow 目录：.gitcode/workflows/（注意：不是 .workflow/ 或 .github/workflows/）
-# 与 .github/workflows/ci.yml（GitHub 镜像）、Jenkinsfile（GitCode Jenkins）同一套测试。
+# 与 .github/workflows/ci.yml（GitHub 镜像）同一套测试。
 name: PHD-Net CI
 
 on:

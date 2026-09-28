@@ -83,7 +83,7 @@ class _ProdSTDPCore(TorchSTDPCore):
     这与 `TorchSTDPCore.step` / `plasticity.STDPCore` 的 numpy 回退路径
     （dw = η·s·(2·tp[i]·post[k] − tp_hist[k]·pre[i])，三方自检 _numpy_reference
     亦按该式）**不一致**——是仓库内预先存在的实现分歧，非本文件引入。
-    本类为对齐 numpy 主路径基线（4K 锚点 90.2480 口径）选择复刻 numba 热路径；
+    本类为对齐 numpy 主路径基线选择复刻 numba 热路径（锚点口径随 eval_corpus 演进）；
     predict（scatter + clamp）与迹更新顺序仍与 TorchSTDPCore 完全一致。
     """
 

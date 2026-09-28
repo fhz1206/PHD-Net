@@ -21,7 +21,7 @@
 
 **当前默认配置**（fhz 指令固化）：读出精度 **fp32**（fp64 已停止支持，可选 fp16/bf16/fp8/fp4）；
 `sparse_conn=True` / `k_sparse=16`（库默认）；`eta_readout=0.15`（**fhz 2026-09-27 拍板落地**：0.05→0.15；
-实测最优区间 0.15–0.20，0.25+ 退化，0.5 发散；新锚点 4K 90.2480 / 全语料 73.1166）。
+实测最优区间 0.15–0.20，0.25+ 退化，0.5 发散；新锚点 4K 90.2480 / 全语料 73.1166；⚠ 2026-09-28 eval_corpus 更换为维基语料后，现行锚点为 4K 394.4687 / 全语料 359.2603，本节数字为旧语料口径历史账）。
 
 ## 二、当前基线（全部可由 `tools/rebaseline.py` / `tools/audit_precision.py` 复现）
 
@@ -92,7 +92,7 @@ fp8 e4m3fn / fp4 e2m1 + 逐张量缩放）；softmax/NLL 保持 fp64 主回路�
 - `TorchReadout`：读出热路径 torch 化（fp32/fp16/bf16 原生；fp8 需 CUDA ≥ 8.9；fp4 走 CPU 码本）；
 - `TorchSTDPCore` + `selftest_torch` 等价自检（沿用）；
 - 本机实测：CPU 参考路径 fp32 40.9 ms/token（读出规模 9219×3072）；三平台真机回归待硬件。
-- CI：`.gitcode/workflows/ci.yml`（GitCode Action）+ `.github/workflows/ci.yml`（GitHub 镜像）+ `Jenkinsfile`（GitCode Jenkins）；验证脚本统一在 `tests/verifiers/`。
+- CI：`.gitcode/workflows/ci.yml`（GitCode Action）+ `.github/workflows/ci.yml`（GitHub 镜像）；验证脚本统一在 `tests/verifiers/`。
 
 ## 七、开放项（按优先级）
 

@@ -37,7 +37,7 @@ from phdnet.config import PHDNetConfig
 PRESETS = {
     # 冒烟：1/2 维度栈，快速验证链路与 PPL 下降
     "smoke": {**BASE, "n_sdr": 128, "n_mid": 128, "n_top": 128},
-    # 基线口径：与 tests/eval_common.BASE 一致（4K 锚点 90.2480 的配置）
+    # 基线口径：与 tests/eval_common.BASE 一致（现行锚点见 tools/rebaseline.py）
     "base": dict(BASE),
 }
 

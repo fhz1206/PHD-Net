@@ -26,7 +26,7 @@ from eval_common import BASE, DOC, SEG
 from phdnet.config import PHDNetConfig
 from phdnet.word_lm import PHDWordLM
 
-ANCHOR = {4000: 90.2480, "full": 73.1166}   # fhz 2026-09-27 拍板：eta_readout 0.05→0.15 后的新锚点（旧锚点见 git 历史）
+ANCHOR = {4000: 394.4687, "full": 359.2603}   # fhz 2026-09-28：eval_corpus 更换为中文维基高质量语料（27,405 字符）后重测；旧锚点 90.2480/73.1166 属自指语料口径（git 历史）
 
 
 def run(limit: int | None = None) -> dict:

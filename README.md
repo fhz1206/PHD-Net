@@ -76,7 +76,6 @@ train/
 │   ├── smoke/                  smoke 档产物（模型 + 断点，不入库）
 │   └── models/                 生产训练产物：模型检查点 + train_logs/（不入库）
 ├── .gitcode/workflows/ci.yml   GitCode Action 流水线
-├── Jenkinsfile                 GitCode Jenkins 流水线
 └── .github/workflows/ci.yml    GitHub Actions 镜像
 ```
 
@@ -112,12 +111,13 @@ python tests/verifiers/verify_torch_lm.py --device all
 > `eval_suite` / `demo_m9`（各自独立配置）。以下均为冻结语料（23,504 字符）实测。
 
 **现行权威锚点**（BASE 配置：n_sdr=256 / k_sparse=32 / eta_pc=0 / eta_readout=0.15 / 读出 fp32；
-复测入口 `tools/rebaseline.py`）：
+复测入口 `tools/rebaseline.py`；语料 = 中文维基高质量条目合集 27,405 字符，2026-09-28 更换——
+旧口径 90.2480/73.1166 为自指文档语料，天然偏乐观，仅存于 git 历史）：
 
 | 口径 | ppl_char | bpc | 吞吐 | 主干连接率 |
 |---|---|---|---|---|
-| 4,000 字符训练段 | **90.2480** | 6.496 | ~4.4 ms/token | 12.5% |
-| 全语料（18,803 字符） | **73.1166** | 6.192 | ~5.7 ms/token | 12.5% |
+| 4,000 字符训练段 | **394.4687** | 8.624 | ~2.9 ms/token | 12.5% |
+| 全语料（21,924 字符） | **359.2603** | 8.489 | ~2.5 ms/token | 12.5% |
 
 **结构性能力**（与口径无关）：
 
@@ -150,6 +150,5 @@ python tests/verifiers/verify_torch_lm.py --device all
 ## CI/CD
 
 - 回归入口 `tests/run_tests.py`（fast 19 项）+ 逐位对拍 `tests/verifiers/`。
-- CI 三平台同源：`.gitcode/workflows/ci.yml`（GitCode Action）+ `Jenkinsfile`（GitCode Jenkins）
-  + `.github/workflows/ci.yml`（GitHub 镜像）。
+- CI 双平台：`.gitcode/workflows/ci.yml`（GitCode Action）+ `.github/workflows/ci.yml`（GitHub 镜像）。
 - 治理约定：架构介绍文档（docs/*.md）不是数据集；冻结评测基准位于 `eval_corpus/`。

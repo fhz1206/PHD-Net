@@ -28,7 +28,9 @@ from phdnet.config import PHDNetConfig                    # noqa: E402
 from phdnet.readout import (Readout, RO_DTYPES, _ro_dense_update,   # noqa: E402
                             _ro_q_update_fp16, _ro_q_update_bf16,
                             _ro_q_update_fp8, _ro_q_update_fp4,
-                            _q_scratch, quantize_to, dequantize_from)
+                            _q_scratch, quantize_to, dequantize_from,
+                            quantize_fp4_mx, dequantize_fp4_mx,
+                            _q_fp4_row_sr, FP4_BLOCK)
 from phdnet.word_lm import PHDWordLM                      # noqa: E402
 
 UPD = {"fp32": _ro_dense_update, "fp16": _ro_q_update_fp16,
@@ -59,6 +61,25 @@ def np_reference(fmt: str, codes, wscale: float, dp, h, eta) -> np.ndarray:
     return quantize_to(fmt, flat)
 
 
+def _np_reference_fp4_mx(codes, ws, dp, h, eta, step: int = 0,
+                         block: int = FP4_BLOCK):
+    """fp4 MX+SR 更新的 numpy 参考：dequant(旧块缩放) → f32 更新 → 按块重算
+    缩放 → 逐行 SR 重量化（与 numba 核逐位一致）。"""
+    V, H = dp.shape[0], h.shape[0]
+    w = dequantize_fp4_mx(codes, ws, V * H).reshape(V, H) \
+        - (dp[:, None] * h[None, :]) * eta
+    n_blk = (H + block - 1) // block
+    Wp = np.zeros((V, n_blk * block), dtype=np.float32)
+    Wp[:, :H] = w
+    B = Wp.reshape(V, n_blk, block)
+    m = np.abs(B).max(axis=2)
+    ws2 = np.where(m > 0, m / 6.0, 1.0).astype(np.float32)
+    q = np.empty((V, n_blk * block), dtype=np.uint8)
+    for i in range(V):
+        q[i] = _q_fp4_row_sr(Wp[i], ws2[i], step, i, H, block)
+    return ((q[:, 0::2] | (q[:, 1::2] << 4)).astype(np.uint8)).ravel(), ws2
+
+
 def l1() -> bool:
     print("[L1] 位算法融合核 vs numpy 参考（码本逐元素一致）")
     rng = np.random.default_rng(7)
@@ -72,14 +93,23 @@ def l1() -> bool:
             dp = (rng.random(V) * 0.01).astype(np.float32)
             h = rng.standard_normal(H).astype(np.float32)
             eta = np.float32(0.05)
-            wscale = (float(np.abs(W0).max()) / 6.0 or 1.0) if fmt == "fp4" else 1.0
-            codes_a = quantize_to(fmt, W0 / wscale).reshape(-1).copy()
-            codes_b = quantize_to(fmt, W0 / wscale).reshape(-1).copy()
             if fmt == "fp4":
-                UPD[fmt](codes_a, scr, dp, h, eta, H, wscale)
+                # P12：fp4 = MX 块缩放（K=16），对拍核 vs numpy MX 参考
+                codes_a, ws_a = quantize_fp4_mx(W0)
+                codes_b = codes_a.copy()
+                ws_orig = ws_a.copy()          # 核会就地更新 ws → 参考须用进入时快照
+                n_blk = (H + FP4_BLOCK - 1) // FP4_BLOCK
+                wrow = np.empty((numba.get_num_threads(), H), dtype=np.float32)
+                mxs = np.empty((numba.get_num_threads(), n_blk), dtype=np.float32)
+                UPD[fmt](codes_a, wrow, mxs, dp, h, eta, H, ws_a, 777)
+                ref = _np_reference_fp4_mx(codes_b, ws_orig, dp, h, eta, step=777)
+                ok_fmt &= bool(np.array_equal(ws_a, ref[1]))
+                ref = ref[0]
             else:
+                codes_a = quantize_to(fmt, W0).reshape(-1).copy()
+                codes_b = quantize_to(fmt, W0).reshape(-1).copy()
                 UPD[fmt](codes_a, scr, dp, h, eta, H)
-            ref = np_reference(fmt, codes_b, wscale, dp, h, eta)
+                ref = np_reference(fmt, codes_b, 1.0, dp, h, eta)
             ok_fmt &= bool(np.array_equal(codes_a.astype(np.int64),
                                           np.asarray(ref).astype(np.int64)))
         ok_all &= ok_fmt
@@ -104,15 +134,19 @@ def l2() -> None:
             def K(a, b, c, d):
                 _ro_dense_update(a, b, c, d)
         else:
-            codes = quantize_to(fmt, rng.standard_normal((V, H)) * 0.01)
             dp = (rng.random(V) * 0.001).astype(np.float32)
             h = rng.standard_normal(H).astype(np.float32)
             eta = np.float32(0.05)
-            wscale = (float(np.abs(rng.standard_normal((V, H))).max()) / 6.0
-                      if fmt == "fp4" else 1.0)
             K = UPD[fmt]
-            args = ((codes, scr, dp, h, eta, H, wscale) if fmt == "fp4"
-                    else (codes, scr, dp, h, eta, H))
+            if fmt == "fp4":
+                codes, ws = quantize_fp4_mx(rng.standard_normal((V, H)) * 0.01)
+                n_blk = (H + FP4_BLOCK - 1) // FP4_BLOCK
+                wrow = np.empty((numba.get_num_threads(), H), dtype=np.float32)
+                mxs = np.empty((numba.get_num_threads(), n_blk), dtype=np.float32)
+                args = (codes, wrow, mxs, dp, h, eta, H, ws, 0)
+            else:
+                codes = quantize_to(fmt, rng.standard_normal((V, H)) * 0.01)
+                args = (codes, scr, dp, h, eta, H)
             nbytes = {"fp16": 2, "bf16": 2, "fp8": 1, "fp4": 0.5}[fmt]
         K(*args)                                          # JIT 预热
         t = time.perf_counter()

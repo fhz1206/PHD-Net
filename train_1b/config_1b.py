@@ -5,7 +5,8 @@
 「1B 模型」= **总突触参数容量 ≥ 1.0×10^9**，由两部分构成：
 
 1. 事件驱动大空间长期记忆（M4b 容量栈，big_ltm）：
-       容量 = big_ltm_N × big_ltm_m = 2^24 × 60 = 1,006,632,960 ≈ 1.0066×10^9
+       容量 = big_ltm_N × big_ltm_m = 2^24 × 72 = 1,207,959,552 ≈ 1.208×10^9
+       （fhz 2026-09-28 指令：突触生长为原本的 1.2×，原 2^24 × 60 ≈ 1.0066×10^9）
    这是 1B 的**主体**。突触不是构建即存在，而是随经验**生长**
    （结构可塑性："fire together, wire together"），每神经元 ≤60 条出边是硬容量约束。
    每步计算量只正比于活跃神经元数（事件驱动），与 1B 总容量无关。
@@ -44,7 +45,7 @@ SEG_KWARGS = dict(max_len=6, min_count=5, min_entropy=1.0)
 PRESETS = {
     #             width  conn_k  big_N    big_m  k_hash
     "smoke": dict(width=256, conn_k=32, big_n=1 << 20, big_m=60, k_hash=4),
-    "1b":    dict(width=1024, conn_k=128, big_n=1 << 24, big_m=60, k_hash=4),
+    "1b":    dict(width=1024, conn_k=128, big_n=1 << 24, big_m=72, k_hash=4),
     "1b_max": dict(width=4096, conn_k=512, big_n=1 << 24, big_m=60, k_hash=4),
 }
 
