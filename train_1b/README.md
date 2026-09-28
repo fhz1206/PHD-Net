@@ -187,3 +187,35 @@ python train_1b/train.py --preset 1b --data sft \
 ```
 
 未设 `--assistant-marker` 时行为与旧版**逐位一致**（全 token 计损失）。
+
+## 强化学习 RL（P27，fhz「RL 训练先准备好」）
+
+**为什么能低成本接入**：M6 读出就是 softmax 感知器（`p = softmax(W·h)`，
+更新 `ΔW = −η(p−t)⊗h`）——这正是 policy logits + 一个以 one-hot 为目标的
+交叉熵步。于是 **RL 不需要新增任何算子**，只是给读出更新换一个 `η`：
+
+| RL 概念 | 复用 |
+|---|---|
+| policy π(a\|s) | 读出 softmax |
+| 采样 | 温度 + top-k（与 `infer.sample_next` 同一实现） |
+| 策略梯度 | `net.step(target=onehot(a), learn_scale = η_RL × advantage)` |
+| 状态推进 | `learn=False`（与预热同款） |
+
+组件（`phdnet/rl.py`）：`rollout` / `REINFORCETrainer`（滑动基线 + 可选 KL 正则）/
+`state_guard`（rollout 后恢复 WM/STDP/LTM 状态，不污染后续训练）/
+`load_prompts`（JSONL）+ 可插拔 `reward_fn`。
+
+```bash
+# 提示集 JSONL：{"prompt": "...", "reward": 1.0}（reward 可省略 → 用 --reward-fn）
+python tools/train_rl.py --init-from outputs/models/phdnet1b_1b_sft_final.npz \
+    --prompts data/rl/prompts.jsonl --iters 200 --rl-lr 0.02 --n-tokens 32
+
+# 或自定义奖励函数 module:function
+python tools/train_rl.py ... --reward-fn my_reward:score_completion
+```
+
+**诚实边界**：这是 REINFORCE（蒙特卡洛策略梯度），**没有 value 网络 / PPO**
+（当前机制里没有独立值函数，baseline 用滑动平均代替）；奖励稀疏时收敛慢
+（CLI 会在「优势恒为 0」时给出稠密奖励等建议）；KL 正则需冻结一份参考读出
+（1B 档额外约一份 W 内存）。闭环验证：`tests/verifiers/verify_rl.py`
+（玩具任务上奖励 0.4 → 1.6 确实上升）。
