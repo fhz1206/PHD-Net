@@ -1,4 +1,4 @@
-# PHD-Net（v0.0.0）
+# PHD-Net（v0.0.0，更新 2026-09-29）
 
 **预测编码 × Hebbian/STDP × 双记忆**：一个完全不依赖自注意力（Self-Attention）的类脑模型架构。
 
@@ -11,6 +11,17 @@
 （PC 栈 / STDP / 双记忆 / 分词，机制齐全，支持 1M 上下文状态不重置）+
 NPU/CUDA 加速读出（M6，`phdnet/backends/accel_readout.py::AccelReadout`）；
 torch 旧栈（TorchPCStack/TorchWordLM/TorchReadout/TorchSTDPCore）已于 2026-09-29 全部删除。
+
+**默认精度与开关（P46/P47/P50/P44）**：训练计算默认 **bf16**（`--readout-dtype bf16`，
+fp32 可回退——半精度会舍掉感知器非目标行更新，启动日志有机制警告）；
+检查点存储默认 **bf16**（`--ckpt-dtype bf16`，位模式压缩 fp8/bf16/fp16 可选，加载无损解码）。
+大空间表在线 CSR **默认开**（`--csr-online` 默认 True，`--no-csr-online` 回退 dict）：
+内存 = 已生长突触 × ~16 B，与容量无关。NPU 读出 kernel 融合**默认开**
+（torch_compile=True，`--no-torch-compile` 关闭；模式默认 `default`——cudagraph 与
+W 原地更新冲突，reduce-overhead 会打印 skipping cudagraphs 并回退）。
+M2 PC 推理已切换 numba 融合核 `_pc_infer_fused`（nogil+parallel+fastmath，
+5 次 matvec 融成 1 次、中间数组核内复用；n_steps=1 **2.10×** / n_steps=3 **2.16×**，
+容差一致 1 ulp（非逐位），已记录待裁决）。
 
 ## 目录结构
 
@@ -42,19 +53,27 @@ train/
 │                               multi_device 多卡列并行 / torch_backend 设备探针+基准 /
 │                               torch_lm 仅存 resolve_device）
 ├── train_1b/                   1B 生产训练子项目（唯一训练入口）
-│   ├── train.py                生产训练（多数据源 / 断点续训 / 多进程加载 / --readout-dtype /
+│   ├── train.py                生产训练（两阶段 pretrain→sft / 断点续训 / 多进程加载 /
+│   │                           --readout-dtype bf16 默认 / --ckpt-dtype bf16 默认 /
+│   │                           --nll-sync-every NPU 读出重叠 / torch.compile 融合默认开 /
 │   │                           --accel auto / --devices auto 多卡读出列并行；
 │   │                           词表四来源：resume 自包含 / 快照自动复用 / --vocab-file / head-full 扫描，
-│   │                           词表快照自动落盘 outputs/models/）
-│   ├── config_1b.py            1B 预设（big_ltm 2^24×60 + 稀疏 CSR/STDP 主干，总参 ≥1B）
-│   ├── ckpt_1b.py              完整可续训检查点（含 CSR 快照 / Welford / STDP 迹）
+│   │                           词表快照自动落盘 outputs/models/；运行时 print 全英文，help 保留中文）
+│   ├── config_1b.py            预设族（smoke / 1b / 1b_max / 30b；30b = big_n 2^29 × big_m 56
+│   │                           → 30.29B 参数，依赖 --csr-online 稀疏——稠密 113 GiB 不可行，
+│   │                           速度随 LTM 访存线性放大）
+│   ├── ckpt_1b.py              完整可续训检查点（含 CSR 快照 / Welford / STDP 迹；bf16 位模式默认）
 │   ├── infer.py                推理与对话（--chat；检查点自包含加载；词表快照自动交叉校验）
-│   ├── corpus_stream.py        流式语料（多进程 PrefetchChars + zh 过滤；P42 起两阶段：pretrain_zh / sft 各自全量）
+│   ├── corpus_stream.py        流式语料（多进程 PrefetchChars；P43 起两阶段三源：
+│   │                           pretrain 中英全量 3906 万块无 lang 过滤 / pretrain_zh 仅中文对照 / sft；
+│   │                           mix 轮转已删除；SFT 回复掩码）
 │   └── vocab_parallel.py       词表 / 分词多核构建（与串行逐位一致；
-│                               33.4 亿 tokens / 520s @ 191 核）
-├── datasets/                   语料（**自身是独立仓库** → atomgit.com/fhz1206/Mixture-General-Mini）
+│                               33.4 亿 tokens / 500s @ 191 核）
+├── datasets/                   语料（**自身是独立仓库** → atomgit.com/fhz1206/Mixture-General-Mini；
+│   │                           本机 29 GB 已删，清单 `docs/DATASETS_DELETED_MANIFEST.json`，
+│   │                           独立仓库 git-lfs 存储，`git lfs pull` 可恢复）
 │   ├── sft/                    SFT 分片 parquet（≤100 MiB；331.9 万条）
-│   ├── pretrain/               预训练分片 parquet（≤100 MiB；3,906 万条）
+│   ├── pretrain/               预训练分片 parquet（≤100 MiB；3,906 万条 = 中文 3708 万 + 英文 Magpie-R1 201 万）
 │   └── raw/                    原始件归档（不入库；读取统一走 phdnet/corpus.py）
 ├── eval_corpus/                冻结评测基准（internal_corpus.txt 23,504 字符 + OOD 探针；不入训练集）
 ├── tests/                      回归与验收
@@ -76,7 +95,9 @@ train/
 │   ├── audit_gen_eval.py       泛化评测（域内 / 近域 / 远域三域 + 2-gram 无泄漏基线）
 │   ├── audit_brain_parity.py   脑同构审计（12 项结构性指标对照生物学事实）
 │   ├── hunt_bugs.py            开关矩阵冒烟 + 边界扫描
-│   └── prepare_* / convert_* / fetch_* / pack_* / split_*    语料制备供应链
+│   ├── fetch_ms.py             三源统一采样器（web/code/math；`--plan web=3,code=2,math=1`；
+│   │                           ModelScope 流式零原始落盘，断点续跑；fetch_l3.py 能力已并入、保留）
+│   └── prepare_* / convert_* / pack_* / split_*    语料制备供应链其余件
 ├── chat/                       对话与推理入口
 │   ├── chat_openai.py          OpenAI 风格对话循环 + web_search 工具调用
 │   ├── chat_r1sft.py           R1 SFT 模型对话 / 演示续写
@@ -108,13 +129,24 @@ python tools/backend_probe.py     # 硬件后端探测（设备矩阵）
 python tools/accel_doctor.py      # 加速后端一次性诊断（环境矩阵 / 试分配 / 带宽）
 python tools/bench_accel.py       # 读出基准（fp32 / fp16 / bf16 三档 + 等效带宽 GB/s）
 
-# 预训练（唯一生产入口；多进程加载 / 断点续训 / 精度可选 / --accel auto）
+# 预训练 / SFT（唯一生产入口；多进程加载 / 断点续训 / --accel auto）
 python train_1b/train.py --preset smoke --data sft --tokens 100000
-python train_1b/train.py --data mix --resume   # sft + pretrain 中文子集混合
 
-# SFT（回复掩码：只对助手回复计损失，多轮约 50% 步；--init-from 两阶段微调）
+# 阶段① 预训练：中英全量 3906 万块（中文 3708 万 + 英文 Magpie-R1 201 万，无 lang 过滤；
+#          `pretrain_zh` 为仅中文对照；`mix` 轮转已删除）
+python train_1b/train.py --data pretrain --nll-sync-every 8 --resume
+
+# 阶段② SFT：回复掩码——只对助手回复计损失（多轮约 50% 步）；
+#          默认 bf16 计算 + bf16 检查点存储
 python train_1b/train.py --data sft --assistant-marker "助手：" \
-    --init-from outputs/models/<预训练检查点>.npz
+    --init-from outputs/models/phdnet1b_1b_pretrain.npz
+
+# 30B 档（big_n 2^29 × big_m 56 → 30.29B；依赖默认开启的 --csr-online 稀疏）
+python train_1b/train.py --preset 30b --data pretrain --nll-sync-every 8 --resume
+
+# 云端语料制备：三源统一采样器（web/code/math；零原始落盘，断点续跑；
+#          三源 L3 合计 994.3 GB，50 GB 云端预算下采样 3–5%）
+python tools/fetch_ms.py --plan web=3,code=2,math=1
 
 # RL（REINFORCE，零新增算子；JSONL 提示集 + 可插拔 reward_fn）
 python tools/train_rl.py --init-from outputs/models/<SFT 检查点>.npz
@@ -133,6 +165,8 @@ python tests/verifiers/verify_ckpt_roundtrip.py   # 检查点落盘 / 恢复 rou
 子目录脚本自带 `sys.path` 引导，从任意工作目录运行都可。
 评测一律读冻结语料 `eval_corpus/internal_corpus.txt`（编辑 docs 不影响基线）；
 语料通道走 ModelScope（境内源 ~5 MB/s，境外源受限）。
+numba 编译缓存持久化于 `outputs/numba_cache`（`NUMBA_CACHE_DIR`，不被
+`__pycache__` 清理波及；readout.py 7 个核带 cache=True，冷启动 3.96→2.60s）。
 
 ## 当前基线与关键指标
 
@@ -160,7 +194,12 @@ python tests/verifiers/verify_ckpt_roundtrip.py   # 检查点落盘 / 恢复 rou
 | 稳定正增益机制 | T3.4 内容寻址 WM −1.6%；回放稳定读出 −1.4% |
 | 已证伪方向（勿复用） | 表征可塑性五项全负（+18%~+63%）；T3.2 top-k 检索 +3.2% 有害；minibatch 单遍协议下有害 |
 | 脑同构审计 | 12 项结构性指标：一致 10 / 近似 2 / 偏离 0（`tools/audit_brain_parity.py`） |
-| 工程吞吐（实测） | 词涌现构建 4.7M 字符 63.1s → 9.0s（7.00×，逐位一致）；词表扫描 33.4 亿 tokens / 520s（191 核） |
+| 工程吞吐（实测） | 词涌现构建 4.7M 字符 9.0s（7.00×，逐位一致）；词表扫描 33.4 亿 tokens / 500s（191 核） |
+| 1B 训练步时（实测） | **19.9 ms/tok**（NPU 读出 8.5 占 43% + CPU 11.4）；`--nll-sync-every 8` 设备累积重叠后预期 ~13–14 |
+| M2 numba 融合核（P52） | `phdnet/sparse_pc.py::_pc_infer_fused`：n_steps=1 **2.10×** / n_steps=3 **2.16×**，容差一致 1 ulp（非逐位） |
+| torch.compile A/B（P45） | 开 **26.34** vs 关 **30.98** ms/tok（快 15%；本机 CPU torch） |
+| numba 编译缓存（P39） | readout 7 核 cache=True + 持久化缓存目录，冷启动 **3.96→2.60s** |
+| CPU 侧预计算（P51） | `encode_composite`/`onehot` 缓冲预分配复用（onehot 14.12→0.33 μs）；诚实口径：占端到端 **0.069%**，大头在 M2 推理（状态依赖无法预计算） |
 | 回归状态 | fast **9/9**（零回归门槛）；CI 三平台同源 |
 
 **诚实边界**：内置语料仅约 2 万字符，结论只在该规模与语料下成立，不构成对通用 LLM 能力的宣示；
@@ -169,6 +208,10 @@ python tests/verifiers/verify_ckpt_roundtrip.py   # 检查点落盘 / 恢复 rou
 GEMV 受带宽限制，**~50% 利用率是结构性上限**；主循环机制（PC 栈 / STDP / 记忆 / 分词）仍在 numba CPU；
 fp16 有机制性代价，待真机实测（`tools/bench_accel.py` 三档精度基准）；
 规模外推（100B vs GLM-5.3-Flash）为估算，见《竞争力与脑同构性评估》。
+
+**训练数据规模（三源实测）**：L3 430.6 GB / 2.02 亿篇；Code-L3 441.1 GB（11 语言）；
+Math-L3 122.5 GB（4 子集）；合计 **994.3 GB** → 50 GB 云端预算下经
+`tools/fetch_ms.py` 采样 **3–5%**。
 
 ## 文档索引
 

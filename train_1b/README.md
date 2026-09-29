@@ -5,6 +5,10 @@ PHD-Net 的 1B 档训练**与推理**子项目：在**事件驱动稀疏类脑�
 总长无关），**context 无硬窗口**（状态全程不重置，目标 ≥1M 连续 tokens）。不依赖
 GPU 也能在小预算内真实训练与续训（每步成本只正比于活跃神经元数，与 1B 总容量无关）。
 
+> **更新 2026-09-29（并入 P32–P52）**：两阶段训练数据（`--data mix` 已删除）、
+> bf16 精度默认（计算与检查点）、`--preset 30b`、`--csr-online` 默认开、
+> NPU 优化与资源遥测、M2 numba 融合核、numba 持久缓存；检查点默认 50,000 步。
+
 ## 1M context 与「不截断」（2026-09-25）
 
 - **流式训练**：语料按 `concat(样本_i + "\n\n")` 字符流逐样本流过，token 边产边训
@@ -58,6 +62,62 @@ GPU 也能在小预算内真实训练与续训（每步成本只正比于活跃�
 局部计算——密集 1B 模型（权重+梯度+优化器 ≈16 GB、每步 ≥10^9 FLOPs）在
 无独显机器上物理不可行，本档通过稀疏结构绕开，而非否认该物理约束。
 
+**更大档位（P47）**：`--preset 30b` —— big_n 2^29 × big_m 56 → **30.29B 参数**。
+该档**依赖在线 CSR 稀疏**（稠密存位 113 GiB 不可行）；训练速度随 LTM 访存线性放大。
+
+## 训练数据与两阶段（P42/P43，2026-09-29）
+
+- **`--data mix` 已删除**。训练为**两阶段**：
+  1. **预训练**：`--data pretrain` —— **中英全量 3906 万块**（中文 3708 万 +
+     英文 Magpie-R1 201 万，无 lang 过滤）；`--data pretrain_zh` 保留为
+     **仅中文对照**档。
+  2. **SFT**：`--data sft --init-from <预训练ckpt> --assistant-marker "助手："`
+     （见下文 SFT 一节）。
+- **三源统一采样器** `tools/fetch_ms.py`：web/code/math 三源按计划采样
+  （`--plan web=3,code=2,math=1`），产出进 `datasets/pretrain/`（P48/P49）。
+- **本机数据集已删除**（fhz 指令，29 GB；清单
+  `docs/DATASETS_DELETED_MANIFEST.json`）——重训前先用 fetch_ms.py 重新采样。
+
+## 精度与数值格式（P46/P47，2026-09-29）
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| 训练计算 | `--readout-dtype bf16` | bf16 为默认，fp32 可回退。**机制警告**：半精度会舍掉感知器非目标行更新——启动日志已打印该警告 |
+| 检查点存储 | `--ckpt-dtype bf16` | fp8 / bf16 / fp16 存位模式，加载无损解码；fp8 存储体积 **1/4** |
+
+## NPU/设备优化与遥测（P34/P36/P40/P44/P45，2026-09-29）
+
+- **NLL 同步流水（P34）**：`--nll-sync-every 8`——nll 在设备侧累积，与
+  CPU/NPU 计算重叠；服务器实测约 **-30~40% 墙钟**。
+- **设备张量直通（P36/P40）**：训练步零每步 D2H；target 设备侧构造。
+- **kernel 融合默认开（P44/P45）**：`torch_compile=True`（`--no-torch-compile`
+  关闭）；模式默认 `default`——**cudagraph 与 W 原地更新冲突**，选
+  `reduce-overhead` 会打印 skipping cudagraphs 并自动回退。
+- **资源遥测（P41）**：日志每 `log_every` 追加
+  `| CPU x% proc x核 RAM x%/xGB NPU/GPU x% HBM x/yGB CS/s x`；
+  `--step-profiling` 输出九段分解（M1/M2/M3/M5/M4a/M4b/PC_learn/STDP_learn/readout）。
+- **英文日志（P41b）**：`train.py` 全部运行时 print 已改为英文
+  （`[vocab]`/`[readout]`/`[parallel]`/`[SFT]`/`[big-ltm]` 等标签）。
+
+## M2 numba 融合核与 numba 缓存（P52/P39，2026-09-29）
+
+- **M2 融合核**：`phdnet/sparse_pc.py::_pc_infer_fused`（nogil + parallel +
+  fastmath），5 次 matvec 融成 1 次、中间数组核内复用；`infer` 已切换；
+  返回独立数组（cache 跨步语义不变）。
+- **numba 缓存（P39）**：`NUMBA_CACHE_DIR=outputs/numba_cache`（train/infer/
+  train_rl 顶部设置，持久化、不被 `__pycache__` 清理波及）；`readout.py`
+  7 个核补 `cache=True`（冷启动 3.96 → 2.60s）。
+
+## 性能基线（实测，2026-09-29）
+
+| 项 | 数值 |
+|---|---|
+| 1B 档单步 | 19.9 ms/tok（NPU 读出 8.5 占 43% + CPU 11.4）；P34 重叠后预期 ~13–14 |
+| 词涌现 | 4.7M 字符 9.0s（7.00×） |
+| full 扫描 | 33.4 亿 tokens / 500s（6.7M tokens/s） |
+| M2 融合核（P52） | **2.1×**（0.215 → 0.102 ms @n_steps=1；容差一致 1 ulp，非逐位——已在代码注释记录待 fhz 裁决） |
+| fast 门禁 | 9/9 通过 |
+
 ## 文件
 
 | 文件 | 职责 |
@@ -65,8 +125,8 @@ GPU 也能在小预算内真实训练与续训（每步成本只正比于活跃�
 | `train.py` | 主入口：流式训练循环、容量验算、日志、检查点、1M 里程碑 |
 | `corpus_stream.py` | 字符流 + StreamingTokenizer（逐位等价）+ PrefetchChars 多进程加载（按文件分片并行解码 + 顺序归并） |
 | `vocab_parallel.py` | 多核词表构建：词涌现按 L 并行 + 全量扫描锚点链并行（默认核心数×0.8） |
-| `config_1b.py` | 档位预设（smoke / 1b / 1b_max）、构建配置、容量验算 |
-| `ckpt_1b.py` | 完整检查点：大空间表（CSR 快照 + 迹/时间戳）+ 词表 + 权重 |
+| `config_1b.py` | 档位预设（smoke / 1b / 1b_max / 30b）、构建配置、容量验算 |
+| `ckpt_1b.py` | 完整检查点：大空间表（CSR 快照 + 迹/时间戳）+ 词表 + 权重；fp8/bf16/fp16 位模式存储，加载无损解码 |
 | `infer.py` | 推理 / 对话：检查点自包含加载（不需要语料）、流式长 prompt、τ+top-k |
 | `verify_stream_tokenize.py` | 对拍：流式分词 vs 全量分词逐位一致 |
 | `verify_ckpt_roundtrip.py` | 对拍：保存→恢复→续训逐位等价 |
@@ -78,11 +138,13 @@ GPU 也能在小预算内真实训练与续训（每步成本只正比于活跃�
 # 冒烟：分钟级验证全管线（容量 <1B，仅功能验证）
 python train_1b/train.py --preset smoke --data sft --tokens 2000
 
-# 标准 1B 档，全量流式训练（任意长度不截断；1M context 里程碑自动打点）
-python train_1b/train.py --preset 1b --data pretrain_zh --tokens 1000000
+# 阶段 1 预训练：中英全量（任意长度不截断；1M context 里程碑自动打点）
+python train_1b/train.py --preset 1b --data pretrain --tokens 1000000
 
 # 生产长跑（零 OOV 词表 + 断点续训）
-python train_1b/train.py --preset 1b --data pretrain_zh --vocab-scan full --resume
+python train_1b/train.py --preset 1b --data pretrain --vocab-scan full --resume
+
+# 阶段 2 SFT 见下文；更大档位 --preset 30b（见「容量口径」）
 
 # 推理 / 对话（检查点自包含加载，不需要语料）
 python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz \
@@ -92,7 +154,8 @@ python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 
 产物位置（fhz 2026-09-28 指令：**生产训练产物统一存 `outputs/models/`**）：
 
-- `outputs/models/phdnet1b_{preset}_{data}.npz` —— 滚动检查点（`--ckpt-every` 触发 + 收尾）
+- `outputs/models/phdnet1b_{preset}_{data}.npz` —— 滚动检查点（`--ckpt-every`
+  默认 **50,000** 步触发 + 收尾；`--ckpt-dtype` 默认 **bf16**，fp8 体积 1/4）
 - `outputs/models/phdnet1b_{preset}_{data}_final.npz` —— 收尾另存的最终模型
 - `outputs/train_logs/train_1b_*.log` —— 训练日志（含 `[METRIC]` 尾行）
 
@@ -111,13 +174,13 @@ python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 续训要求 `--data` 与 `--vocab-sample-chars`（或 `--vocab-scan`）与原训练一致
 （词表大小 fail-fast 校验）；**推理不需要语料**——检查点自包含（`infer.py`）。
 
-## 硬件需求（`--preset 1b`，fp64）
+## 硬件需求（`--preset 1b`）
 
 | 项 | 需求 |
 |---|---|
-| 内存 | 静态 ≈0.5–0.6 GB（读出占大头）+ 大空间表已生长突触（dict 版 ≈100 B/条；`--csr-online` 切在线 CSR ≈10 B/条，逐位等价已由 `tests/verifiers/verify_csr_equiv.py` 验证） |
-| 磁盘 | 检查点 ≈0.3–0.6 GB/份（npz 未压缩，速度优先） |
-| 吞吐 | 本机纯 CPU 实测见日志 `ms/token`；10^9 token 生产训练需 GPU/集群（参考 `tools/estimate_scale.py` 外推：256M 档本机 157 ms/token ⇒ 10^9 token ≈ 5 年，1B 档生产训练必须换硬件） |
+| 内存 | 静态 ≈0.5–0.6 GB（读出占大头）+ 大空间表**已生长突触 × ~16 B**（在线 CSR，`--csr-online` **默认开**，P50——内存与表容量无关，30B 档利用率 10% 仅 ~5.5 GiB；`--no-csr-online` 回 dict 版 ≈100 B/条，逐位等价已由 `tests/verifiers/verify_csr_equiv.py` 验证） |
+| 磁盘 | 检查点 ≈0.3–0.6 GB/份（npz 未压缩，速度优先；`--ckpt-dtype fp8` 可压到 1/4） |
+| 吞吐 | 本机纯 CPU 实测见日志 `ms/token`；NPU 档实测见「性能基线」。10^9 token 生产训练需 GPU/集群（参考 `tools/estimate_scale.py` 外推：256M 档本机 157 ms/token ⇒ 10^9 token ≈ 5 年，1B 档生产训练必须换硬件） |
 
 ## 与既有 1B 工作的关系
 
@@ -148,7 +211,7 @@ python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 | 阶段 | 实现 | 实测（4.7M 字符生产规模） |
 |---|---|---|
 | 词涌现 | nogil 核：开放寻址 hash 去重（取代 `np.unique(W, axis=0)` 整行排序）+ 边逐元素回比（精确非概率）+ 解析式熵；**层间线程池**并行 5 个 L | 63.1s → **9.0s（7.00×）**，逐位一致 |
-| 全量扫描 | nogil 核 + `ThreadPoolExecutor`（共享内存零 pickle）；小词表 CSR 二分 / 大词表边哈希自适应 | 33.4 亿 tokens / 520s（191 核机器） |
+| 全量扫描 | nogil 核 + `ThreadPoolExecutor`（共享内存零 pickle）；小词表 CSR 二分 / 大词表边哈希自适应 | 33.4 亿 tokens / 500s（6.7M tokens/s，191 核机器） |
 
 核内 prange 曾实现并**已回退**（实测 1→6 线程仅 1.16×，瓶颈是内存带宽）。
 
@@ -182,8 +245,8 @@ python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 ```bash
 # 阶段 2：在预训练权重上做 SFT
 python train_1b/train.py --preset 1b --data sft \
-    --init-from outputs/models/phdnet1b_1b_pretrain_zh.npz \
-    --assistant-marker "助手：" --vocab-file outputs/models/vocab_1b_pretrain_zh.json
+    --init-from outputs/models/phdnet1b_1b_pretrain.npz \
+    --assistant-marker "助手：" --vocab-file outputs/models/vocab_1b_pretrain.json
 ```
 
 未设 `--assistant-marker` 时行为与旧版**逐位一致**（全 token 计损失）。
