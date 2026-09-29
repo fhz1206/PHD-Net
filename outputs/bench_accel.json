@@ -1,0 +1,51 @@
+{
+  "probes": {
+    "cpu": {
+      "ok": true,
+      "note": "参考路径（fp32/fp16/bf16 全支持）"
+    },
+    "cuda": {
+      "ok": false,
+      "count": 0,
+      "name": null,
+      "version": null
+    },
+    "npu": {
+      "ok": false,
+      "note": "torch_npu 未安装（CANN 适配需单独安装该插件）"
+    },
+    "dml": {
+      "ok": false,
+      "note": "torch_directml 未安装（Windows AMD/Intel GPU 路径）"
+    }
+  },
+  "results": [
+    {
+      "device": "cpu",
+      "dtype": "fp32",
+      "fwd_ms": 19.59724000003007,
+      "update_ms": 63.47399999999652,
+      "total_ms": 83.07124000002659,
+      "W_MiB": 234.375,
+      "eff_GBps": 8.875273801134593
+    },
+    {
+      "device": "cpu",
+      "dtype": "fp16",
+      "fwd_ms": 6.853999999975713,
+      "update_ms": 3109.305160000031,
+      "total_ms": 3116.1591600000065,
+      "W_MiB": 117.1875,
+      "eff_GBps": 0.11829947736045653
+    },
+    {
+      "device": "cpu",
+      "dtype": "bf16",
+      "fwd_ms": 7.24488000000747,
+      "update_ms": 87.54770000000462,
+      "total_ms": 94.7925800000121,
+      "W_MiB": 117.1875,
+      "eff_GBps": 3.8889119802409957
+    }
+  ]
+}

@@ -24,7 +24,8 @@ from phdnet.torch_backend import bench_readout, probe_devices   # noqa: E402
 def main() -> None:
     ap = argparse.ArgumentParser(description="读出热路径加速器基准（P10 适配）")
     ap.add_argument("--steps", type=int, default=50)
-    ap.add_argument("--V", type=int, default=9219)
+    ap.add_argument("--V", type=int, default=73958,
+                    help="读出行数（缺省 73958 = 1B 预设真实词表规模）")
     ap.add_argument("--H", type=int, default=3072)
     args = ap.parse_args()
 
@@ -54,28 +55,27 @@ def main() -> None:
         dev_list.insert(0, "npu")
     for dev in dev_list:
         for dt in ("fp32", "fp16", "bf16"):
-            # fp16/bf16 在旧 GPU（sm<7.0）或部分 NPU 上可能不可用 → 诚实降级
+            # P29：dtype 此前**从未传入** bench_readout，且成功后立即 break
+            # → fp16/bf16 档从来没被真测过。三档都跑，逐档诚实降级。
             try:
                 r = bench_readout(device=dev, V=args.V, H=args.H,
-                                  steps=args.steps)
-                r["dtype"] = dt if dev != "cpu" or dt == "fp32" else dt
-                # CPU 一次测 fp32 足够（fp16 CPU matvec 无加速，仅参考）
-                if dev == "cpu" and dt != "fp32":
-                    continue
-                r["dtype"] = dt
+                                  steps=args.steps, dtype=dt)
                 results.append(r)
-                print(f"  {dev:5s} {dt:5s}: 前向 {r['fwd_ms']:8.3f} ms | "
+                print(f"  {dev:5s} {r['dtype']:5s}: 前向 {r['fwd_ms']:8.3f} ms | "
                       f"更新 {r['update_ms']:8.3f} ms | 合计 {r['total_ms']:8.3f} "
-                      f"ms/token", flush=True)
-                break                                     # 每设备 fp32 基准即可
+                      f"ms/token | W {r['W_MiB']:6.0f} MiB | "
+                      f"等效 {r['eff_GBps']:6.1f} GB/s", flush=True)
             except Exception as e:  # noqa: BLE001
-                print(f"  {dev:5s} {dt:5s}: 失败（{type(e).__name__}: {e}）",
-                      flush=True)
-                break
+                print(f"  {dev:5s} {dt:5s}: 不可用（{type(e).__name__}: "
+                      f"{str(e)[:60]}）", flush=True)
     print("-" * 78)
-    print("说明：fp8 需 CUDA ≥ 8.9（Ada/Hopper）+ torch ≥ 2.1（float8_e4m3fn）；")
-    print("      fp4 无 torch 原生类型 → CPU numba 量化码本路径（phdnet/readout.py P9）；")
-    print("      本基准的设备 dtype 即存储+计算精度（softmax/NLL 在 fp32 主回路）。")
+    print("说明：")
+    print("  · 等效带宽 = 3×|W| / 耗时（读 W 一次 + 读写 W 各一次）。读出是 GEMV，")
+    print("    **受带宽限制而非算力**，所以带宽是唯一可跨平台比较的指标。")
+    print("  · dtype 即设备张量的存储+计算精度（softmax/NLL 主回路恒 fp32，P9 协议）。")
+    print("  · fp8/fp4 在加速后端未实现（会回落 numba CPU），故本基准不测。")
+    print("  · ⚠ 半精度的机制性代价：非目标行的更新量 ≈1e-6，比 fp16 半 ULP 还小")
+    print("    15 倍 → 被舍入丢弃，学习规则退化为「只提升目标行」。见硬件后端报告。")
     with open(os.path.join(_ROOT, "outputs", "bench_accel.json"), "w",
               encoding="utf-8") as f:
         json.dump({"probes": probes, "results": results}, f,

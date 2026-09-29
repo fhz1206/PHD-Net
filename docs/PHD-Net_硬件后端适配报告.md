@@ -277,3 +277,47 @@ python tools/accel_doctor.py --no-bench               # 只诊断不跑基准
 - `AccelReadout.learn_softmax` 收了 `accumulate` 参数但未使用（minibatch
   在加速后端被静默忽略）。当前 `minibatch_size` 默认 1 → 无行为差异，
   但启用前必须实现或显式拒绝。
+
+## 十一、基准工具的三个 bug：此前「fp16 更慢」的结论不可信（P29，2026-09-29）
+
+排查「NPU 上还有问题」时发现 `tools/bench_accel.py` + `phdnet/backends/torch_backend.py::bench_readout`
+本身有缺陷，**它给出的所有数字都不可信**：
+
+1. **异步设备上从不 synchronize**：计时区间前后只调 `time.perf_counter()`，
+   NPU/CUDA 上测到的是「kernel 提交耗时」而非真实耗时（队列还没执行完就返回），
+   数字偏小且随负载剧烈波动。
+2. **`dtype` 从未传入**：`bench_readout()` 写死 fp32，而调用方循环
+   `for dt in ("fp32","fp16","bf16")` 后**第一次成功就 `break`** → fp16/bf16
+   档**从来没有被真测过**。项目里「fp16 慢 17×」的负面数据只来自 CPU numba
+   码本路径（位算法量化，非原生半精度），不能外推到 NPU。
+3. **测的不是生产对象**：用的是旧 `TorchReadout`，而生产走 `AccelReadout`
+   （P28 的 AXPY + 设备侧缓存）。
+
+修复后：`_sync_device()` + `dtype` 参数 + 默认用 `AccelReadout` +
+报告**等效带宽 GB/s**（读出是 GEMV，带宽才是可跨平台比较的指标）。
+
+**在 NPU 上跑一次即可拿到决定性数据**（无需改任何训练代码）：
+
+```bash
+python tools/bench_accel.py                 # 默认 V=73,958（1B 真实词表）
+python tools/bench_accel.py --steps 50
+```
+
+输出形如 `npu fp32: … 合计 X ms/token | W 867 MiB | 等效 Y GB/s`，
+三档（fp32/fp16/bf16）横向对比即可判断 **fp32 是不是主要损失来源**。
+
+**同时看训练日志的读出占比**（`train_1b/train.py` 已打印）：
+
+```
+token 100  … | 读出 1.234 ms/tok（accel:npu@npu, 占 12.3%）
+```
+
+占比 < 50% 即证明**瓶颈已转移到 CPU 侧**（PC 栈 / STDP / big_ltm 2^24 的
+537 MB 随机访问），此时再优化读出精度收益有限，应转攻 CPU 侧。
+
+⚠ **半精度的机制性代价**（子代理审计发现，需在决策前知晓）：非目标行的
+更新量 ≈ 1e-6（|dp| ≈ 1/V），而 fp16 半 ULP ≈ 1.5e-5、bf16 ≈ 2e-4 →
+**round-to-nearest 下被完全吞掉**。也就是说半精度读出会退化为「只提升目标行、
+从不衰减其他行」的纯 Hebbian 规则，与 fp32 的 `p − t` 不是同一个学习规则。
+现有 PPL 表（fp16 −0.17%）是 CPU 码本路径、在 `eta=0.05` 下测的；现行默认
+`eta=0.15` 更激进，需重测。

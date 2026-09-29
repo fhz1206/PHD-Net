@@ -419,23 +419,67 @@ class TorchReadout:
         return self.W.float().cpu().numpy()
 
 
+def _sync_device(device: str) -> None:
+    """同步设备队列（**计时的前置条件**）。
+
+    P29 修复：旧实现直接 `time.perf_counter()` 前后包住 kernel 调用，在
+    NPU/CUDA 这类**异步设备**上测到的是「提交耗时」而非真实耗时——队列还没
+    执行完就返回了，数字会小一个数量级且随负载剧烈波动。
+    """
+    dev = str(device).lower()
+    try:
+        if dev.startswith("npu") and hasattr(torch, "npu"):
+            torch.npu.synchronize()
+        elif dev.startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.synchronize()
+    except Exception:                                        # noqa: BLE001
+        pass
+
+
 def bench_readout(device: str = "auto", V: int = 9219, H: int = 3072,
-                  steps: int = 50) -> dict:
-    """读出热路径基准（前向 + 更新，1B 预设真实读出规模），返回 ms/token。"""
+                  steps: int = 50, dtype: str = "fp32",
+                  use_accel: bool = True) -> dict:
+    """读出热路径基准（前向 + 更新），返回 ms/token **与等效带宽**。
+
+    P29 修正三处（否则这个工具的结论不可信）：
+      ① 每个计时区间前后 `_sync_device`——异步设备上不等待测的是提交耗时；
+      ② 支持 `dtype`（fp32/fp16/bf16）——此前写死 fp32，**fp16/bf16 从未被测过**，
+         却按「fp16 可能更慢」下过结论；
+      ③ `use_accel=True` 时用**生产同款** `phdnet.backends.accel_readout.AccelReadout`
+         （AXPY 更新 + 设备侧缓存），而不是旧 `TorchReadout`；
+      ④ 报告等效带宽（GB/s）——读出是 GEMV，受带宽限制，**带宽才是可移植的指标**。
+    """
     import time
     rng = np.random.default_rng(0)
-    core = TorchReadout(rng.standard_normal((V, H)) * 0.01, device=device)
-    h = np.abs(rng.standard_normal(H)) + 0.1
-    t = np.zeros(V); t[V // 2] = 1.0
+    if use_accel:
+        from .accel_readout import AccelReadout
+        core = AccelReadout(H, V, None, device=device, dtype=dtype,
+                            w0=(rng.standard_normal((V, H)) * 0.01).astype("float32"))
+    else:
+        core = TorchReadout(rng.standard_normal((V, H)) * 0.01, device=device)
+    h = (np.abs(rng.standard_normal(H)) + 0.1).astype(np.float32)
+    t = np.zeros(V, dtype=np.float32)
+    t[V // 2] = 1.0
     core.forward(h)                                          # 预热（JIT/上下文）
     core.learn_softmax(h, t, 0.05)
+    _sync_device(getattr(core, "device", device))
     t0 = time.perf_counter()
     for _ in range(steps):
         core.forward(h)
+    _sync_device(getattr(core, "device", device))
     fwd = (time.perf_counter() - t0) / steps * 1000
     t0 = time.perf_counter()
     for _ in range(steps):
         core.learn_softmax(h, t, 0.05)
+    _sync_device(getattr(core, "device", device))
     upd = (time.perf_counter() - t0) / steps * 1000
-    return {"device": core.device, "dtype": str(core.tdtype),
-            "fwd_ms": fwd, "update_ms": upd, "total_ms": fwd + upd}
+    esize = {"fp32": 4, "fp16": 2, "bf16": 2}.get(str(getattr(core, "dtype_name",
+                                                               "fp32")), 4)
+    # 流量口径（每步）：读 W 一次 + 读写 W 各一次
+    w_bytes = V * H * esize
+    total_ms = fwd + upd
+    gbs = (3 * w_bytes / 1e9) / (total_ms / 1000) if total_ms > 0 else 0.0
+    return {"device": getattr(core, "device", str(device)),
+            "dtype": getattr(core, "dtype_name", dtype),
+            "fwd_ms": fwd, "update_ms": upd, "total_ms": total_ms,
+            "W_MiB": w_bytes / 2 ** 20, "eff_GBps": gbs}
