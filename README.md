@@ -69,9 +69,10 @@ train/
 │   │                           mix 轮转已删除；SFT 回复掩码）
 │   └── vocab_parallel.py       词表 / 分词多核构建（与串行逐位一致；
 │                               33.4 亿 tokens / 500s @ 191 核）
-├── datasets/                   语料（**自身是独立仓库** → atomgit.com/fhz1206/Mixture-General-Mini；
-│   │                           本机 29 GB 已删，清单 `docs/DATASETS_DELETED_MANIFEST.json`，
-│   │                           独立仓库 git-lfs 存储，`git lfs pull` 可恢复）
+├── datasets/                   语料（**自身是独立仓库** → atomgit.com/fhz1206/Mixture-General-Mini，
+│   │                           限额 1 GiB < 交付 4.64 GiB 推不全；权威副本在 ModelScope
+│   │                           fhzfhz/Mixture-General-Mini，`--remote-data` 可直读；
+│   │                           本机 29 GB 已删，清单 `docs/DATASETS_DELETED_MANIFEST.json`）
 │   ├── sft/                    SFT 分片 parquet（≤100 MiB；331.9 万条）
 │   ├── pretrain/               预训练分片 parquet（≤100 MiB；3,906 万条 = 中文 3708 万 + 英文 Magpie-R1 201 万）
 │   └── raw/                    原始件归档（不入库；读取统一走 phdnet/corpus.py）
@@ -133,12 +134,13 @@ python tools/bench_accel.py       # 读出基准（fp32 / fp16 / bf16 三档 + �
 python train_1b/train.py --preset smoke --data sft --tokens 100000
 
 # 阶段① 预训练：中英全量 3906 万块（中文 3708 万 + 英文 Magpie-R1 201 万，无 lang 过滤；
-#          `mix` 轮转已删除）
-python train_1b/train.py --data pretrain --nll-sync-every 8 --resume
+#          `mix` 轮转已删除）。默认 `--nll-sync-every 8`（nll 设备侧累积，CPU/NPU
+#          重叠）+ `--numba-threads 8`（191 核上空转的 prange 线程上限，0=不限）
+python train_1b/train.py --data pretrain --resume
 
 # 语言选择（fhz 2026-09-29）：--lang zh / en / all（默认 all 逐位不变）；
 #          `--data pretrain --lang zh` 等价旧 `--data pretrain_zh`；sft 同样适用
-python train_1b/train.py --data pretrain --lang zh --nll-sync-every 8 --resume
+python train_1b/train.py --data pretrain --lang zh --resume
 
 # 服务器无本地数据集时：ModelScope 直读（HTTP Range 流式零落盘，仅支持 ModelScope；
 #          --remote-fraction 0.3 = 取排序后前 30% 分片，前缀子集顺序语义不变）
@@ -149,8 +151,14 @@ python train_1b/train.py --data pretrain --remote-data --remote-fraction 0.3 --r
 python train_1b/train.py --data sft --assistant-marker "助手：" \
     --init-from outputs/models/phdnet1b_1b_pretrain.npz
 
+# ⚠ 读出精度与学习能力（2026-09-29 实测）：bf16 读出会把非目标行更新
+#   （|dp|≈1e-6）舍入掉（bf16 半 ULP≈2e-4）→ 学习退化为纯 Hebbian，PPL 震荡
+#   不降。要精确学习规则就用 fp32 计算 + bf16 存储（模型文件仍是半精度）：
+python train_1b/train.py --data pretrain --remote-data --readout-dtype fp32 \
+    --ckpt-dtype bf16 --resume
+
 # 30B 档（big_n 2^29 × big_m 56 → 30.29B；依赖默认开启的 --csr-online 稀疏）
-python train_1b/train.py --preset 30b --data pretrain --nll-sync-every 8 --resume
+python train_1b/train.py --preset 30b --data pretrain --resume
 
 # 云端语料制备：三源统一采样器（web/code/math；零原始落盘，断点续跑；
 #          三源 L3 合计 994.3 GB，50 GB 云端预算下采样 3–5%）
@@ -164,6 +172,9 @@ python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 
 # 硬件验证（P30 后保留项）
 python tests/verifiers/verify_accel_readout.py    # 读出加速逐位对拍
+python tests/verifiers/verify_accel_readout_p55.py  # 读出 2×2 矩阵（target_idx × compiled）9/9
+python tests/verifiers/verify_pc_learn_fused.py  # M2 学习融合核逐位对拍 12/12 + 多规模计时
+python tests/verifiers/verify_ms_stream.py       # ms:// 远程源纯函数 41 例（零网络）
 python tests/verifiers/verify_multi_device.py     # 多卡分片与单设备逐位一致（24 例）
 python tests/verifiers/verify_vocab_parallel.py   # 词表并行构建逐位一致（24/24）
 python tests/verifiers/verify_rl.py               # RL 训练回路
@@ -172,7 +183,11 @@ python tests/verifiers/verify_ckpt_roundtrip.py   # 检查点落盘 / 恢复 rou
 
 子目录脚本自带 `sys.path` 引导，从任意工作目录运行都可。
 评测一律读冻结语料 `eval_corpus/internal_corpus.txt`（编辑 docs 不影响基线）；
-语料通道走 ModelScope（境内源 ~5 MB/s，境外源受限）。
+**训练数据两个入口（P54，2026-09-29）**：① 本地 `datasets/`（默认，逐位不变）；
+② `--remote-data` 直读 ModelScope `fhzfhz/Mixture-General-Mini`——**HTTP Range
+流式零落盘（仅支持 ModelScope）**，`--remote-fraction` 取排序后前 N% 分片
+（默认 0.3，前缀子集保证词表与训练流一致）。atomgit 限额 1 GiB < 交付 4.64 GiB，
+故数据集仓库推不全，服务器走 ②。语料采样通道同样走 ModelScope（境内源 ~5 MB/s）。
 numba 编译缓存持久化于 `outputs/numba_cache`（`NUMBA_CACHE_DIR`，不被
 `__pycache__` 清理波及；readout.py 7 个核带 cache=True，冷启动 3.96→2.60s）。
 
@@ -203,17 +218,27 @@ numba 编译缓存持久化于 `outputs/numba_cache`（`NUMBA_CACHE_DIR`，不�
 | 已证伪方向（勿复用） | 表征可塑性五项全负（+18%~+63%）；T3.2 top-k 检索 +3.2% 有害；minibatch 单遍协议下有害 |
 | 脑同构审计 | 12 项结构性指标：一致 10 / 近似 2 / 偏离 0（`tools/audit_brain_parity.py`） |
 | 工程吞吐（实测） | 词涌现构建 4.7M 字符 9.0s（7.00×，逐位一致）；词表扫描 33.4 亿 tokens / 500s（191 核） |
-| 1B 训练步时（实测） | **19.9 ms/tok**（NPU 读出 8.5 占 43% + CPU 11.4）；`--nll-sync-every 8` 设备累积重叠后预期 ~13–14 |
+| 1B 训练步时（**服务器实测** 2026-09-29，昇腾 191 核 + ModelScope 30% 分片） | **26 ms/tok**（区间 26–42）；其中 **readout 12.9–13.4 ms/tok 在 NPU 上占 30–50%**（320 MB bf16 ×2 访存 ≈ 49 GB/s，远低于 NPU 带宽 → **同步/launch 暴露，非算力瓶颈**）；进程仅用 **1.3–3.2 / 191 核**、CS/s 250 万+ |
+| P62 同步/空转修复 | `--nll-sync-every` 默认 1→**8**（每步 `.item()` 曾把 NPU 延迟全额暴露给 CPU =「CPU 忙 NPU 空闲」真相）；`--numba-threads` 默认 **8**（191 核跑千行级 prange 纯空转；P22 实测 1→6 线程仅 1.16×） |
+| M2 学习侧融合核（P59） | `SparsePCStack.learn` 8 次核调用 → 1 个 nogil/parallel 核，**逐位一致**；26 万边 **1.72×** / 105 万边 1.15× / 419 万边 1.25×。（predictive 版实测**负收益** 0.91× → 已删） |
+| M1 编码器半精度（P61） | 迭代 fp32 + 模型 fp32（`cfg.encoder_dtype`）：encode **606.7→337.7 µs（1.80×）**，top-k 逐位一致。⚠ numpy 路径下 bf16 存储**更慢**（每次付上采样转换），bf16 语义由读出侧（NPU 原生）承担 |
+| H2D/图优化（P58） | 读出 h 走 pinned 暂存 + `non_blocking`（pageable 会阻塞 CPU）；`--torch-compile` **默认关**（inductor 服务器不稳定）；遥测 NPU% 改走 npu-smi（`torch.npu.utilization()` 会同步设备流） |
 | M2 numba 融合核（P52） | `phdnet/sparse_pc.py::_pc_infer_fused`：n_steps=1 **2.10×** / n_steps=3 **2.16×**，容差一致 1 ulp（非逐位） |
-| torch.compile A/B（P45） | 开 **26.34** vs 关 **30.98** ms/tok（快 15%；本机 CPU torch） |
+| torch.compile A/B（P45） | 开 **26.34** vs 关 **30.98** ms/tok（快 15%；本机 CPU torch）。**现默认关**，需要时显式 `--torch-compile` |
 | numba 编译缓存（P39） | readout 7 核 cache=True + 持久化缓存目录，冷启动 **3.96→2.60s** |
 | CPU 侧预计算（P51） | `encode_composite`/`onehot` 缓冲预分配复用（onehot 14.12→0.33 μs）；诚实口径：占端到端 **0.069%**，大头在 M2 推理（状态依赖无法预计算） |
-| 回归状态 | fast **9/9**（零回归门槛）；CI 三平台同源 |
+| 回归状态 | fast **9/9**（零回归门槛）；`verify_ms_stream` 41/41、`verify_accel_readout_p55` 9/9、`verify_pc_learn_fused` 12/12、`verify_ckpt_roundtrip` PASS；CI 三平台同源 |
 
 **诚实边界**：内置语料仅约 2 万字符，结论只在该规模与语料下成立，不构成对通用 LLM 能力的宣示；
 远域（维基 OOD）受词表覆盖墙限制，属数据规模问题而非架构单一问题；
 读出加速已上设备并实测：NPU 迁移后设备流量 **−40%**（4,334 → 2,600 MiB/步，正好理论下限）；
-GEMV 受带宽限制，**~50% 利用率是结构性上限**；主循环机制（PC 栈 / STDP / 记忆 / 分词）仍在 numba CPU；
+GEMV 受带宽限制，**~50% 利用率是结构性上限**（逐 token 串行语义，批处理才能突破）；
+⚠ **bf16 读出有机制性代价**：非目标行更新（|dp|≈1e-6）被 bf16 半 ULP（≈2e-4）舍掉 →
+学习退化为纯 Hebbian，实测 PPL 震荡不降 → 要精确规则用 `--readout-dtype fp32`
++ `--ckpt-dtype bf16`（**存储仍半精度**）；
+⚠ **M3/M4 STDP、LTM 不是瓶颈**（`n_top×16` 边、µs 级）——优化前务必先看
+`--step-profiling` 九段分解；本轮两次「看起来是热点」的优化实测为**负收益**
+已回滚（LTM 表 Python 循环向量化 0.73×、`learn_predictive` 融合 0.91×）；
 fp16 有机制性代价，待真机实测（`tools/bench_accel.py` 三档精度基准）；
 规模外推（100B vs GLM-5.3-Flash）为估算，见《竞争力与脑同构性评估》。
 
