@@ -44,6 +44,7 @@ python train_1b/train.py --preset 1b --data pretrain_zh \
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import time
@@ -63,6 +64,7 @@ from config_1b import PRESETS, SEG_KWARGS, build_cfg                 # noqa: E40
 from config_1b import capacity_report, print_capacity_report         # noqa: E402
 from corpus_stream import PrefetchChars, SEP, StreamingTokenizer     # noqa: E402
 from corpus_stream import build_vocab_text, char_chunks              # noqa: E402
+from phdnet.corpus import expand_paths                              # noqa: E402
 from corpus_stream import mix_chunks, zh_char_chunks                 # noqa: E402
 from phdnet.corpus import expand_paths                               # noqa: E402
 from phdnet.model import count_params                                # noqa: E402
@@ -387,6 +389,16 @@ def main() -> None:
                       f"当前词表 {n_distinct:,}"
                       f"（{time.perf_counter() - t_v:.0f}s）", flush=True)
 
+            # P33（fhz「核心绑定到进程」）：扫描是一次性构建阶段，追求吞吐 →
+            # 解码默认**多生产者**（每核心一个进程，跨文件并行；显式 workers
+            # 不受 PREFETCH_MAX_PROCS=1 钳制）。训练稳态预取仍默认 1 进程不变。
+            # 内存：队列有界（depth 上限）→ 背压成立；每进程仅局部缓冲。
+            _scan_files = len(expand_paths(data_path)) if '*' in str(data_path) \
+                else 1
+            _scan_w = PREFETCH_W if PREFETCH_W > 0 else \
+                max(1, min(16, _scan_files, (os.cpu_count() or 1)))
+            print(f"[词表] 扫描解码进程：{_scan_w}（核心绑定：每进程独占核心；"
+                  f"训练稳态预取仍为 {PREFETCH_W or 1}）", flush=True)
             seen, n_seen = scan_vocab_parallel(seg.vocab, seg.max_len,
                                                (stream_factory(args.data)()
                                                 if args.data == "mix"
@@ -394,7 +406,7 @@ def main() -> None:
                                                     data_path, SEP,
                                                     depth=PREFETCH_DEPTH,
                                                     batch_samples=PREFETCH_BATCH or 64,
-                                                    workers=PREFETCH_W)),
+                                                    workers=_scan_w)),
                                                vw, progress=_scan_prog)
         else:
             for tk in StreamingTokenizer(seg, char_chunks(data_path, SEP)):
