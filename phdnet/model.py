@@ -33,7 +33,8 @@ class PHDNet:
     def __init__(self, cfg: PHDNetConfig):
         self.cfg = cfg
         rng = np.random.default_rng(cfg.seed)
-        self.encoder = SparseEncoder(cfg.n_input, cfg.n_sdr, cfg.k_sparse, rng)   # M1
+        self.encoder = SparseEncoder(cfg.n_input, cfg.n_sdr, cfg.k_sparse, rng,
+                                     dtype=getattr(cfg, "encoder_dtype", "fp32"))  # M1
         # M2 主干：结构性稀疏 CSR（唯一实现）。2026-09-28 按 fhz 指令删除稠密
         # PredictiveCodingStack（phdnet/pc.py）；cfg.sparse_conn 仅为兼容保留，
         # 传 False 会在 config 校验期 fail-fast。

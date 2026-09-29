@@ -284,6 +284,12 @@ class PHDNetConfig:
     #     比 P9 实测时的 0.05 更激进 → 切换后建议按 4K 规模 A/B 复核 PPL。
     # 回退：`--readout-dtype fp32`（逐位等价的老路径）。
     readout_dtype: str = "bf16"
+    # P61（fhz 2026-09-29「迭代默认 fp32，模型默认 bf16」）：M1 稀疏编码器权重
+    # 的存储 dtype。**迭代量恒 fp32**（GEMV 上采样后算）。默认 fp32 而非 bf16
+    # ——numpy/BLAS 路径下低精度存储每次都要付上采样转换（8.4 MB 读 + 16.8 MB
+    # 写 + 16.8 MB 读），实测比 fp32 直接 GEMV 更慢；bf16 语义在读出侧已由
+    # `readout_dtype`（默认 bf16，NPU 原生）落地。`bf16`/`fp16` 可显式指定。
+    encoder_dtype: str = "fp32"
     # P19 读出加速器：auto=有加速器就用（昇腾→ROCm→CUDA→DirectML），否则回落
     # numba CPU 原路径（逐位不变）；cpu/off/numba = 强制原路径；
     # npu/cuda/rocm/dml = 显式设备（不可用则回落并如实报告）。
