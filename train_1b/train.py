@@ -341,8 +341,9 @@ def main() -> None:
         t_v0 = time.perf_counter()
         seg = build_segmenter_parallel(vocab_text, SEG_KWARGS, args.vocab_workers)
     if not (_resume_vocab or _file_vocab) and vw > 1:
-        print(f"[词表] 词涌现多核构建：L=2..{SEG_KWARGS['max_len']} × {vw} 进程，"
-              f"涌现词表 {len(seg.vocab):,}（{time.perf_counter() - t_v0:.1f}s）",
+        print(f"[词表] 词涌现多核构建：L=2..{SEG_KWARGS['max_len']} × "
+              f"5 线程池（nogil 核内串行，层间并行；P22）"
+              f"（涌现词表 {len(seg.vocab):,}，{time.perf_counter() - t_v0:.1f}s）",
               flush=True)
     # 词表来源三选一（优先级）：resume 自包含 > 外部文件 > head/full 扫描
     if _resume_vocab:

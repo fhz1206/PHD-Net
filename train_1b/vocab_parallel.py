@@ -42,6 +42,7 @@ numba 不可用时自动回退进程池路径（Python 版 _scan_group，逐位�
 from __future__ import annotations
 
 import os
+import time
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
@@ -266,7 +267,11 @@ def _iter_group_tokens(vocab, max_len: int, samples, workers: int,
     """
     groups = _group_iter(samples, group_chars, 2 * max_len)
     if NUMBA_TOK_OK:
+        _t_trie = time.perf_counter()
         ent = _trie_for(vocab, max_len)
+        print(f"  [词表扫描] 分词结构构建（{len(vocab):,} 词）："
+              f"{time.perf_counter() - _t_trie:.1f}s（一次性；此后各组复用）",
+              flush=True)
         ex = ThreadPoolExecutor(max_workers=workers)
         submit = _scan_task_numba
         targs = (max_len, ent)

@@ -44,50 +44,27 @@ class PHDNet:
                                 exc_ratio=cfg.exc_ratio)
         # M3 关联核：默认 numpy(+numba)；显式指定或检测到加速器时改用 torch 后端
         # （同一算子语义，覆盖 CPU / CUDA / ROCm(HIP) / 昇腾 NPU）
-        if use_torch_backend(cfg.backend):
-            from .device import select_backend
-            from .torch_backend import TorchSTDPCore, selftest_torch
-            if cfg.adaptive_lr:
-                raise ValueError("torch 后端暂不支持逐突触自适应学习率（T4.1），"
-                                 "请关闭 adaptive_lr 或使用 numpy 后端")
-            # 脑同构机制（STDP 稳态/元可塑性/E-I）同样依赖逐突触状态，torch 后端暂不支持
-            if cfg.stdp_homeostasis or cfg.metaplasticity or cfg.ei_synapses:
-                raise ValueError("torch 后端暂不支持 STDP 稳态缩放/元可塑性/E-I 突触类型，"
-                                 "请关闭这些开关或使用 numpy 后端")
-            be = select_backend(cfg.backend)
-            # B2 修复：用配置 dtype 验证 torch 算子与 numpy 参考的等价性门禁
-            # （此前自检固定以 fp32 运行，fp16/bf16 下门禁形同虚设）
-            try:
-                if not selftest_torch(device=be.device, dtype=cfg.torch_dtype):
-                    warnings.warn(
-                        f"torch 后端 dtype={cfg.torch_dtype} 在设备 {be.device} "
-                        f"未通过等价性自检，结果可能不正确。", RuntimeWarning)
-            except Exception as e:  # noqa: BLE001
-                warnings.warn(f"torch 后端等价性自检异常：{e}", RuntimeWarning)
-            self.stdp = TorchSTDPCore(
-                cfg.n_top, cfg.m_lateral, cfg.lambda_trace, cfg.eta_stdp,
-                cfg.w_max, rng, device=be.device, dtype=cfg.torch_dtype,
-                dual=cfg.dual_trace, lam_slow=cfg.lambda_trace_slow,
-                beta_slow=cfg.beta_slow_trace)
-            # A1 修复：实测设备须与请求一致，否则静默降速且结果可疑（至少告警）
-            if self.stdp.device != be.device:
-                warnings.warn(
-                    f"请求后端 {cfg.backend} 解析为设备 {self.stdp.device}"
-                    f"（期望 {be.device}）；数值等价门禁可能未通过，请检查硬件后端。",
-                    RuntimeWarning)
-        else:
-            self.stdp = STDPCore(cfg.n_top, cfg.m_lateral,                        # M3
-                                 cfg.lambda_trace, cfg.eta_stdp, cfg.w_max, rng,
-                                 adaptive=cfg.adaptive_lr, adapt_rho=cfg.adapt_rho,
-                                 adapt_eps=cfg.adapt_eps, dual=cfg.dual_trace,
-                                 lam_slow=cfg.lambda_trace_slow,
-                                 beta_slow=cfg.beta_slow_trace,
-                                 homeostasis=cfg.stdp_homeostasis,
-                                 homeo_target=cfg.homeo_target,
-                                 metaplasticity=cfg.metaplasticity,
-                                 bcm_tau=cfg.bcm_tau,
-                                 ei_synapses=cfg.ei_synapses,
-                                 ei_ratio=cfg.ei_ratio)
+        # M3 关联核：**只走 numpy(+numba) CPU**（P30 定稿）。
+        # 旧 torch 后端分支已随 torch 栈删除（P30）——加速的正确姿势是
+        # "只迁移读出"（P19/P28 的 AccelReadout）；STDP 的逐突触状态
+        # （自适应 LR / 稳态 / 元可塑性 / E-I）在 torch 上无法保留，迁移会丢机制。
+        if use_torch_backend(cfg.backend) and cfg.backend not in ("auto", "numpy", "cpu"):
+            raise ValueError(
+                f"backend={cfg.backend!r}：M3 STDP 的 torch 后端已随旧 torch 栈删除"
+                "（P30，机制保留在 numba CPU 路径）。计算加速请用读出加速"
+                "（--accel auto，P19/P28）；本参数如非显式指定请保持默认 auto。")
+        self.stdp = STDPCore(cfg.n_top, cfg.m_lateral,                        # M3
+                             cfg.lambda_trace, cfg.eta_stdp, cfg.w_max, rng,
+                             adaptive=cfg.adaptive_lr, adapt_rho=cfg.adapt_rho,
+                             adapt_eps=cfg.adapt_eps, dual=cfg.dual_trace,
+                             lam_slow=cfg.lambda_trace_slow,
+                             beta_slow=cfg.beta_slow_trace,
+                             homeostasis=cfg.stdp_homeostasis,
+                             homeo_target=cfg.homeo_target,
+                             metaplasticity=cfg.metaplasticity,
+                             bcm_tau=cfg.bcm_tau,
+                             ei_synapses=cfg.ei_synapses,
+                             ei_ratio=cfg.ei_ratio)
         self.wm = WorkingMemory(cfg.n_top, cfg.n_wm_slots, cfg.gamma_wm,          # M4a
                                 content_address=cfg.wm_content_address,           # T3.4
                                 sim_thresh=cfg.wm_sim_thresh)
