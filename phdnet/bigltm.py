@@ -151,21 +151,29 @@ class SparseLTM:
         active = self.encode(cue)
         if not active:
             return np.zeros(self.n_dim)
-        scores = self.table.predict(active)
-        if not scores:
-            return np.zeros(self.n_dim)
         out = np.zeros(self.n_dim)
         n_s = 0
-        if NUMBA_LTM:
-            # P68：核内累加（nogil 串行——输出维度被多个 big_i 共享，prange 会
-            # 竞态）。遍历次序与 Python 版一致 → 逐位相同。
-            ks = np.fromiter(scores.keys(), dtype=np.int64, count=len(scores))
-            ws = np.fromiter(scores.values(), dtype=np.float64, count=len(scores))
+        if NUMBA_LTM and hasattr(self.table, "predict_arr"):
+            # P70：整条 recall 路径零 Python 内层循环 ——
+            #   ①`predict_arr`（numpy gather，1.8 万元素级）替代 dict predict
+            #     （原版每步 256 行 × 72 槽 ≈ 1.8 万次 dict 更新 ≈ 20–50 ms，
+            #      服务器实测 M4b_ltm 占 63 ms/tok 的主因）；
+            #   ②`_recall_project`（numba nogil）做反投影累加。
+            # 重复键**不合并**、按「行序 → 槽位序」在核内逐次累加 → 与原
+            # `p[k] += v` 浮点顺序完全一致 → 逐位相同。
+            ks, ws = self.table.predict_arr(active)
+            if ks.size == 0:
+                return np.zeros(self.n_dim)
             _recall_project(ks, ws, out, self._rev_indptr, self._rev_indices)
             n_rev = self._rev_indptr.shape[0] - 1
             valid = ks[ks < n_rev]
             n_s = int(np.diff(self._rev_indptr)[valid].sum()) if valid.size else 0
+            n_scores = int(ks.size)
         else:
+            scores = self.table.predict(active)
+            if not scores:
+                return np.zeros(self.n_dim)
+            n_scores = len(scores)
             for big_i, s in scores.items():
                 js = self.rev.get(big_i, ())            # 仅遍历被激活索引绑定的维度
                 n_s += len(js)
@@ -176,7 +184,7 @@ class SparseLTM:
         self._diag_r = getattr(self, "_diag_r", 0) + 1
         if self._diag_r % 10 == 0:
             print(f"[ltm-diag] recalls={self._diag_r} active={len(active)} "
-                  f"scores={len(scores)} bindings={n_s}", flush=True)
+                  f"scores={n_scores} bindings={n_s}", flush=True)
         out /= float(self.k_hash)
         m = float(np.abs(out).max())
         return out / m if m > 0 else out

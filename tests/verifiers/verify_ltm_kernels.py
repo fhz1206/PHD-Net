@@ -69,7 +69,7 @@ def _best(fn, reps=5):
 
 
 def _main() -> int:
-    print("P68：M4b numba 核 —— 逐位对拍 + 计时（recall 已上线；encode 已回滚）")
+    print("P68/P70：M4b numba 核 —— 逐位对拍 + 计时（recall 路径全 numba；encode 已回滚）")
     rng = np.random.default_rng(0)
     ltm = _mk_ltm()
 
@@ -106,6 +106,34 @@ def _main() -> int:
         check(f"recall 反投影逐位一致（{n_scores} 项, 越界={with_oor}）",
               np.array_equal(out_num, out_py))
 
+    # ── 3b. P70：整条 recall 逐位一致（predict_arr + 核 vs 原 dict 路径）──
+    from phdnet.sparse_table import OnlineCSRTable
+    for int8 in (False, True):
+        tbl = OnlineCSRTable(n_neurons=1 << 20, m_out=72, lam=0.9, eta=0.01,
+                             w_max=1.0, seed=0, prune=0, growth_guidance=False,
+                             int8_store=int8)
+        r2 = np.random.default_rng(5)
+        rows = [int(x) for x in r2.choice(1 << 20, size=120, replace=False)]
+        act = [int(x) for x in r2.choice(1 << 20, size=40, replace=False)]
+        for i in rows:                      # 造出「行接近满 + 键随机」的真实状态
+            tbl._new_row(i)
+            ks = r2.choice(1 << 20, size=min(tbl.m_out - 1, 71), replace=False)
+            ks = list(ks); r2.shuffle(ks)
+            for k in ks:
+                tbl._append(i, int(k), float(r2.random()))
+        # 原路径：dict predict + Python 双循环
+        scores = tbl.predict(act)
+        ref = np.zeros(ltm.n_dim)
+        for big_i, s in scores.items():
+            for j in ltm.rev.get(big_i, ()):
+                ref[j] += s
+        # 新路径：predict_arr + numba 核
+        out = np.zeros(ltm.n_dim)
+        kk, wv = tbl.predict_arr(act)
+        bigltm_mod._recall_project(kk, wv, out, ltm._rev_indptr, ltm._rev_indices)
+        check(f"P70 recall 全链路逐位一致（int8={int8}，行满+键随机）",
+              np.array_equal(out, ref))
+
     # ── 4. 计时（服务器形态：活跃 200 维 → 千级索引；recall 2000 项）──────
     rate = np.zeros(ltm.n_dim)
     rate[rng.choice(ltm.n_dim, size=200, replace=False)] = 1.0
@@ -137,6 +165,22 @@ def _main() -> int:
     print(f"    recall(2000 scores -> {sum(len(ltm.rev.get(int(k), ())) for k in ks)} "
           f"bindings): python {a2*1e6:7.1f} us -> numba {b2*1e6:7.1f} us | "
           f"{a2/max(b2,1e-12):.2f}x")
+
+    # 5. predict_arr 计时（服务器实测形态：active=256 行 × 约 72 槽 ≈ 1.8 万元素）
+    tbl2 = OnlineCSRTable(n_neurons=1 << 20, m_out=72, lam=0.9, eta=0.01,
+                          w_max=1.0, seed=0, prune=0, growth_guidance=False)
+    r3 = np.random.default_rng(6)
+    act2 = [int(x) for x in r3.choice(1 << 20, size=256, replace=False)]
+    for i in act2:
+        tbl2._new_row(i)
+        ks2 = list(r3.choice(1 << 20, size=71, replace=False))
+        r3.shuffle(ks2)
+        for k in ks2:
+            tbl2._append(i, int(k), float(r3.random()))
+    a3 = _best(lambda: tbl2.predict(act2), 3)
+    b3 = _best(lambda: tbl2.predict_arr(act2), 3)
+    print(f"    predict(active=256 rows x 72 slots): dict {a3*1e3:7.3f} ms -> "
+          f"predict_arr {b3*1e3:7.3f} ms | {a3/max(b3,1e-12):.2f}x")
 
     n_ok = sum(1 for _, ok in CASES if ok)
     print(f"\n通过 {n_ok}/{len(CASES)}（另附计时）")

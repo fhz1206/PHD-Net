@@ -245,6 +245,38 @@ class OnlineCSRTable(SparseSynapseTable):
         self.size[i] = sz + 1
 
     # ---------- 预测（与 dict 版逐位同序累加） ----------
+    # ---------- 预测：p[k] = Σ_i w(i,k)（只遍历活跃神经元的出边） ----------
+    def predict_arr(self, active):
+        """P70：`predict` 的数组版——返回 (keys, vals)，**不做同键合并**。
+
+        `SparseLTM.recall` 用它 + `ltm_kernel._recall_project`（numba）替代
+        「dict predict + Python 双循环」：重复键在核内按「行序 → 槽位序」逐次
+        累加，浮点顺序与原 `p[k] += v` 完全一致 → **逐位相同**。
+
+        为什么这一步不用 numba 核：服务器实测 active=256 行 × 约 72 槽
+        ≈ **1.8 万元素**（P67 的 learn 场景是 64 万组合，小两个数量级），
+        Python 开销只有「每行一次切片」→ 纯 numpy gather 就够（微秒级），
+        上核的固定开销反而吃掉收益（P11/P12/P13 三次负收益的教训）。
+        """
+        ks, vs = [], []
+        keys, vals, size = self.keys, self.vals, self.size
+        for i in active:
+            idx = keys.get(i)
+            if idx is None:
+                continue
+            sz = size[i]
+            if sz <= 0:
+                continue
+            ks.append(idx[:sz])
+            vs.append(vals[i][:sz])
+        if not ks:
+            return (np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64))
+        k_arr = np.concatenate(ks)
+        v_arr = np.concatenate(vs).astype(np.float64)
+        if self.int8_store:                     # 码值 → 权重（与 `code / q` 一致）
+            v_arr /= float(self._q)
+        return k_arr, v_arr
+
     def predict(self, active: list[int]) -> dict[int, float]:
         p: dict[int, float] = {}
         int8 = self.int8_store

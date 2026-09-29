@@ -68,11 +68,12 @@ def _encode_hash_uniq(dims, idx, k_hash, n_slots):
 
 @njit(cache=True, nogil=True, fastmath=False)
 def _recall_project(big_ids, weights, out, rev_indptr, rev_indices):
-    """反投影累加：out[j] += Σ_{t: big_ids[t] 绑定了 j} weights[t]。
+    """反投影累加：out[j] += Σ_t weights[t]（对 big_ids[t] 绑定的每个维度 j）。
 
-    串行（共享输出维度 → prange 会竞态）。累加次序 = big_ids 的给定次序，
-    与 Python 版 `for big_i, s in scores.items(): for j in rev[big_i]` 完全一致。
-    越界的 big_i 直接跳过（等价原 dict `.get(big_i, ())` 返回空元组）。
+    串行（共享输出维度 → prange 会竞态）。累加次序 = `big_ids` 的给定次序；
+    重复键按出现次序逐次累加——与 Python 版
+    `for i in active: for s: p[k] += v` 的浮点累加顺序完全一致 → 逐位相同。
+    越界的 big_i 跳过，等价 `dict.get(big_i, ())` 返回空元组。
     """
     n_rev = rev_indptr.shape[0] - 1
     for t in range(big_ids.shape[0]):
