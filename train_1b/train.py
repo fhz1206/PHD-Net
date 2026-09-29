@@ -415,6 +415,7 @@ def main() -> None:
     # 旧 --data pretrain_zh 等价 --data pretrain --lang zh（保留兼容）。
     # 词表扫描不受影响（词表是训练流超集 → OOV 恒 0）。
     _lang_filter = None
+    _lang_tail: list[int] = []          # P69：语种自检（最近 8 个真实 token）
     if args.data == "pretrain_zh":
         _lang_filter = "zh"
     elif args.lang != "all":
@@ -686,6 +687,11 @@ def main() -> None:
                 # 2026-09-25 审计修复：原条件漏查 p2，OOV 落在 p2 位会 KeyError 崩溃
                 x = lm.tok.encode_composite(p1, p2)
                 tgt = lm.tok.onehot(lm.tok.stoi[t0])
+                # P69：语种自检用——保留最近 8 个真实 token（每 log_every 反查词表
+                # 拼文本片段 + CJK 占比，一眼看出 --lang 是否生效）
+                _lang_tail.append(int(lm.tok.stoi[t0]))
+                if len(_lang_tail) > 8:
+                    _lang_tail.pop(0)
                 # P26 SFT：p1（当前 token）属 prompt 段 → 只推进状态不学习。
                 # 损失由 (p1, p2) → p0 这一步产生，故用 **p0** 的可训练标记。
                 d = lm.net.step(x, target=tgt, learn=trainable)
@@ -731,6 +737,20 @@ def main() -> None:
                 # P41：系统/设备遥测（CPU/RAM/NPU/HBM；IPC 需外部 perf）
                 try:
                     print("      " + _tel.fmt(_tel.sample()), flush=True)
+                except Exception:                       # noqa: BLE001
+                    pass
+                # P69：语种自检——用**最近若干步的真实 target token** 反查词表拼出
+                # 文本片段 + CJK 占比。`--lang zh/en` 是否真生效，此前只能靠肉眼看
+                # PPL 猜（fhz 2026-09-29：「--lang zh 后日志还是英文」——实测那次
+                # argv 里根本没带 --lang）。
+                try:
+                    if _lang_tail:
+                        txt = "".join(str(tokens[t]) for t in _lang_tail
+                                      if 0 <= int(t) < len(tokens))
+                        cjk = (sum(1 for ch in txt if "\u4e00" <= ch <= "\u9fff")
+                               / max(1, len(txt)))
+                        print(f"      [sample lang={_lang_filter or 'all'}] "
+                              f"CJK={cjk:.0%} | {txt[:40]!r}", flush=True)
                 except Exception:                       # noqa: BLE001
                     pass
             if args.ckpt_every and (i - done) and (i - done) % args.ckpt_every == 0:
