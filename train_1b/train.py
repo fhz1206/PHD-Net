@@ -624,6 +624,21 @@ def main() -> None:
     i = done                       # 全局训练步（= 已处理的 token 流位置）
     last_mile = done // args.context_milestone if args.context_milestone else 0
 
+    # ── P64：GC 调优（长跑训练的标准做法）──────────────────────────────
+    # 现象（fhz 服务器 2026-09-29）：ms/tok 从 20 单调升到 100（token 1500 →
+    # 10000），而读出耗时反而下降 → 非读出段随步数**超线性**恶化。
+    # 最可能机制：Python GC —— 大空间表在线 CSR 每次生长都新建 dict/数组，
+    # 对象数线性增长 → gen2 扫描频率与耗时随之上升。
+    # 措施：①freeze 掉导入期的常量对象（模型/配置/词表句柄，之后不再参与扫描）；
+    # ②大幅提高 gen0/gen1 阈值（长跑循环几乎不产生真循环引用，回收收益低、
+    #    扫描成本高）。遥测新增 `GC <对象数>M/gen2 <次数>` 可验证效果。
+    import gc as _gc
+    _gc.collect()
+    _gc.freeze()
+    _gc.set_threshold(50_000, 200, 200)
+    print(f"[gc] freeze() + threshold(50000, 200, 200); "
+          f"tracked objects = {len(_gc.get_objects()):,}", flush=True)
+
     for ep in range(args.epochs):
         if _STOP["flag"] or (args.tokens and i - done >= args.tokens):
             break

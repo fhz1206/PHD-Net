@@ -110,7 +110,7 @@ class Telemetry:
                      "ram_pct": None, "ram_proc_gb": None,
                      "acc_util": None, "hbm_alloc_gb": None,
                      "hbm_total_gb": None, "ipc": None,
-                     "ctx_switches": None}
+                     "ctx_switches": None, "gc_objs": None, "gc_gen2": None}
         # ── CPU / RAM ──
         if psutil:
             try:
@@ -139,6 +139,16 @@ class Telemetry:
             out["cpu_proc_cores"] = (ptime - self._last_ptime) / dw
         self._last_wall = wall
         self._last_ptime = ptime
+        # ── GC 指标（P64）：大空间表长跑时对象数线性增长（CSR 行 dict/数组、
+        #    迹字典…），gen2 扫描频率随之上升 → ms/tok 缓慢恶化。这是**假设**，
+        #    指标化后才能证实/证伪。
+        try:
+            import gc
+            out["gc_objs"] = len(gc.get_objects())
+            st = gc.get_stats()
+            out["gc_gen2"] = int(st[2]["collections"]) if len(st) > 2 else None
+        except Exception:                                # noqa: BLE001
+            pass
         # ── 加速器 ──
         if torch_available() and self.device:
             dev = self.device.lower()
@@ -222,6 +232,8 @@ class Telemetry:
         ]
         if d.get("ctx_switches") is not None:
             parts.append(f"CS/s {d['ctx_switches'] / max(1e-9, 1):.0f}")
+        if d.get("gc_objs") is not None:
+            parts.append(f"GC {d['gc_objs']/1e6:.1f}M/gen2 {d.get('gc_gen2')}")
         return " | " + "  ".join(parts)
 
 
