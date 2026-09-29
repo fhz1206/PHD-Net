@@ -1,10 +1,10 @@
 # PHD-Net：预测-赫布-双记忆网络
 
-> 📌 **现状快照（2026-09-27 整理）**：本文已按「删除过时与历史消息、只保留现状」的原则整理；引用已删除语料/旧基线的历史段落以现状结论为准，当前基线与口径见《性能评估与迭代方案（现状版)》。
+> 📌 **现状快照（2026-09-27 整理；2026-09-29 硬件后端定稿复核）**：本文已按「删除过时与历史消息、只保留现状」的原则整理；引用已删除语料/旧基线的历史段落以现状结论为准，当前基线与口径见《性能评估与迭代方案（现状版)》。
 ### Predictive coding × Hebbian plasticity × Dual-memory Network
 
 > 一个完全不依赖自注意力（Self-Attention）的类脑模型架构——总设计文档（基础架构 M1–M6 ＋ 认知层 M7–M12，外扩 M13 上下文漂移情景记忆）。
-> 版本：v0.0.0 ｜ 日期：2026-09-16（基础架构）／ 2026-09-18（并入认知层）／ 2026-09-19（脑同构 5 项统一、工程状态定稿）／ 2026-09-20（M9 五轨道收官与语料更换后的终态校订）
+> 版本：v0.0.0 ｜ 日期：2026-09-16（基础架构）／ 2026-09-18（并入认知层）／ 2026-09-19（脑同构 5 项统一、工程状态定稿）／ 2026-09-20（M9 五轨道收官与语料更换后的终态校订）／ 2026-09-29（硬件后端定稿：生产加速读出 AccelReadout（P28）、读出基准修正（P29）、旧 torch 栈删除（P30））
 > 配套实现：`phdnet/`（Python 3.14）｜ 配套文档：《性能评估与迭代方案》《竞争力与脑同构性评估》《对标 Transformer 优化路线图》
 > 版本治理：统一使用 **v0.0.0**，分层表述用「基础架构 M1–M6 / 认知层 M7–M12」；是否升 v0.1.0 需 fhz 明确确认（当前保持 v0.0.0）。
 >
@@ -288,25 +288,52 @@ Hopfield 检索用 sign 吸引子保证收敛；双速率分离避免快学习�
 
 ## 11. 硬件后端适配（昇腾 NPU / ROCm / CUDA / DirectML / CPU）
 
-同一份算子代码覆盖所有后端：torch 后端只切换 device/dtype，语义与 numpy 版一致
-（predict 用 `index_add_` 做 scatter；学习为「先更新 pre 迹 → 用历史 post 迹算 LTD → 再更新 post 迹」）。
+同一份算子代码覆盖所有后端：torch 路径只切换 device/dtype，语义与 numpy 版一致
+（生产加速读出 `AccelReadout` 的前向为 GEMV、更新为 rank-1 AXPY；对拍判据见下方等价性门槛）。
 
-| 层次 | 默认实现 | 可切换实现 |
+| 层次 | 默认实现 | 加速实现（P30 后现状，2026-09-29） |
 |---|---|---|
-| M3 关联核（热点） | numpy + numba（CPU，加速 5.8–51.5×） | `TorchSTDPCore`（cpu / cuda / hip / npu） |
-| M1/M2/M4a/M4b/M6 | numpy | —（未移植） |
+| M6 读出（1B 预设占比 ~89%） | numpy / numba（CPU） | **`phdnet/backends/accel_readout.py::AccelReadout`（生产加速读出，torch）** |
+| M3 关联核（热点） | numpy + numba（CPU，加速 5.8–51.5×） | —（torch 化 STDP 核已随 P30 删除，见下方注记） |
+| M1/M2/M4a/M4b | numpy | — |
 | 1B 大容量印迹表 | dict 邻接表（CPU） | —（待迁移设备端稀疏张量） |
 
-- 探测与选择：`phdnet/device.py`（`probe()` / `select_backend()` / `use_torch_backend()` + 各生态安装指引）；
-- 体检脚本：`tools/backend_probe.py`；
-- 开关：`config.backend`（`auto` / `numpy` / `torch` / `npu` / `rocm` / `cuda` / `cpu`），
-  默认在有加速器时才启用 torch 后端，**无加速器时保持 numpy 路径逐位不变**；
-- 启用门槛：非 numpy 后端须通过 `selftest_torch()` 与 numpy 参考的**逐元素等价性**检验
-  （沿用 numba 自检 bug 的教训：不能只判「权重有没有增长」）。
+**生产加速读出（AccelReadout，P28）**：torch 实现，W 常驻设备；
+`addmm_` 做 rank-1 AXPY 更新（不物化与 W 同尺寸的临时张量）、(h, y) 设备侧缓存、
+硬同步 3→1——每步流量 4,334 → 2,600 MiB（**−40%** 触底），数值与 numpy 路径**逐位相同**。
+
+- 设备解析（torch 路径）：`phdnet/backends/torch_lm.py::resolve_device`
+  （**auto 择优：昇腾 NPU → ROCm → CUDA → DirectML → CPU**；显式设备不可用时诚实报错，
+  仅 `allow_fallback=True` 才在 RuntimeWarning 后回退 CPU）；
+- 探测与选择（numpy 路径）：`phdnet/device.py`（`probe()` / `select_backend()` / `use_torch_backend()` + 各生态安装指引）；
+- 设备探针与读出基准：`phdnet/backends/torch_backend.py` 仅存
+  `probe_devices`（统一加速器探针：昇腾 NPU / ROCm / CUDA / DirectML / CPU）与
+  `bench_readout`（P29 修正：每个计时区间前后设备同步 + `dtype` 参数 + 报告等效带宽 GB/s；
+  默认测生产对象 `AccelReadout`，默认 V=73,958）；
+- 多卡并行：`phdnet/backends/multi_device.py`——`resolve_devices`（auto 解析全部同型号设备）/
+  `plan_parallel`（单卡零变更，多卡读出列并行）/ `MultiDeviceReadout`（按词表行切分，每步仅两次小向量通信）/
+  `capability_report`（能力矩阵）。诚实定位：这是**读出列并行的模型并行**，不是 DDP/DataParallel
+  （逐 token 事件驱动、无 batch 与反向图，标准数据并行没有梯度可分）；
+- 体检脚本：`tools/backend_probe.py`；后端检查：`tests/checks_backend.py`
+  （P30 后精简为设备探测，torch 栈用例随栈删除）；
+- 等价性门槛：非 numpy 后端启用前须通过对拍验证
+  （`tests/verifiers/verify_accel_readout.py`，容差判据，跨设备不宣称逐位；
+  旧 `selftest_torch()` 已随 P30 删除——沿用 numba 自检 bug 的教训：不能只判「权重有没有增长」）；
+- 开关：`config.backend`（`auto` / `numpy` / `torch` / `npu` / `rocm` / `cuda` / `cpu`）+
+  `PHDNetConfig.accel_readout`（读出加速，默认 `auto`）；
 - **静默降级已修复（A1，2026-09-19）**：显式请求本机不可用的加速器（如 `backend="npu"`/`"rocm"` 而无对应硬件）
   不再静默在 CPU 上以 torch 训练——`use_torch_backend` 返回 `False` 并发出 `RuntimeWarning`、
-  `select_backend` 返回 `kind="unavailable"`，`model` 构造后断言 `stdp.device == be.device`；
-  默认 `backend="auto"` 仍走 numpy，行为逐位不变（见下方工程状态）。
+  `select_backend` 返回 `kind="unavailable"`；
+  默认 `backend="auto"` 无加速器时仍走 numpy 路径，行为逐位不变。
+
+> **P30（2026-09-29）：旧 torch 栈已全部删除（约 1,400 行）**——
+> `torch_lm.TorchPHDNet` / `TorchWordLM` / `TorchSparsePC` / `TorchLTM` /
+> `TorchReadoutDense` / `TorchSparseEncoder` / `_ProdSTDPCore`、
+> `torch_backend.TorchReadout` / `TorchSTDPCore` / `selftest_torch`、
+> `tools/train_torch_lm.py`、`tests/verifiers/verify_torch_lm.py`、
+> 以及旧 shim `phdnet/torch_backend.py`。理由：① 权重与生产 npz 检查点不通用
+> （不同实现、不同初始化顺序）；② 缺 `big_ltm` 等 7 项机制，整体迁移会丢机制；
+> ③ 从未进入生产——加速需求已由 `AccelReadout`（只迁移读出、不动 numba 主循环）单独覆盖。
 
 诚实边界：昇腾 NPU 与 ROCm 路径目前**仅完成代码适配与接口探测**——本机为
 Windows + 无 NPU/AMD GPU（torch 2.13.0+cpu），需在具备硬件的环境运行
@@ -354,8 +381,12 @@ AMD GPU 建议 DirectML 路径。
 | M8 架构强化验收 | `tests/demo_strength.py` | 稳态缩放 / 读出退火 / 错误触发检索 |
 | M13 上下文漂移情景记忆 | `phdnet/context_memory.py` | `ContextMemory`（漂移/印迹/保持槽/模式分离） |
 | M13 验收 | `tests/demo_copy.py` | 延迟复制 n=4/8/16（含模式分离与遗忘扫描） |
-| 硬件后端适配 | `phdnet/device.py` | `probe()` / `select_backend()` / `use_torch_backend()` |
-| 硬件后端算子 | `phdnet/torch_backend.py` | `TorchSTDPCore`（cpu/cuda/hip/npu）+ `selftest_torch()` |
+| 硬件后端适配（numpy 路径） | `phdnet/device.py` | `probe()` / `select_backend()` / `use_torch_backend()` |
+| 生产加速读出 | `phdnet/backends/accel_readout.py` | `AccelReadout`（torch；`addmm_` rank-1 AXPY + 设备侧缓存） |
+| 设备解析（torch 路径） | `phdnet/backends/torch_lm.py` | `resolve_device`（auto：昇腾→ROCm→CUDA→DirectML→CPU） |
+| 设备探针与读出基准 | `phdnet/backends/torch_backend.py` | `probe_devices` / `bench_readout`（P29 修正） |
+| 多卡并行 | `phdnet/backends/multi_device.py` | `resolve_devices` / `plan_parallel` / `MultiDeviceReadout` / `capability_report` |
+| 后端检查 | `tests/checks_backend.py` | 设备探测（torch 栈用例已随 P30 删除） |
 | 后端体检 | `tools/backend_probe.py` | 探测昇腾/ROCm/CUDA/DirectML + 等价性自检 |
 | 回归总入口 | `tests/run_tests.py` | fast（默认）/ `--full` 分层回归 |
 | 演示实验 | `tests/demo_phdnet.py` | 序列预测 / 模式补全 / 少样本关联 |
@@ -593,7 +624,7 @@ numpy / torch（含 CUDA·NPU·ROCm 设备张量）转 numpy 再统计或存档�
 动机：昇腾机器（CANN 8.5 aarch64 + torch_npu）实测 `np.asarray(npu_tensor)`
 直接抛错，会让参数统计与检查点保存双双失败。
 
-## 附：部件 × 执行后端总览（P22，2026-09-28）
+## 附：部件 × 执行后端总览（P22，2026-09-28；P30 复核 2026-09-29）
 
 | 部件 | 执行后端 | 并行方式 | 备注 |
 |---|---|---|---|
@@ -601,10 +632,10 @@ numpy / torch（含 CUDA·NPU·ROCm 设备张量）转 numpy 再统计或存档�
 | 词表全量扫描（锚点链） | numba nogil 核 | `ThreadPoolExecutor`（组间，零 pickle） | 小词表 CSR 二分 / 大词表边哈希自适应 |
 | 语料解码（parquet） | pyarrow（释放 GIL） | 单进程内多线程（默认 1 进程） | 多进程只增内存，不增吞吐 |
 | 分词（训练循环内） | 纯 Python | — | 占端到端 ~0.0%，不优化 |
-| 读出（M6，占 1B 预设 ~89%） | **auto**：torch 设备（cuda/cann-npu/rocm/dml）→ 否则 numba CPU | 单设备（W 常驻设备） | `PHDNetConfig.accel_readout`，W 巨大且逐 token 只传 h |
-| PC 栈 / STDP / LTM | numba（事件驱动稀疏 + 在线 CSR） | 单核（内含 prange 融合核） | torch 栈缺 `big_ltm` 等 7 项机制，迁移会**丢机制** |
+| 读出（M6，占 1B 预设 ~89%） | **auto**：`AccelReadout`（torch 设备：昇腾 NPU/ROCm/CUDA/DirectML）→ 否则 numba CPU | 单设备（W 常驻设备）；多卡为读出列并行（`multi_device.MultiDeviceReadout`） | `PHDNetConfig.accel_readout`，W 巨大且逐 token 只传 h；P28：`addmm_` rank-1 AXPY + 设备侧 (h,y) 缓存 + 硬同步 3→1，流量 4,334→2,600 MiB/步（−40%），数值逐位相同 |
+| PC 栈 / STDP / LTM | numba（事件驱动稀疏 + 在线 CSR） | 单核（内含 prange 融合核） | 旧 torch 栈缺 `big_ltm` 等 7 项机制，已于 P30（2026-09-29）整体删除，不再有迁移分叉 |
 
 **为什么是这个组合**：numba 只能编译到 CPU 机器码（物理限制），所以「能上设备的部件」
 必须用 torch 写。当前只有读出满足（纯矩阵、W 大、每步通信 ~12 KB）。其余部件要么是
 变长字符串（分词/词表扫描，设备不划算且占比极低），要么是事件驱动稀疏结构
-（迁移会丢机制）——这是当前的诚实边界，不是未做清单。
+（旧 torch 整栈迁移会丢机制，该栈已于 P30 删除）——这是当前的诚实边界，不是未做清单。

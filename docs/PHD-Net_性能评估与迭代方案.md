@@ -3,7 +3,7 @@
 > 评估对象：`phdnet/` 包（v0.0.0）+ `train_1b/`（1B 档流式训练管线）
 > 本文为**现状快照**（2026-09-27 整理）：历史迭代过程（P1–P7、O1–O7、历史基线漂移、
 > 已删除语料的记录）不再保留，只保留当前成立的结论、当前基线与当前开放项。
-> 历史细节见 git 历史；回归门槛：`tests/run_tests.py` fast **11/11**。
+> 历史细节见 git 历史；回归门槛：`tests/run_tests.py` fast **9/9**。
 > 配套：《架构设计》《对标 Transformer 优化路线图》《竞争力与脑同构性评估》《硬件后端适配报告》
 
 ---
@@ -52,7 +52,8 @@ fp8 e4m3fn / fp4 e2m1 + 逐张量缩放）；softmax/NLL 保持 fp64 主回路�
 - 低精度 PPL 反而略优（fp8 −1.7%）＝量化噪声的正则化效应（本项目口径下实测）；
 - **CPU 速度边界（诚实）**：量化更新核为计算受限（重量化位运算 > 带宽节省），
   fp32 更新仍最快（13.3 ms vs fp16 226 ms）；低精度的真实收益在**存储压缩（2–8×）**
-  与 **GPU 原生张量核**（`TorchReadout`，见《硬件后端适配报告》）；
+  与 **GPU/加速器原生张量核**（`AccelReadout`，见《硬件后端适配报告》；旧 `TorchReadout`
+  已随旧 torch 栈删除，P30）；
 - fp4 劣化 +5.9%：e2m1 分辨率粗，当前逐张量缩放不足，块缩放（MX）立项候选。
 
 ## 四、1B 训练管线性能（train_1b）
@@ -76,10 +77,11 @@ numba 不可用时自动回退进程池（逐位一致）。P7 融合读出核�
 | 组大小 | 缺省 32M → **1M 字符** | 32M 组时并行度塌缩（组数 ≪ worker 数），且每组数百万 token 的字符串 pickle 成单点 |
 | 数据加载（P16 收敛） | **预取默认 1 进程**（满核解码），`--prefetch-workers` 可调 | 解码在 pyarrow 内多线程且释放 GIL，单进程即吃满核；多进程只增内存（每进程 ~100–200 MB）与调度。fhz 2026-09-28 定调「默认一个进程」 |
 | 在途数据量（P25） | 预取队列深度 64 → **8192**，另加 `--prefetch-batch` | ⚠ 深度受**按文件序归并**约束：单生产者时囤积≈0，depth 不是主杠杆；真正有效的是 `--prefetch-workers`（多生产者）与 `--prefetch-batch`（大 IPC 批次） |
-| SFT（P26） | `--assistant-marker` 回复掩码 + `--init-from` 两阶段 | 此前 SFT 语料被当普通语料训（全 token 计损失）；现只对助手回复计损失（多轮实测 ~50% 步），prompt 段仅推进状态 |
+| SFT（P26） | `--assistant-marker` 回复掩码 + `--init-from` 两阶段 | 此前 SFT 语料被当普通语料训（全 token 计损失）；现只对助手回复计损失（多轮实测 ~50% 步，此前 ~0.2%），prompt 段仅推进状态；双标记状态机零滞后 |
+| RL（P27） | REINFORCE，零新增算子（η ← rl_lr × advantage） | 玩具任务奖励 0.4 → 1.6 验证学习有效；无 value 网络（诚实边界） |
 | 词表来源（P17） | ① `--resume` 用检查点**自包含**词表 ② `--vocab-file` 外部词表 ③ head/full 扫描 | ① ② **完全跳过扫描**（旧实现 resume 也会白扫一遍 full 词表，几十分钟） |
 | 词表快照（P17/P18） | 词表一确定即落盘 `outputs/models/vocab_*.json`（**唯一权威**） | 崩溃不丢；含跨行 token（`words` + `seg_vocab` + `max_len` + sha1）；`.txt` 镜像改为可选（`txt_mirror=True`，**不可回读**）；推理侧自动交叉校验 |
-| 词涌现（P18→P22） | numba **nogil**（hash 去重 + 边回比 + 解析式熵）+ 层间线程池 | 4.7M 字符生产规模：63.1s → **9.0s（7.00×）**，逐位一致（verify A 例 24/24）。**核内 prange 已回退**（P22）：实测 1→6 线程仅 1.16×，瓶颈是内存流量（两张 ~64 MB 哈希表远超 L3） |
+| 词涌现（P18→P22） | numba **nogil**（hash 去重 + 边回比 + 解析式熵）+ 层间线程池 | 4.7M 字符生产规模：63.1s → **9.0s（7.00×）**，逐位一致（verify A 例 24/24）。**核内 prange 已回退**（P22）：实测 1→6 线程仅 1.16×，瓶颈是内存流量（两张 ~64 MB 哈希表远超 L3）；局部词表复用尝试破坏正确性已放弃（教训：性能优化先过对拍） |
 | 加速器可用性（P18） | 能力矩阵显式声明 | **numba 只能编译到 CPU**（物理限制），故 NPU/CUDA 机器上生产入口仍走 CPU；加速器需走 torch 栈（权重不通用） |
 | 读出计时（P20） | 训练日志 `[计时] 读出 X ms/tok（后端@设备，占 Y%）` | 直接看出加速是否生效、耗时是否转移到 PC 栈；配 `tools/accel_doctor.py` 做设备侧一次性诊断 |
 | 设备张量兼容（P17） | `to_numpy()` / `_nelem()` 统一转换 | 昇腾机器实测：`np.asarray(npu:0 tensor)` 抛 "can't convert npu:0 device type tensor" → 参数统计与检查点保存双崩，现已兼容 torch 设备张量 |
@@ -110,8 +112,13 @@ numba 不可用时自动回退进程池（逐位一致）。P7 融合读出核�
 ## 六、硬件后端适配（P10，详见《硬件后端适配报告》）
 
 - `probe_devices()`：CUDA / ROCm / CANN·NPU / CPU 统一探针（诚实降级 + 告警）；
-- `TorchReadout`：读出热路径 torch 化（fp32/fp16/bf16 原生；fp8 需 CUDA ≥ 8.9；fp4 走 CPU 码本）；
-- `TorchSTDPCore` + `selftest_torch` 等价自检（沿用）；
+- ~~`TorchReadout` / `TorchSTDPCore` + `selftest_torch`~~：已随旧 torch 栈删除（P30）；
+- **NPU 读出优化（P28）**：`torch.outer` 物化 867 MiB 临时张量是带宽杀手 → `addmm_` AXPY
+  原地融合；流量 4,334 → 2,600 MiB/步（−40%，触底）；CPU 墙钟 2.07×；数值逐位相同；
+- **基准工具三 bug（P29）**：异步设备无 synchronize、dtype 从未传入、测旧对象 →
+  修复前所有加速器数字不可信；现报等效带宽 GB/s（`tools/bench_accel.py`）；
+- **旧 torch 栈删除（P30）**：~1,400 行；torch 栈 10 个 fast 用例与 `verify_torch_lm` 随栈删除；
+  保留 `resolve_device` / `probe_devices` / `bench_readout` / `multi_device` / `AccelReadout`。
 - 本机实测：CPU 参考路径 fp32 40.9 ms/token（读出规模 9219×3072）；三平台真机回归待硬件。
 - **多卡自动适配（P14）**：`phdnet/backends/multi_device.py` —— `resolve_devices("auto")`
   取全部同型号设备、读出按词表行**列并行**（逐位等价已验，通信 ~74 KB/步）、
@@ -127,13 +134,13 @@ numba 不可用时自动回退进程池（逐位一致）。P7 融合读出核�
 | ~~P2 `eta_readout` 切换~~ | **✅ 已拍板落地（0.15）** | 新锚点 90.2480 / 73.1166（`tools/rebaseline.py`） |
 | fp4 块缩放（MX） | 立项候选 | +5.9% 劣化 → 逐块 scale 可解 |
 | 1M context 长程验证 | 待长跑 | big_ltm 检索通路价值验证 |
-| LM 全栈 torch 化 | 立项 | 读出已 torch 化；CSR/大空间表映射为独立工程 |
+| ~~LM 全栈 torch 化~~ | **✅ 已随旧 torch 栈删除（P30）** | 加速读出走 `AccelReadout`；CSR/大空间表映射为独立工程 |
 | CI 真机 runner | 待硬件 | GitHub GPU runner / 自建 NPU 节点 |
 
 ## 八、复现入口
 
 ```bash
-python tests/run_tests.py fast                 # 零回归门槛（11 项）
+python tests/run_tests.py fast                 # 零回归门槛（9 项）
 python tools/rebaseline.py                     # 当前基线复测（90.2480 / 73.1166，eta=0.15）
 python tools/audit_precision.py                # 精度体系验证（L1 逐位 / L2 带宽 / L3 PPL）
 python tools/audit_prof_1b.py                  # 1B 生产配置模块级剖析

@@ -149,7 +149,7 @@ def _sync_device(device: str) -> None:
         pass
 
 
-def bench_readout(device: str = "auto", V: int = 9219, H: int = 3072,
+def bench_readout(device: str = "auto", V: int = 73958, H: int = 3072,
                   steps: int = 50, dtype: str = "fp32",
                   use_accel: bool = True) -> dict:
     """读出热路径基准（前向 + 更新），返回 ms/token **与等效带宽**。

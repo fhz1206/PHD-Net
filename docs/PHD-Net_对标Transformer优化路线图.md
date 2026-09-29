@@ -1,6 +1,7 @@
 # PHD-Net 对标 Transformer 优化路线图
 
 > 📌 **现状快照（2026-09-27 整理）**：本文已按「删除过时与历史消息、只保留现状」的原则整理；引用已删除语料/旧基线的历史段落以现状结论为准，当前基线与口径见《性能评估与迭代方案（现状版)》。
+> **2026-09-29 更新（P30）**：旧 torch 栈已全部删除，生产路径 = numba CPU 主循环 + NPU/CUDA 加速读出（`AccelReadout`）；硬件口径以 §九 为准。
 
 > 架构版本：v0.0.0 ｜ 定稿：2026-09-20
 > 配套：《架构设计》《性能评估与迭代方案》《竞争力与脑同构性评估》
@@ -132,7 +133,7 @@ T3.2（**+3.2%，符号翻转**）、T2.2（**+18.4%**）、T4.3（+4.2%）、�
 > 是语料噪声而非机制收益。T3.4 与 ② 同样作用于读出/记忆通路且互不叠加，
 > 应被理解为**同一条通路的两种微实现**。
 > 真正稳定的结论不是"开某个单点开关"，而是"**收益只可能来自记忆通路**"。
-**铁律**：所有新行为以 config 开关承载且**默认关闭**，保证默认路径逐位不变；`tests/run_tests.py` fast 11/11 是零回归证据。
+**铁律**：所有新行为以 config 开关承载且**默认关闭**，保证默认路径逐位不变；`tests/run_tests.py` fast 9/9 是零回归证据。
 
 ---
 
@@ -215,24 +216,28 @@ T3.2（**+3.2%，符号翻转**）、T2.2（**+18.4%**）、T4.3（+4.2%）、�
 
 | 后端 | 状态 | 说明 |
 |---|---|---|
-| numpy / CPU | ✅ 默认 | 无加速器时走 numpy，零回归 |
-| torch (cpu/cuda/hip/npu) | ✅ 同一份算子 | `phdnet/torch_backend.py`；启用门槛是与 numpy **逐元素等价**（`selftest_torch`） |
-| numba | ✅ 启用 | STDP 核 51.5×；numba 0.67.0 已是 PyPI 最新 |
-| 本地事实 | Windows 11 + torch 2.13.0+cpu | **无 CUDA / ROCm / MPS / torch_npu / DirectML** |
-| 昇腾 NPU / ROCm | 代码就绪，未实测 | 昇腾与 ROCm 为"待硬件验证"，不可声称已实测；ROCm 官方仅支持 Linux，Windows 上 AMD GPU 走 DirectML |
-| 未移植 | M1/M2/M4/M6 仍 numpy | torch 后端不支持 T4.1 自适应 |
-| 显式错配加速器 | 告警 + numpy 回退 | 不再静默落到 torch-CPU |
+| numba / CPU 主循环 | ✅ 默认（生产） | PC 栈 / STDP / LTM / 分词全机制在 numba CPU 主循环（机制完整，1M context 状态不重置）；无加速器时 `--accel auto` 回落此路径，**默认路径逐位不变** |
+| NPU/CUDA 加速读出 | ✅ 已实测 | M6 `AccelReadout`（`phdnet/backends/accel_readout.py`，读出 W 常驻设备）：NPU 迁移后设备流量 **−40%**（4,334 → 2,600 MiB/步，正好理论下限）；诚实口径：GEMV 受带宽限制，**~50% 利用率是结构性上限** |
+| numba 核加速 | ✅ 启用 | STDP 核 51.5×；词涌现构建 4.7M 字符 63.1s → 9.0s（7.00×，逐位一致）；词表扫描 33.4 亿 tokens / 520s（191 核） |
+| fp16 / bf16 | △ 待实测 | 三档精度（fp32 / fp16 / bf16）读出基准入口 `tools/bench_accel.py`（P29 修正版：含设备同步、测生产对象）；**fp16 有机制性代价，待真机实测** |
+| 多卡 | ✅ 结构就绪 | 读出列并行 `--devices auto`（`multi_device.py`）；分片与单设备逐位一致（`verify_multi_device` 24 例），LTM 分片真机待验 |
+| torch 旧栈 | ❌ 已删除（P30，2026-09-29） | TorchPCStack / TorchWordLM / TorchReadout / TorchSTDPCore / selftest_torch / train_torch_lm / verify_torch_lm 约 1,400 行全部移除——权重不通用、缺 7 项机制、从未进生产；保留 resolve_device / probe_devices / bench_readout / multi_device / AccelReadout |
+| 显式错配加速器 | 告警 + numba CPU 回落 | `--accel auto` 自动上 cuda / cann(npu) / rocm / dml，不兼容回落并记原因；诊断入口 `tools/accel_doctor.py` |
 
 ---
 
 ## 十、复现入口
 
 ```
-python tests/run_tests.py            # fast，11 项 ≈ 40s（零回归门槛）
+python tests/run_tests.py            # fast，9 项 ≈ 1 min（零回归门槛）
 python tests/run_tests.py --full     # 全量，含 demo_m1…m4 / demo_m9 / eval_suite（≈ 35 min）
-python tests/demo_m9.py              # 五轨道全部配置的对比实验
-python tests/demo_corpus.py          # 外部语料（中文维基）上的词级 LM 验收
-python tools/backend_probe.py        # 硬件后端体检
+python tests/verifiers/verify_vocab_parallel.py   # 词表并行构建逐位一致（24/24）
+python tests/verifiers/verify_accel_readout.py    # NPU/CUDA 读出加速对拍
+python tests/verifiers/verify_multi_device.py     # 读出列并行分片（24 例，逐位一致）
+python tests/verifiers/verify_rl.py               # REINFORCE 训练回路
+python tests/verifiers/verify_ckpt_roundtrip.py   # 检查点落盘/恢复 round-trip
+python tools/accel_doctor.py         # 加速后端一次性诊断（环境矩阵 / 试分配 / 带宽）
+python tools/bench_accel.py          # 读出基准（fp32/fp16/bf16 三档 + 等效带宽 GB/s）
 ```
 
 关键证据文件：`outputs/test/demo_m9.log`、`outputs/test/demo_m9_result.json`、`outputs/test/m9_combo.log`、

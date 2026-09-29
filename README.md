@@ -6,8 +6,11 @@
 学习规则全部局部化（无反向传播），计算事件驱动稀疏（只触碰活跃通路）。
 
 主干唯一实现为**结构性稀疏 CSR**（`SparsePCStack` + numba 核，连接率 12.5% 起步，
-稠密栈已移除）；读出支持 fp32 / fp16 / bf16 / fp8（fp64 停止支持，fp4 已禁用）；
-容量层支持 1B 突触印迹表（`big_ltm`）。torch 全栈（M1–M6）覆盖 CPU / CUDA / ROCm / 昇腾 NPU。
+稠密栈已移除）；读出支持 fp32 / fp16 / bf16（fp64 已停用，fp8 已移除）；
+容量层支持 1B 突触印迹表（`big_ltm`）。生产路径为 numba CPU 主循环
+（PC 栈 / STDP / 双记忆 / 分词，机制齐全，支持 1M 上下文状态不重置）+
+NPU/CUDA 加速读出（M6，`phdnet/backends/accel_readout.py::AccelReadout`）；
+torch 旧栈（TorchPCStack/TorchWordLM/TorchReadout/TorchSTDPCore）已于 2026-09-29 全部删除。
 
 ## 目录结构
 
@@ -27,37 +30,47 @@ train/
 │   ├── generate.py             M11 生成解码器（WM 锚定 + 温度采样）
 │   ├── tokenizer.py            字符 → SDR 确定性哈希（全项目哈希基础设施）
 │   ├── word_encoder.py         M7 词涌现（无词典分词）+ 词级 SDR + 上下文绑定
+│                               （向量化后 4.7M 字符 63.1s → 9.0s，7.00×，逐位一致）
 │   ├── word_lm.py              词级语言模型（PHDWordLM，评测主路径）
 │   ├── ngram.py                n-gram 基线族（字符级 / 词级）
 │   ├── lm.py                   字符级语言模型（PHDNetLM）
 │   ├── sparse_table.py         容量层本体（1B 突触印迹表 + 在线可写 CSR）
 │   ├── bigltm.py               容量层适配器（SparseLTM）
 │   ├── context_memory.py       M13 上下文漂移情景记忆（TCM/CMR 式长程复制）
-│   ├── device.py               硬件后端探测（昇腾 NPU / ROCm / CUDA / DirectML / CPU）
-│   └── backends/               torch 栈（torch_backend 基础层 + torch_lm 全栈，见其 README）
+│   ├── device.py               硬件后端探测（cuda / cann·昇腾 NPU / rocm / dml / cpu）
+│   └── backends/               硬件后端子包（accel_readout 读出加速 AccelReadout /
+│                               multi_device 多卡列并行 / torch_backend 设备探针+基准 /
+│                               torch_lm 仅存 resolve_device）
 ├── train_1b/                   1B 生产训练子项目（唯一训练入口）
-│   ├── train.py                生产训练（多数据源 / 断点续训 / 多进程加载 / --readout-dtype）
+│   ├── train.py                生产训练（多数据源 / 断点续训 / 多进程加载 / --readout-dtype /
+│   │                           --accel auto / --devices auto 多卡读出列并行；
+│   │                           词表四来源：resume 自包含 / 快照自动复用 / --vocab-file / head-full 扫描，
+│   │                           词表快照自动落盘 outputs/models/）
 │   ├── config_1b.py            1B 预设（big_ltm 2^24×60 + 稀疏 CSR/STDP 主干，总参 ≥1B）
 │   ├── ckpt_1b.py              完整可续训检查点（含 CSR 快照 / Welford / STDP 迹）
-│   ├── infer.py                推理与对话（--chat；检查点自包含加载）
+│   ├── infer.py                推理与对话（--chat；检查点自包含加载；词表快照自动交叉校验）
 │   ├── corpus_stream.py        流式语料（多进程 PrefetchChars + zh 过滤 + mix 轮转）
-│   └── vocab_parallel.py       词表 / 分词多核构建（与串行逐位一致）
+│   └── vocab_parallel.py       词表 / 分词多核构建（与串行逐位一致；
+│                               33.4 亿 tokens / 520s @ 191 核）
 ├── datasets/                   语料（**自身是独立仓库** → atomgit.com/fhz1206/Mixture-General-Mini）
 │   ├── sft/                    SFT 分片 parquet（≤100 MiB；331.9 万条）
 │   ├── pretrain/               预训练分片 parquet（≤100 MiB；3,906 万条）
 │   └── raw/                    原始件归档（不入库；读取统一走 phdnet/corpus.py）
 ├── eval_corpus/                冻结评测基准（internal_corpus.txt 23,504 字符 + OOD 探针；不入训练集）
 ├── tests/                      回归与验收
-│   ├── run_tests.py            分层回归入口（fast 19 项 / --full）
+│   ├── run_tests.py            分层回归入口（fast 9 项 / --full）
 │   ├── checks_core.py          核心行为检查
-│   ├── checks_backend.py       硬件后端检查（含 torch 栈等价性）
-│   ├── verifiers/              逐位对拍验证脚本（分词 / 词表 / CSR / 读出融合核 / torch LM 等 10 项）
+│   ├── checks_backend.py       硬件后端检查（--accel auto 设备解析 / 回落）
+│   ├── verifiers/              逐位对拍验证脚本（分词 / 词表 24 例 / CSR / 读出加速核 /
+│   │                           多卡 / RL / 检查点 round-trip 等 13 项）
 │   ├── eval_suite.py           M5 评测入口（编排 + 判定矩阵）
 │   ├── eval_tasks_*.py         六任务评测（LM / 长程 / 记忆 / 持续学习 / 多跳 / 效率）
 │   ├── nano_gpt.py             对照模型：nanoGPT 级 Transformer（PyTorch）
 │   └── demo_*.py               各里程碑消融与验收（M1–M9 / 泛化探针 / 长程复制 / 认知层）
 ├── tools/                      工程工具（数据制备 / 基准 / 审计）
-│   ├── train_torch_lm.py       torch 栈独立训练入口（--device auto|cpu|cuda|rocm|npu）
+│   ├── train_rl.py             RL 训练（REINFORCE；零新增算子；JSONL 提示集 + 可插拔 reward_fn）
+│   ├── accel_doctor.py         加速后端一次性诊断（环境矩阵 / 试分配 / 带宽）
+│   ├── bench_accel.py          读出基准（fp32 / fp16 / bf16 三档 + 等效带宽 GB/s；P29 修正版）
 │   ├── rebaseline.py           基线复测（锚点对照）
 │   ├── audit_precision.py      精度体系审计（L1 逐位 / L2 带宽 / L3 端到端）
 │   ├── audit_gen_eval.py       泛化评测（域内 / 近域 / 远域三域 + 2-gram 无泄漏基线）
@@ -83,23 +96,38 @@ train/
 
 ```bash
 # 环境：Python 3.13+；依赖安装 pip install -r requirements.txt
-# （numpy/numba/psutil/pyarrow；torch 可选——硬件后端栈与对照模型所需，缺失自动回退）
-python tests/run_tests.py fast    # 快速回归（19 项，约 1 分钟）—— 零回归门槛
+# （numpy/numba/psutil/pyarrow；torch 可选——读出加速 cuda/npu/rocm/dml 与
+#   Transformer 对照模型所需，缺失自动回落 numba CPU，默认路径逐位不变）
+python tests/run_tests.py fast    # 快速回归（9 项，约 1 分钟）—— 零回归门槛
 python tests/run_tests.py --full  # 全量验收（约 35 分钟）
 
 python tests/eval_suite.py        # 六任务评测 + Transformer 对照 + 判定矩阵
 python tests/demo_gen.py          # 泛化探针（域内 / 近域 / 远域 + 统计基线对照）
 python tools/rebaseline.py        # 基线锚点复测（4K / 全语料双口径）
-python tools/backend_probe.py     # 硬件后端体检
+python tools/backend_probe.py     # 硬件后端探测（设备矩阵）
+python tools/accel_doctor.py      # 加速后端一次性诊断（环境矩阵 / 试分配 / 带宽）
+python tools/bench_accel.py       # 读出基准（fp32 / fp16 / bf16 三档 + 等效带宽 GB/s）
 
-# 词级 LM 训练（唯一生产入口；多进程加载 / 断点续训 / 精度可选）
+# 预训练（唯一生产入口；多进程加载 / 断点续训 / 精度可选 / --accel auto）
 python train_1b/train.py --preset smoke --data sft --tokens 100000
 python train_1b/train.py --data mix --resume   # sft + pretrain 中文子集混合
+
+# SFT（回复掩码：只对助手回复计损失，多轮约 50% 步；--init-from 两阶段微调）
+python train_1b/train.py --data sft --assistant-marker "助手：" \
+    --init-from outputs/models/<预训练检查点>.npz
+
+# RL（REINFORCE，零新增算子；JSONL 提示集 + 可插拔 reward_fn）
+python tools/train_rl.py --init-from outputs/models/<SFT 检查点>.npz
+
+# 推理 / 对话（词表快照自动交叉校验）
 python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 
-# torch 栈（设备无关；CPU / CUDA / ROCm / 昇腾 NPU）
-python tools/train_torch_lm.py --device auto --preset base --data eval
-python tests/verifiers/verify_torch_lm.py --device all
+# 硬件验证（P30 后保留项）
+python tests/verifiers/verify_accel_readout.py    # 读出加速逐位对拍
+python tests/verifiers/verify_multi_device.py     # 多卡分片与单设备逐位一致（24 例）
+python tests/verifiers/verify_vocab_parallel.py   # 词表并行构建逐位一致（24/24）
+python tests/verifiers/verify_rl.py               # RL 训练回路
+python tests/verifiers/verify_ckpt_roundtrip.py   # 检查点落盘 / 恢复 round-trip
 ```
 
 子目录脚本自带 `sys.path` 引导，从任意工作目录运行都可。
@@ -132,11 +160,14 @@ python tests/verifiers/verify_torch_lm.py --device all
 | 稳定正增益机制 | T3.4 内容寻址 WM −1.6%；回放稳定读出 −1.4% |
 | 已证伪方向（勿复用） | 表征可塑性五项全负（+18%~+63%）；T3.2 top-k 检索 +3.2% 有害；minibatch 单遍协议下有害 |
 | 脑同构审计 | 12 项结构性指标：一致 10 / 近似 2 / 偏离 0（`tools/audit_brain_parity.py`） |
-| 回归状态 | fast **19/19**（零回归门槛）；CI 三平台同源 |
+| 工程吞吐（实测） | 词涌现构建 4.7M 字符 63.1s → 9.0s（7.00×，逐位一致）；词表扫描 33.4 亿 tokens / 520s（191 核） |
+| 回归状态 | fast **9/9**（零回归门槛）；CI 三平台同源 |
 
 **诚实边界**：内置语料仅约 2 万字符，结论只在该规模与语料下成立，不构成对通用 LLM 能力的宣示；
 远域（维基 OOD）受词表覆盖墙限制，属数据规模问题而非架构单一问题；
-昇腾 NPU / CUDA / ROCm 路径已完成代码适配与接口探测，**未在对应硬件上实测**；
+读出加速已上设备并实测：NPU 迁移后设备流量 **−40%**（4,334 → 2,600 MiB/步，正好理论下限）；
+GEMV 受带宽限制，**~50% 利用率是结构性上限**；主循环机制（PC 栈 / STDP / 记忆 / 分词）仍在 numba CPU；
+fp16 有机制性代价，待真机实测（`tools/bench_accel.py` 三档精度基准）；
 规模外推（100B vs GLM-5.3-Flash）为估算，见《竞争力与脑同构性评估》。
 
 ## 文档索引
@@ -150,6 +181,6 @@ python tests/verifiers/verify_torch_lm.py --device all
 
 ## CI/CD
 
-- 回归入口 `tests/run_tests.py`（fast 19 项）+ 逐位对拍 `tests/verifiers/`。
+- 回归入口 `tests/run_tests.py`（fast 9 项）+ 逐位对拍 `tests/verifiers/`。
 - CI 双平台：`.gitcode/workflows/ci.yml`（GitCode Action）+ `.github/workflows/ci.yml`（GitHub 镜像）。
 - 治理约定：架构介绍文档（docs/*.md）不是数据集；冻结评测基准位于 `eval_corpus/`。
