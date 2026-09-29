@@ -97,6 +97,9 @@ def make_external_segmenter(seg_kwargs: dict, words):
 SAVE_DIR = _ROOT / "outputs" / "models"   # fhz 2026-09-28：生产训练产物统一存 outputs/models/
 LOG_DIR = _ROOT / "outputs" / "models" / "train_logs"
 
+# ModelScope 数据集仓库（--remote-data 时经 HTTP Range 流式直读，零本地落盘）
+MS_DATA_REPO = "fhzfhz/Mixture-General-Mini"
+
 DATA_FILES = {
     # 训练数据一律用上传分片 parquet（sft/ pretrain/ 根）；raw/ 仅归档不触碰
     # （fhz 2026-09-25 指令，与 tools/train_production.py 同步）。
@@ -181,6 +184,14 @@ def main() -> None:
     ap.add_argument("--preset", choices=list(PRESETS), default="1b",
                     help="smoke=管线验证 / 1b=标准档(容量≥1B) / 1b_max=大主干档")
     ap.add_argument("--data", choices=list(DATA_FILES), default="sft")
+    ap.add_argument("--remote-data", action="store_true",
+                    help="数据直读 ModelScope（%s，HTTP Range 流式零落盘，"
+                         "仅支持 ModelScope）；默认读本地 datasets/（逐位不变）"
+                         % MS_DATA_REPO)
+    ap.add_argument("--remote-fraction", type=float, default=0.3,
+                    help="--remote-data 时取排序后前多少比例的分片"
+                         "（默认 0.3 = fhz 2026-09-29「数据集只取30%%」；"
+                         "前缀子集，词表扫描与训练流开头一致）")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
     ap.add_argument("--readout-dtype", default="bf16",
                     choices=["fp32", "fp16", "bf16", "fp8", "fp4"],
@@ -352,12 +363,28 @@ def main() -> None:
     _tel = Telemetry()                                 # P41：系统/设备遥测
 
     data_path = DATA_FILES[args.data]
+    if args.remote_data and args.data != "eval":
+        # fhz 2026-09-29（服务器「glob 无匹配」）：数据集托管 ModelScope，
+        # --remote-data 切换为 HTTP Range 流式直读（零落盘，仅支持 ModelScope）；
+        # 分片级抽样取前 remote_fraction 比例（前缀子集，顺序语义不变）。
+        # 与本地同名分片模式 → 文件顺序与本地一致。
+        _pat = DATA_FILES[args.data].name
+        data_path = f"ms://{MS_DATA_REPO}/{args.data if args.data != 'pretrain_zh' else 'pretrain'}/{_pat}"
+        os.environ["PHDNET_REMOTE_FRACTION"] = str(args.remote_fraction)
+        print(f"[data] remote source: {data_path} "
+              f"(fraction={args.remote_fraction:g})")
     try:
         data_files = expand_paths(data_path)
     except FileNotFoundError as e:
         print(f"data file not found: {e}")
         sys.exit(1)
-    total_mb = sum(p.stat().st_size for p in data_files) / 1e6
+    if data_files and hasattr(data_files[0], "stat"):
+        total_mb = sum(p.stat().st_size for p in data_files) / 1e6
+    else:                                   # 远程：MsFile 自带 API Size
+        from phdnet.ms_stream import ms_total_size
+        total_mb = ms_total_size(data_files) / 1e6
+        print(f"[data] {len(data_files)} remote shards, ~{total_mb:.0f} MB "
+              f"(ModelScope HTTP Range streaming, zero local copy)")
     dl_w = max(1, min(vw, len(data_files)))    # 数据加载进程数（≤文件数）
 
     # ── 词表构建（采样 or 全量扫描；训练数据本身永不截断）──

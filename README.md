@@ -136,6 +136,10 @@ python train_1b/train.py --preset smoke --data sft --tokens 100000
 #          `pretrain_zh` 为仅中文对照；`mix` 轮转已删除）
 python train_1b/train.py --data pretrain --nll-sync-every 8 --resume
 
+# 服务器无本地数据集时：ModelScope 直读（HTTP Range 流式零落盘，仅支持 ModelScope；
+#          --remote-fraction 0.3 = 取排序后前 30% 分片，前缀子集顺序语义不变）
+python train_1b/train.py --data pretrain --remote-data --remote-fraction 0.3 --resume
+
 # 阶段② SFT：回复掩码——只对助手回复计损失（多轮约 50% 步）；
 #          默认 bf16 计算 + bf16 检查点存储
 python train_1b/train.py --data sft --assistant-marker "助手：" \

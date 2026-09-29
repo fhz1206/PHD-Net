@@ -387,7 +387,9 @@ def _build_lut(fmt: str) -> np.ndarray:
     """
     if fmt == "fp16":
         # 位型重解释（⚠ 不是数值转换——码 c 的 LUT 值 = 以 c 为 fp16 位型的浮点值）
-        lut = np.arange(65536, dtype=np.uint16).view(np.float16).astype(np.float32)
+        # NaN/Inf 位型 cast 到 fp32 仍为 NaN/Inf（值保持），errstate 静音良性告警
+        with np.errstate(invalid="ignore"):
+            lut = np.arange(65536, dtype=np.uint16).view(np.float16).astype(np.float32)
         b, sb = 0x7C00, 15                          # 排除 Inf/NaN；含 +0 与次正规
     elif fmt == "bf16":
         u32 = np.arange(65536, dtype=np.uint16).astype(np.uint32) << 16

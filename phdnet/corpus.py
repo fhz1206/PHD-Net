@@ -29,9 +29,29 @@ from pathlib import Path
 
 import numpy as np
 
-__all__ = ["load_text", "iter_texts", "write_parquet", "corpus_stats"]
+__all__ = ["load_text", "iter_texts", "write_parquet", "corpus_stats",
+           "open_parquet_source"]
 
 _SEP = "\n\n"
+
+
+def is_remote_path(path) -> bool:
+    """是否 ModelScope 远程 spec（ms://…；phdnet.ms_stream.is_remote_path 转发）。"""
+    from phdnet.ms_stream import is_remote
+    return is_remote(path)
+
+
+def open_parquet_source(p):
+    """Path 或 MsFile → pyarrow ParquetFile。
+
+    本地：``ParquetFile(str(p))``（与旧行为**完全一致**，逐位不变）；
+    远程：``ms://`` spec → HTTP Range 可 seek 流（phdnet/ms_stream.py）。
+    """
+    pq = _require_pyarrow()
+    if is_remote_path(p):
+        from phdnet.ms_stream import open_ms_file
+        return pq.ParquetFile(open_ms_file(str(p)))
+    return pq.ParquetFile(str(p))
 
 
 def _require_pyarrow():
@@ -47,7 +67,14 @@ def _require_pyarrow():
 
 
 def expand_paths(path: str | Path) -> list[Path]:
-    """路径展开：支持 glob 通配符（如 `pretrain_*.parquet`），返回确定性排序的文件列表。"""
+    """路径展开：支持 glob 通配符（如 `pretrain_*.parquet`），返回确定性排序的文件列表。
+
+    远程（fhz 2026-09-29）：`ms://<ns>/<path>` 走 ModelScope 直连
+    （phdnet/ms_stream.py，HTTP Range 流式零落盘）；本地逻辑一字未动。
+    """
+    if is_remote_path(path):
+        from phdnet.ms_stream import expand_ms
+        return expand_ms(str(path))
     p = Path(path)
     if any(ch in p.name for ch in "*?["):
         hits = sorted(p.parent.glob(p.name))
@@ -57,11 +84,10 @@ def expand_paths(path: str | Path) -> list[Path]:
     return [p]
 
 
-def _iter_one(p: Path, column: str, batch_size: int):
+def _iter_one(p, column: str, batch_size: int):
     suffix = p.suffix.lower()
     if suffix == ".parquet":
-        pq = _require_pyarrow()
-        pf = pq.ParquetFile(str(p))
+        pf = open_parquet_source(p)
         cols = [c for c in (column,) if c in pf.schema_arrow.names] or None
         for batch in pf.iter_batches(batch_size=batch_size, columns=cols):
             col = batch.column(column if cols else 0)

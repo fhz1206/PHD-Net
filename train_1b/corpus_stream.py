@@ -68,9 +68,9 @@ def iter_texts_lang(path, lang: str | None = None, decode_threads: int = 0):
         pa.set_cpu_count(decode_threads)     # P16：按进程数分摊解码核
         pa.set_io_thread_count(max(1, decode_threads // 2))
 
-    from phdnet.corpus import expand_paths
+    from phdnet.corpus import expand_paths, open_parquet_source
     for p in expand_paths(path):
-        pf = pq.ParquetFile(str(p))
+        pf = open_parquet_source(p)
         cols = [c for c in ("text", "lang") if c in pf.schema_arrow.names]
         if "lang" not in cols:
             for b in pf.iter_batches(batch_size=2048, columns=["text"]):
