@@ -161,8 +161,9 @@ python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 
 ## 检查点内容（相对生产版的增强）
 
-`ckpt_1b.py` 保存/恢复**完整可续训状态**，生产版 `tools/train_production.py`
-不包含前三项：
+`ckpt_1b.py` 保存/恢复**完整可续训状态**（训练入口已单轨化为
+`train_1b/train.py`；旧 `tools/train_production.py` 已于 P11 删除，其配方与
+4M 基线经 git 历史可复现）。较旧生产版额外保存：
 
 1. 大空间表邻接结构（`compact_csr` 快照，dict 版与在线 CSR 版均支持）
 2. 突触迹与时间戳（t_pre/t_post/stamp_pre/stamp_post）+ 步数 + 入度
