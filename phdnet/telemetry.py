@@ -32,8 +32,35 @@ except Exception:                                        # pragma: no cover
     psutil = None
 
 
+# P63：npu-smi 定位（环境变量 → PATH → 常见安装路径）。训练进程常没有
+# source 过 Ascend 的 set_env.sh，`which npu-smi` 落空 → AI Core% 恒 `--`。
+_SMI_ENV = "NPU_SMI_PATH"
+_SMI_CANDIDATES = (
+    "/usr/local/Ascend/driver/tools/npu-smi",
+    "/usr/local/Ascend/driver/tools/npu-smi",
+    "/usr/local/bin/npu-smi",
+    "/usr/sbin/npu-smi",
+    "/opt/ascend/driver/tools/npu-smi",
+)
+
+
+def _find_npu_smi() -> str | None:
+    """定位 npu-smi 可执行文件（None = 找不到，AI Core% 只能显示 --）。"""
+    p = os.environ.get(_SMI_ENV)
+    if p and os.path.exists(p):
+        return p
+    w = shutil.which("npu-smi")
+    if w:
+        return w
+    for c in _SMI_CANDIDATES:
+        if os.path.exists(c):
+            return c
+    return None
+
+
 class Telemetry:
     """训练遥测采样器（非阻塞；所有字段容错，不可用即 None）。"""
+
 
     def __init__(self, device: str | None = None, npu_smi: bool = True):
         self._proc = psutil.Process() if psutil else None
@@ -54,7 +81,12 @@ class Telemetry:
         self.device = device or self._auto_probe_device()
         self._acc_err: str | None = None        # 首次加速器采样失败原因
         self._acc_err_reported = False
-        self._smi_path = shutil.which("npu-smi") if npu_smi else None
+        # P63：`npu-smi` 在非交互 shell 里常常不在 PATH（能跑 `watch npu-smi`
+        # 的那个 shell source 过 set_env.sh，训练是直接 python 启动的）→
+        # AI Core% 恒 `--`。按「环境变量 → PATH → 常见安装路径」三级探测。
+        self._smi_path = _find_npu_smi() if npu_smi else None
+        self._smi_warned = False
+        self._smi_reported = False
 
     def _auto_probe_device(self) -> str:
         """无显式 device 时自动探测（torch.npu → torch.cuda → 无）。"""
@@ -154,7 +186,15 @@ class Telemetry:
         解析失败静默（torch 层已兜底过一次）。
         """
         if not self._smi_path:
+            if not self._smi_warned:                    # P63：只提示一次
+                self._smi_warned = True
+                print("[telemetry] npu-smi 未找到 → AI Core% 显示 --（HBM 仍走 "
+                      f"torch 计数）。设 {_SMI_ENV}=/path/to/npu-smi 或把 "
+                      "Ascend set_env.sh source 进环境即可。", flush=True)
             return
+        if not self._smi_reported:                      # 首次成功：报一次路径
+            self._smi_reported = True
+            print(f"[telemetry] npu-smi = {self._smi_path}", flush=True)
         try:
             r = subprocess.run([self._smi_path, "info"], capture_output=True,
                                text=True, timeout=10)

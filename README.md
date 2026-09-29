@@ -222,7 +222,7 @@ numba 编译缓存持久化于 `outputs/numba_cache`（`NUMBA_CACHE_DIR`，不�
 | P62 同步/空转修复 | `--nll-sync-every` 默认 1→**8**（每步 `.item()` 曾把 NPU 延迟全额暴露给 CPU =「CPU 忙 NPU 空闲」真相）；`--numba-threads` 默认 **8**（191 核跑千行级 prange 纯空转；P22 实测 1→6 线程仅 1.16×） |
 | M2 学习侧融合核（P59） | `SparsePCStack.learn` 8 次核调用 → 1 个 nogil/parallel 核，**逐位一致**；26 万边 **1.72×** / 105 万边 1.15× / 419 万边 1.25×。（predictive 版实测**负收益** 0.91× → 已删） |
 | M1 编码器半精度（P61） | 迭代 fp32 + 模型 fp32（`cfg.encoder_dtype`）：encode **606.7→337.7 µs（1.80×）**，top-k 逐位一致。⚠ numpy 路径下 bf16 存储**更慢**（每次付上采样转换），bf16 语义由读出侧（NPU 原生）承担 |
-| H2D/图优化（P58） | 读出 h 走 pinned 暂存 + `non_blocking`（pageable 会阻塞 CPU）；`--torch-compile` **默认关**（inductor 服务器不稳定）；遥测 NPU% 改走 npu-smi（`torch.npu.utilization()` 会同步设备流） |
+| H2D/图优化（P58/P63） | 读出 h 走 pinned 暂存 + `non_blocking`（pageable 会阻塞 CPU）；`--torch-compile` **默认关**（inductor 服务器不稳定）；遥测 NPU% 走 `npu-smi`（`torch.npu.utilization()` 会同步设备流）——**三级定位** `NPU_SMI_PATH` → PATH → 常见安装路径（非交互 shell 没有 set_env.sh 时也能读到） |
 | M2 numba 融合核（P52） | `phdnet/sparse_pc.py::_pc_infer_fused`：n_steps=1 **2.10×** / n_steps=3 **2.16×**，容差一致 1 ulp（非逐位） |
 | torch.compile A/B（P45） | 开 **26.34** vs 关 **30.98** ms/tok（快 15%；本机 CPU torch）。**现默认关**，需要时显式 `--torch-compile` |
 | numba 编译缓存（P39） | readout 7 核 cache=True + 持久化缓存目录，冷启动 **3.96→2.60s** |
