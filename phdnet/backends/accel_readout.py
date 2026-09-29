@@ -85,6 +85,11 @@ class AccelReadout:
         # 需要图级优化时可选 reduce-overhead/max-autotune（接受上述回退）。
         self._compiled = False
         self._compile_mode = str(compile_mode or "default")
+        # P58：pinned 暂存池（懒初始化；CPU-only torch 无 pin_memory → 回落）
+        self._pin_bufs = None
+        self._pin_ok = False
+        self._pin_next = 0
+        self._pin_cap = 4
         if compile:
             try:
                 self._fused = torch.compile(self._train_step_core,
@@ -139,8 +144,10 @@ class AccelReadout:
 
         P28：这是消除「训练热路径上 y 白 D2H 再白 H2D」的正解——调用方拿设备
         张量直接进 `learn_softmax`，整条链路上没有主机↔设备往返。
+        P58：H2D 走 pinned 暂存 + non_blocking（pageable 拷贝会阻塞 CPU；
+        异步上传让 CPU 提前回去算下一步的 M1–M5）。
         """
-        ht = self._to_dev(h)
+        ht = self._staged_to_dev(h)
         y = self.W @ ht
         self._cache_h = np.ascontiguousarray(h, dtype=np.float32)
         self._cache_ht = ht
@@ -273,7 +280,7 @@ class AccelReadout:
             ha = np.ascontiguousarray(h, dtype=np.float32)
             if ha.shape == self._cache_h.shape and np.array_equal(ha, self._cache_h):
                 return self._cache_ht, True
-        return self._to_dev(h), False
+        return self._staged_to_dev(h), False
 
     # ---------- 与 numba Readout 的接口兼容 ----------
     def learn(self, h, target, eta: float) -> None:
@@ -356,6 +363,43 @@ class AccelReadout:
             return x.to(device=self.device, dtype=self.tdtype)
         return torch.as_tensor(np.ascontiguousarray(x, dtype=np.float32),
                                device=self.device, dtype=self.tdtype)
+
+    def _staged_to_dev(self, h):
+        """P58（fhz「CPU 预计算还要更加提前」）：pinned 暂存 + non_blocking H2D。
+
+        pageable H2D 会阻塞 CPU 直到拷贝完成——CPU 算完 h 后干等传输。pinned
+        暂存让 H2D 真异步：CPU 提交后立即回去算下一步的 M1–M5，NPU 流按 FIFO
+        消化（设备内再 cast 到 tdtype，与原 host-cast 语义同为 RNE 舍入）。
+        缓冲池轮转 + Event 覆写保护（pinned 复用前必须确认上次拷贝已完成；
+        每步 CPU 几 ms ≫ H2D 几 µs，实际零等待）。pin 不可用（CPU-only torch
+        / 驱动限制）时回落同步路径，数值逐位一致。
+        """
+        a = np.ascontiguousarray(h, dtype=np.float32)
+        if self._pin_bufs is None:                      # 懒初始化（一次）
+            self._pin_bufs = []
+            try:
+                probe = torch.empty(8, pin_memory=True)
+                del probe
+                self._pin_ok = True
+            except Exception:                           # noqa: BLE001
+                self._pin_ok = False
+        if not self._pin_ok:
+            return torch.as_tensor(a, device=self.device, dtype=self.tdtype)
+        idx = self._pin_next % self._pin_cap
+        if len(self._pin_bufs) <= idx:                  # 首轮：扩池
+            self._pin_bufs.append((torch.empty(self.n_h, dtype=torch.float32,
+                                               pin_memory=True), None))
+        buf, ev = self._pin_bufs[idx]
+        if ev is not None:
+            ev.synchronize()                            # 覆写保护（常态零等待）
+        buf.copy_(torch.from_numpy(a))
+        if ev is None:
+            ev = torch.Event()
+            self._pin_bufs[idx] = (buf, ev)
+        dev_t = buf.to(self.device, non_blocking=True).to(self.tdtype)
+        ev.record()
+        self._pin_next += 1
+        return dev_t
 
 
 def _unsupported_reason(cfg) -> str | None:

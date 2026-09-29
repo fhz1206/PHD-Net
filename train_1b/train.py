@@ -193,14 +193,16 @@ def main() -> None:
                     help="读出精度（P9/P12：默认 fp32；fp64 已停止支持；"
                          "fp4 = MX 块缩放 e2m1，2026-09-28 解禁")
     ap.add_argument("--torch-compile", dest="torch_compile",
-                    action="store_true", default=True,
-                    help="P45: fuse the accelerated-readout kernels via "
-                         "torch.compile (default ON; measured 15%% faster "
-                         "locally after removing the per-step target buffer "
-                         "allocation: 26.34 vs 30.98 ms/tok)")
+                    action="store_true", default=False,
+                    help="P58（fhz 2026-09-29「图优化关了吧」）：默认 OFF——"
+                         "inductor 编译在服务器上不稳定（debug trace 干扰 + "
+                         "编译耗时不可控）；eager 在 NPU 上为 4 个小 kernel "
+                         "异步流提交，实际差距待 --step-profiling 量化。"
+                         "P45 本机实测曾 +15%%（26.34 vs 30.98 ms/tok，"
+                         "无 per-step target buffer 分配）")
     ap.add_argument("--no-torch-compile", dest="torch_compile",
                     action="store_false",
-                    help="disable the P38 kernel fusion")
+                    help="disable the P38 kernel fusion（现已是默认）")
     ap.add_argument("--torch-compile-mode", default="default",
                     choices=["default", "reduce-overhead", "max-autotune"],
                     help="P44: default='default' fuses kernels WITHOUT cudagraphs "

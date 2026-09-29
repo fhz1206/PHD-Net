@@ -303,7 +303,8 @@ class PHDNetConfig:
     #（**快 15%**）。修之前是反向的（开 30.54 vs 关 28.70），说明瓶颈在分配而
     # 不在融合本身。模式固定用 `torch_compile_mode="default"`（P44：cudagraph
     # 与 W 原地更新冲突，勿用 reduce-overhead）。
-    torch_compile: bool = True
+    torch_compile: bool = False   # P58（fhz「图优化关了吧」）：默认关；
+                                  # inductor 服务器不稳定，eager 差距待 profiling
     # P44：torch.compile 模式。**默认 "default"**（只融合 kernel，不启用
     # cudagraphs）——cudagraph 与 `W.addmm_` 原地更新冲突（"skipping cudagraphs
     # due to mutated inputs" 警告 + 静默回退），W 每步原地更新是硬约束。

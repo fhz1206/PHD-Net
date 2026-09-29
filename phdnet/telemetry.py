@@ -110,24 +110,30 @@ class Telemetry:
         # ── 加速器 ──
         if torch_available() and self.device:
             dev = self.device.lower()
-            try:
-                if dev.startswith("npu") and hasattr(torch, "npu"):
-                    if hasattr(torch.npu, "utilization"):
-                        out["acc_util"] = float(torch.npu.utilization())
-                    out["hbm_alloc_gb"] = torch.npu.memory_allocated() / 2 ** 30
-                    out["hbm_total_gb"] = (torch.npu.get_device_properties()
-                                           .total_memory) / 2 ** 30
-                elif dev.startswith("cuda") and hasattr(torch, "cuda"):
-                    out["acc_util"] = float(torch.cuda.utilization())
-                    out["hbm_alloc_gb"] = torch.cuda.memory_allocated() / 2 ** 30
-                    out["hbm_total_gb"] = (torch.cuda.get_device_properties(
-                        torch.cuda.current_device()).total_memory) / 2 ** 30
-            except Exception as e:                       # noqa: BLE001
-                # P57：不再静默——首次失败把原因带出来（此前 except: pass 吞掉
-                # 全部错误，NPU/HBM 恒 `--` 且无法区分「没有加速器」与「读失败」）
-                self._note_acc_err(e)
-            # torch 层空缺时用 npu-smi 补（AI Core% / HBM 用量；HBM 带宽
-            # 利用率任何软件层都读不到，需 profiler）
+            if dev.startswith("npu"):
+                # P58：AI Core% 改走 npu-smi——torch.npu.utilization() 内部会
+                # 同步设备流，每 log_every 采样一次就在训练热路径上打一次全局
+                # 同步（与「CPU 预计算提前 / NPU 流水」直接冲突）。HBM 占用两
+                # 路都可用：memory_allocated 是 host 侧计数器（不同步）。
+                self._npu_smi_fill(out)
+                try:
+                    if hasattr(torch, "npu"):
+                        out["hbm_alloc_gb"] = torch.npu.memory_allocated() / 2 ** 30
+                        out["hbm_total_gb"] = (torch.npu.get_device_properties()
+                                               .total_memory) / 2 ** 30
+                except Exception as e:                   # noqa: BLE001
+                    self._note_acc_err(e)
+            else:
+                try:
+                    if dev.startswith("cuda") and hasattr(torch, "cuda"):
+                        out["acc_util"] = float(torch.cuda.utilization())
+                        out["hbm_alloc_gb"] = torch.cuda.memory_allocated() / 2 ** 30
+                        out["hbm_total_gb"] = (torch.cuda.get_device_properties(
+                            torch.cuda.current_device()).total_memory) / 2 ** 30
+                except Exception as e:                   # noqa: BLE001
+                    self._note_acc_err(e)
+            # torch 层空缺时用 npu-smi 补（HBM 带宽利用率任何软件层都读不到，
+            # 需 profiler）
             if out["acc_util"] is None and out["hbm_alloc_gb"] is None:
                 self._npu_smi_fill(out)
         # ── IPC：硬件计数器，Python 层不可得（诚实 None）──
