@@ -147,7 +147,7 @@ class TeeLogger:
 
 def _on_sigint(signum, frame):        # pragma: no cover
     _STOP["flag"] = True
-    print("\n[收到中断信号] 将保存检查点后退出…", flush=True)
+    print("\n[interrupt] Interrupt received; will save checkpoint then exit…", flush=True)
 
 
 def _make_tokenizer(seg: WordSegmenter, tokens: list[str], cfg) -> WordTokenizer:
@@ -168,9 +168,9 @@ def _print_table_stats(lm) -> None:
     st = lm.net.ltm.table.stats()
     per = 10 if st.get("row_slots_allocated") else 100      # CSR 版 ≈10B/条，dict 版 ≈100B/条
     mb = st["grown_synapses"] * per / 1e6
-    print(f"  [大空间表] 已生长 {st['grown_synapses']:,} / 容量 {st['capacity']:,}"
-          f"（利用率 {st['utilization']:.3%}）| 内存 ≈{mb:.0f} MB"
-          + ("  ⚠ dict 版长跑建议 --csr-online（≈10×省内存）"
+    print(f"  [big-ltm] grown {st['grown_synapses']:,} / capacity {st['capacity']:,}"
+          f" (utilization {st['utilization']:.3%}) | memory ≈{mb:.0f} MB"
+          + ("  ⚠ dict backend: for long runs prefer --csr-online (≈10× memory saving)"
              if (not getattr(lm.net.ltm.table, "csr_online", False)
                  and st["grown_synapses"] > 50_000_000) else ""),
           flush=True)
@@ -186,10 +186,14 @@ def main() -> None:
                     choices=["fp32", "fp16", "bf16", "fp8", "fp4"],
                     help="读出精度（P9/P12：默认 fp32；fp64 已停止支持；"
                          "fp4 = MX 块缩放 e2m1，2026-09-28 解禁")
-    ap.add_argument("--torch-compile", action="store_true",
-                    help="P38（实验性）：torch.compile 融合加速读出的小 kernel"
-                         "（CANN launch 开销 ~50-200μs/kernel）。默认关；昇腾未"
-                         "实测，失败自动回落 eager 并告警")
+    ap.add_argument("--torch-compile", dest="torch_compile",
+                    action="store_true", default=True,
+                    help="P38: fuse the accelerated-readout kernels via "
+                         "torch.compile (default ON per fhz; falls back to "
+                         "eager with a warning on failure)")
+    ap.add_argument("--no-torch-compile", dest="torch_compile",
+                    action="store_false",
+                    help="disable the P38 kernel fusion")
     ap.add_argument("--step-profiling", action="store_true",
                     help="P35：step 分段计时（诊断 CPU 侧耗时分布；日志按段打印）")
     ap.add_argument("--nll-sync-every", type=int, default=1,
@@ -283,31 +287,32 @@ def main() -> None:
         from phdnet.backends.multi_device import capability_report
         _cap = capability_report(verbose=False)
         if _cap["accelerators_present"]:
-            print(f"[能力] 检测到加速器 {_cap['accelerators_present']}，但生产训练走 "
-                  f"numba/CPU（numba 只能编译到 CPU 机器码）；要用加速器请走 torch 栈："
-                  f"tools/train_torch_lm.py --device auto（权重不通用）")
+            print(f"[capability] accelerator(s) detected {_cap['accelerators_present']}, "
+                  f"but production training runs on numba/CPU (numba only compiles to "
+                  f"CPU machine code); to use accelerators use the torch stack: "
+                  f"tools/train_torch_lm.py --device auto (weights not interchangeable)")
             try:
                 from phdnet.backends.accel_readout import resolve_accel_device
                 _rd = resolve_accel_device("auto")
-                print(f"[能力] 读出设备解析（auto）= {_rd} —— 读出将跑在此设备上"
-                      f"（其余部件仍为 numba CPU）")
+                print(f"[capability] readout device resolved (auto) = {_rd} — "
+                      f"readout will run on this device (rest remains numba CPU)")
             except Exception as _e:                          # noqa: BLE001
-                print(f"[能力] 读出设备解析失败：{type(_e).__name__}: "
+                print(f"[capability] readout device resolution failed: {type(_e).__name__}: "
                       f"{str(_e)[:120]}")
-                print("[能力] 诊断：python tools/accel_doctor.py "
-                      "（环境矩阵 / 试分配 / 真实负载计时）")
+                print("[capability] diagnostics: python tools/accel_doctor.py "
+                      "(env matrix / trial allocation / real-load timing)")
     except Exception:                                       # noqa: BLE001
         pass
     _inflight_samples = min(PREFETCH_DEPTH or 8192, 8192) * (PREFETCH_BATCH or 64)
-    print(f"[并行] 分词线程（numba nogil）={vw} | 预取进程={_pf}"
-          f" | 预取深度={PREFETCH_DEPTH or 8192}，每批={PREFETCH_BATCH or 64} 样本"
-          f"（队列容量≈{_inflight_samples:,} 样本 ≈ 数百万 tokens；"
-          f"实际在途 ≈ 生产者数 × 领先批——多生产者才能装满队列）"
-          f"（解码核/进程≈{max(1, _cpu // _pf)}，合计≈{_pf * max(1, _cpu // _pf)}）"
-          f" | 数据侧并行不与分词线程叠加争抢")
-    print(f"[log] 日志文件：{log_path}")
-    print(f"[log] 启动：{datetime.now().isoformat(timespec='seconds')}  "
-          f"argv：{' '.join(sys.argv[1:]) or '(默认参数)'}")
+    print(f"[parallel] tokenisation thread (numba nogil)={vw} | prefetch processes={_pf}"
+          f" | prefetch depth={PREFETCH_DEPTH or 8192}, batch={PREFETCH_BATCH or 64} samples"
+          f" (queue capacity≈{_inflight_samples:,} samples ≈ millions of tokens;"
+          f" in-flight ≈ producers × lead batches — multiple producers needed to fill the queue)"
+          f" (decode cores/process≈{max(1, _cpu // _pf)}, total≈{_pf * max(1, _cpu // _pf)})"
+          f" | data-side parallelism does not contend with the tokenisation thread")
+    print(f"[log] log file: {log_path}")
+    print(f"[log] start: {datetime.now().isoformat(timespec='seconds')}  "
+          f"argv: {' '.join(sys.argv[1:]) or '(defaults)'}")
 
     signal.signal(signal.SIGINT, _on_sigint)
     args.save_dir.mkdir(parents=True, exist_ok=True)
@@ -327,14 +332,14 @@ def main() -> None:
             data_files = (expand_paths(DATA_FILES["sft"])
                           + expand_paths(DATA_FILES["pretrain_zh"]))
         except FileNotFoundError as e:
-            print(f"数据文件不存在: {e}")
+            print(f"data file not found: {e}")
             sys.exit(1)
     else:
         data_path = DATA_FILES[args.data]
         try:
             data_files = expand_paths(data_path)
         except FileNotFoundError as e:
-            print(f"数据文件不存在: {e}")
+            print(f"data file not found: {e}")
             sys.exit(1)
     total_mb = sum(p.stat().st_size for p in data_files) / 1e6
     dl_w = max(1, min(vw, len(data_files)))    # 数据加载进程数（≤文件数）
@@ -364,9 +369,9 @@ def main() -> None:
         t_v0 = time.perf_counter()
         seg = build_segmenter_parallel(vocab_text, SEG_KWARGS, args.vocab_workers)
     if not (_resume_vocab or _file_vocab) and vw > 1:
-        print(f"[词表] 词涌现多核构建：L=2..{SEG_KWARGS['max_len']} × "
-              f"5 线程池（nogil 核内串行，层间并行；P22）"
-              f"（涌现词表 {len(seg.vocab):,}，{time.perf_counter() - t_v0:.1f}s）",
+        print(f"[vocab] word-induction multi-core build: L=2..{SEG_KWARGS['max_len']} × "
+              f"5-thread pool (serial within core under nogil, parallel across levels; P22)"
+              f" (induced vocab {len(seg.vocab):,}, {time.perf_counter() - t_v0:.1f}s)",
               flush=True)
     # 词表来源三选一（优先级）：resume 自包含 > 外部文件 > head/full 扫描
     if _resume_vocab:
@@ -375,40 +380,41 @@ def main() -> None:
         seg = make_external_segmenter({**SEG_KWARGS, "max_len": _cmax}, _cv)
         tokens = list(_ct)
         vocab_text = "\n".join(tokens[:4096])   # 仅供分词器注入构造
-        print(f"[词表] --resume：跳过词表构建，直接用检查点自包含词表"
-              f"（{_ckpt_path.name}：{len(_cv):,} 词 / max_len={_cmax}，"
-              f"SDR 哈希确定性重建、逐位一致；读出层按该尺寸对齐）", flush=True)
+        print(f"[vocab] --resume: skipping vocab build, using checkpoint's self-contained vocab"
+              f" ({_ckpt_path.name}: {len(_cv):,} words / max_len={_cmax}, "
+              f"deterministic SDR hash rebuild, bit-identical; readout layer aligned to this size)", flush=True)
     elif _file_vocab:
         from ckpt_1b import load_vocab_file
         _words, _segv, _wmax = load_vocab_file(Path(args.vocab_file))
         if _segv is None:
-            print("[词表] ⚠ 快照缺 seg_vocab（分词器候选集）：已退回用 token 词表"
-                  "作候选集——分词结果可能与训练时不同（静默降质风险）。"
-                  "建议改用 --resume（检查点自包含，权威）或用新版快照。",
+            print("[vocab] ⚠ snapshot missing seg_vocab (tokenizer candidate set): "
+                  "fell back to the token vocab as candidate set — tokenisation results "
+                  "may differ from training (silent degradation risk). "
+                  "Prefer --resume (checkpoint self-contained, authoritative) or a newer snapshot.",
                   flush=True)
             _segv = _words
         seg = make_external_segmenter({**SEG_KWARGS, "max_len": _wmax}, _segv)
         tokens = sorted(set(_words))
         vocab_text = "\n".join(_words[:4096])   # 仅供分词器注入构造
-        print(f"[词表] 外部词表文件 {args.vocab_file}"
-              f"（{'JSON 权威格式' if Path(args.vocab_file).suffix.lower() == '.json' else '文本（转义还原）'}）"
-              f"：{len(_words):,} 词 / max_len={_wmax} → 去重 {len(tokens):,} 词"
-              f"（跳过扫描阶段；OOV 步跳过并统计）", flush=True)
+        print(f"[vocab] external vocab file {args.vocab_file}"
+              f" ({'JSON authoritative format' if Path(args.vocab_file).suffix.lower() == '.json' else 'text (escape restored)'})"
+              f": {len(_words):,} words / max_len={_wmax} → dedup {len(tokens):,} words"
+              f" (scan stage skipped; OOV steps skipped and counted)", flush=True)
     elif args.vocab_scan == "full":
         from vocab_parallel import NUMBA_TOK_OK as _TOK_NB
-        _engine = (f"多核锚点链 ×{vw}"
+        _engine = (f"multi-core anchor chain x{vw}"
                    + ("（numba nogil 线程）" if vw > 1 and _TOK_NB
                       else "（进程池）" if vw > 1 else ""))
-        print(f"[词表] full 扫描：全量流式分词一遍（{_engine}；大语料需较久）…",
+        print(f"[vocab] full scan: streaming tokenisation over the full corpus ({_engine}; slow on large corpora)…",
               flush=True)
         seen: set[str] = set()
         n_seen = 0
         t_v = time.perf_counter()
         if vw > 1:
             def _scan_prog(n_total, n_distinct):
-                print(f"  [词表扫描] 累计 {n_total:>12,} tokens，"
-                      f"当前词表 {n_distinct:,}"
-                      f"（{time.perf_counter() - t_v:.0f}s）", flush=True)
+                print(f"  [vocab-scan] total {n_total:>12,} tokens, "
+                      f"current vocab {n_distinct:,}"
+                      f" ({time.perf_counter() - t_v:.0f}s)", flush=True)
 
             # P33（fhz「核心绑定到进程」）：扫描是一次性构建阶段，追求吞吐 →
             # 解码默认**多生产者**（每核心一个进程，跨文件并行；显式 workers
@@ -418,8 +424,8 @@ def main() -> None:
                 else 1
             _scan_w = PREFETCH_W if PREFETCH_W > 0 else \
                 max(1, min(16, _scan_files, (os.cpu_count() or 1)))
-            print(f"[词表] 扫描解码进程：{_scan_w}（核心绑定：每进程独占核心；"
-                  f"训练稳态预取仍为 {PREFETCH_W or 1}）", flush=True)
+            print(f"[vocab] scan decode processes: {_scan_w} (core-pinned: one dedicated core per process;"
+                  f" training steady-state prefetch still {PREFETCH_W or 1})", flush=True)
             seen, n_seen = scan_vocab_parallel(seg.vocab, seg.max_len,
                                                (stream_factory(args.data)()
                                                 if args.data == "mix"
@@ -434,26 +440,26 @@ def main() -> None:
                 seen.add(tk)
                 n_seen += 1
                 if n_seen % 1_000_000 == 0:
-                    print(f"  [词表扫描] 已流过 {n_seen:>12,} tokens，"
-                          f"当前词表 {len(seen):,}（{time.perf_counter() - t_v:.0f}s）",
+                    print(f"  [vocab-scan] streamed {n_seen:>12,} tokens, "
+                          f"current vocab {len(seen):,} ({time.perf_counter() - t_v:.0f}s)",
                           flush=True)
         tokens = sorted(seen)
-        print(f"[词表] full 扫描完成：全语料 {n_seen:,} tokens → 词表 {len(tokens):,}"
-              f"（{time.perf_counter() - t_v:.0f}s，{_engine}），"
-              f"零 OOV", flush=True)
+        print(f"[vocab] full scan done: corpus {n_seen:,} tokens → vocab {len(tokens):,}"
+              f" ({time.perf_counter() - t_v:.0f}s, {_engine}), "
+              f"zero OOV", flush=True)
     else:
         if vw > 1:
             t_h = time.perf_counter()
             tokens = sorted(parallel_head_tokens(seg, vocab_text, vw))
-            print(f"[词表] head 模式（多核 token 收集 ×{vw}，"
-                  f"{time.perf_counter() - t_h:.1f}s）：采样前 {len(vocab_text):,} 字符构建"
-                  f"（涌现词表 {len(seg.vocab):,}，token 词表 {len(tokens):,}）；"
-                  f"训练流 OOV 步将跳过并统计", flush=True)
+            print(f"[vocab] head mode (multi-core token collection ×{vw}, "
+                  f"{time.perf_counter() - t_h:.1f}s): built from first {len(vocab_text):,} sampled chars"
+                  f" (induced vocab {len(seg.vocab):,}, token vocab {len(tokens):,});"
+                  f" OOV steps in the training stream will be skipped and counted", flush=True)
         else:
             tokens = sorted(set(seg.tokenize(vocab_text)))
-            print(f"[词表] head 模式：采样前 {len(vocab_text):,} 字符构建"
-                  f"（涌现词表 {len(seg.vocab):,}，token 词表 {len(tokens):,}）；"
-                  f"训练流 OOV 步将跳过并统计", flush=True)
+            print(f"[vocab] head mode: built from first {len(vocab_text):,} sampled chars"
+                  f" (induced vocab {len(seg.vocab):,}, token vocab {len(tokens):,});"
+                  f" OOV steps in the training stream will be skipped and counted", flush=True)
 
     # ── 词表快照**第一时间落盘**（P17，fhz 要求）──
     # 训练崩溃/中断也不丢词表；下次 `--vocab-file <该文件>` 直接复用（免重扫，
@@ -471,9 +477,9 @@ def main() -> None:
                   "sha1": __import__("hashlib").sha1(
                       "\n".join(sorted(set(tokens))).encode("utf-8")
                   ).hexdigest()[:12]})
-        print(f"[词表] 快照已落盘：{_vp.name}（{_vp.stat().st_size / 1024:.0f} KB，"
-              f"来源={_src}；唯一权威格式 = 词表 + 分词候选集 + max_len + sha1）"
-              f"—— 崩溃后续训直接 --vocab-file {_vp.name}，免重扫", flush=True)
+        print(f"[vocab] snapshot saved: {_vp.name} ({_vp.stat().st_size / 1024:.0f} KB, "
+              f"source={_src}; the single authoritative format = vocab + tokenizer candidates + max_len + sha1)"
+              f" — after a crash resume directly with --vocab-file {_vp.name}, no rescan needed", flush=True)
 
     # ── 构建 LM（注入式 tokenizer；n_readout = 词表大小）──
     t0 = time.perf_counter()
@@ -483,46 +489,46 @@ def main() -> None:
     vocab = len(lm.tok)
 
     print("=" * 76)
-    print(f"PHD-Net 1B 流式训练 | preset={args.preset} data={args.data} "
+    print(f"PHD-Net 1B streaming training | preset={args.preset} data={args.data} "
           f"width={cfg.n_sdr} conn_k={cfg.conn_k}")
-    print(f"大空间表 N={cfg.big_ltm_N:,} × m={cfg.big_ltm_m}"
-          f"（容量 {cfg.big_ltm_N * cfg.big_ltm_m:,}）| 词表 {vocab:,}"
-          f" | 分片 {len(data_files)} 个（{total_mb:.0f} MB，流式不截断）")
-    print(f"epochs={args.epochs} | 预算 tokens={args.tokens or '∞'} "
-          f"minutes={args.minutes or '∞'} | 里程碑={args.context_milestone or '∞'}"
-          f" | 词表并行={vw} | 数据预取=多进程×{dl_w}{'+zh过滤' if args.data == 'mix' else ''}"
-          f" | 构建耗时 {time.perf_counter() - t0:.1f}s")
+    print(f"big LTM N={cfg.big_ltm_N:,} × m={cfg.big_ltm_m}"
+          f" (capacity {cfg.big_ltm_N * cfg.big_ltm_m:,}) | vocab {vocab:,}"
+          f" | shards: {len(data_files)} ({total_mb:.0f} MB, streaming, never truncated)")
+    print(f"epochs={args.epochs} | token budget={args.tokens or '∞'} "
+          f"minutes={args.minutes or '∞'} | milestone={args.context_milestone or '∞'}"
+          f" | vocab workers={vw} | data prefetch=multiproc×{dl_w}{'+zh filter' if args.data == 'mix' else ''}"
+          f" | build time {time.perf_counter() - t0:.1f}s")
     _rb = getattr(lm.net, "_readout_backend", "numba-cpu")
-    print(f"[读出] 后端={_rb}"
-          + (f"（设备 {lm.net.readout.device}）"
+    print(f"[readout] backend={_rb}"
+          + (f" (device {lm.net.readout.device})"
              if _rb.startswith("accel:") else "")
-          + (f"｜回落原因：{getattr(lm.net.readout, '_accel_fallback_reason', '')}"
+          + (f" | fallback reason: {getattr(lm.net.readout, '_accel_fallback_reason', '')}"
              if hasattr(lm.net.readout, "_accel_fallback_reason") else ""))
     print_capacity_report(capacity_report(cfg, vocab))
-    print(f"可塑参数（构建时实际，count_params 口径）: {count_params(lm.net):,}")
-    print("[context] 状态全程不重置（WM/STDP/LTM 跨样本/分片/epoch 连续携带）；"
-          "长程依赖由 big_ltm 印迹承载 → 支持任意长连续序列（目标 ≥1M tokens）")
+    print(f"plastic params (as built, count_params basis): {count_params(lm.net):,}")
+    print("[context] state never reset (WM/STDP/LTM carried continuously across samples/shards/epochs);"
+          " long-range dependency carried by big_ltm imprints → supports arbitrarily long continuous sequences (target ≥1M tokens)")
 
     if args.init_from is not None and Path(args.init_from).exists():
         meta = load_model(Path(args.init_from), lm)
-        print(f"[两阶段] 已从 {args.init_from} 初始化权重"
-              f"（{meta.get('when', '?')}），步数归零 → 进入 "
-              f"{'SFT 微调' if args.assistant_marker else '继续训练'}"
-              f"（与 --resume 不同：不恢复步数）")
+        print(f"[stage-2] weights initialised from {args.init_from}"
+              f" ({meta.get('when', '?')}), steps reset to zero → entering "
+              f"{'SFT fine-tuning' if args.assistant_marker else 'continued training'}"
+              f" (unlike --resume: step count not restored)")
     elif args.init_from is not None:
-        print(f"[两阶段] 未找到 {args.init_from}，按从头开始处理（如实报告）")
+        print(f"[stage-2] {args.init_from} not found, treating as from scratch (reported as-is)")
 
     done = 0
     if args.resume and ckpt.exists():
         meta = load_model(ckpt, lm)
         done = int(meta["done"])
-        print(f"[续训] 已恢复 {done:,} tokens（检查点 {meta['when']}）")
+        print(f"[resume] restored {done:,} tokens (checkpoint {meta['when']})")
     elif args.resume:
-        print(f"[续训] 未找到检查点 {ckpt}，从头开始")
+        print(f"[resume] checkpoint {ckpt} not found, starting from scratch")
 
     if args.report:
         _print_table_stats(lm)
-        print(f"[log] 日志已保存：{log_path}")
+        print(f"[log] log saved: {log_path}")
         return
 
     # ── 流式训练主循环（1M context：状态永不重置）──
@@ -561,8 +567,8 @@ def main() -> None:
         p1, trainable = _next_tok()                        # t_i
         t0, _ = _next_tok() if p1 is not None else (None, True)   # t_{i+1}（训练目标）
         if args.epochs > 1 and ep > 0 and i > 0:
-            print(f"[epoch {ep + 1}/{args.epochs}] 跨 epoch 续流：状态连续"
-                  f"（net 不重置），首步 prev 断开", flush=True)
+            print(f"[epoch {ep + 1}/{args.epochs}] continuing stream across epochs: state continuous"
+                  f" (net not reset), first step's prev link severed", flush=True)
         while t0 is not None:
             if _STOP["flag"]:
                 break
@@ -591,10 +597,10 @@ def main() -> None:
 
             if args.context_milestone and i // args.context_milestone > last_mile:
                 last_mile = i // args.context_milestone
-                ppl_ms = f"滑动 PPL {float(np.exp(np.mean(seg_nll[-args.log_every:]))):.3f}" \
+                ppl_ms = f"sliding PPL {float(np.exp(np.mean(seg_nll[-args.log_every:]))):.3f}" \
                     if seg_nll else ""
-                print(f"[context 里程碑] 已连续处理 {last_mile * args.context_milestone:,} "
-                      f"tokens（状态无重置；≥1M context 达标 ×{last_mile}）{ppl_ms}",
+                print(f"[context milestone] {last_mile * args.context_milestone:,} "
+                      f"tokens processed continuously (state never reset; ≥1M context achieved ×{last_mile}){ppl_ms}",
                       flush=True)
                 _print_table_stats(lm)
             if (i - done) % args.log_every == 0 and seg_nll:
@@ -608,14 +614,14 @@ def main() -> None:
                 _ro_n = max(1, int(getattr(lm.net, "_ro_calls", 0)))
                 _ro_dev = (getattr(lm.net.readout, "device", "cpu")
                            if _rb.startswith("accel:") else "cpu")
-                print(f"  token {i:>12,}  滑动 PPL {ppl:>9.3f}  {ms:>8.2f} ms/tok"
-                      f"  已用 {spent / 60:.1f} min"
-                      f"  | 读出 {_ro_ms / _ro_n:>7.3f} ms/tok"
-                      f"（{_rb.split('(')[0]}@{_ro_dev}，占 {_ro_ms / 1000 / max(1e-9, spent) * 100:>5.1f}%）",
+                print(f"  token {i:>12,}  sliding PPL {ppl:>9.3f}  {ms:>8.2f} ms/tok"
+                      f"  elapsed {spent / 60:.1f} min"
+                      f"  | readout {_ro_ms / _ro_n:>7.3f} ms/tok"
+                      f" ({_rb.split('(')[0]}@{_ro_dev}, {_ro_ms / 1000 / max(1e-9, spent) * 100:>5.1f}% of total)",
                       flush=True)
                 if getattr(lm.net, "_prof_on", False) and lm.net._prof:
                     _pr = sorted(lm.net._prof.items(), key=lambda kv: -kv[1])[:6]
-                    print("      分段: " + "  ".join(
+                    print("      segments: " + "  ".join(
                         f"{k} {v * 1000 / max(1, i - done):.2f}" for k, v in _pr)
                           + " ms/tok", flush=True)
                 # P41：系统/设备遥测（CPU/RAM/NPU/HBM；IPC 需外部 perf）
@@ -625,7 +631,7 @@ def main() -> None:
                     pass
             if args.ckpt_every and (i - done) and (i - done) % args.ckpt_every == 0:
                 save_model(ckpt, lm, cfg, i)
-                print(f"  [检查点] 已保存 {i:,} tokens → {ckpt}", flush=True)
+                print(f"  [checkpoint] saved {i:,} tokens → {ckpt}", flush=True)
                 _print_table_stats(lm)
         if _STOP["flag"] or (args.tokens and i - done >= args.tokens):
             break
@@ -639,22 +645,22 @@ def main() -> None:
     oov_rate = oov_skipped / max(1, i - done)
     print("-" * 76)
     if args.assistant_marker:
-        print(f"[SFT] 回复掩码生效（标记 {args.assistant_marker!r}）："
-              f"prompt 段 {prompt_masked:,} 步只推进状态不更新权重，"
-              f"仅助手回复计损失")
-    print(f"本次训练 {i - done:,} tokens，用时 {spent / 60:.1f} min"
-          f"（{spent / max(1, i - done) * 1000:.2f} ms/token）| "
-          f"OOV 跳过 {oov_skipped:,}（{oov_rate:.4%}）")
+        print(f"[SFT] reply masking active (marker {args.assistant_marker!r}): "
+              f"{prompt_masked:,} prompt steps advance state only without weight updates;"
+              f" loss counted on assistant replies only")
+    print(f"this run {i - done:,} tokens in {spent / 60:.1f} min"
+          f" ({spent / max(1, i - done) * 1000:.2f} ms/token) | "
+          f"OOV skipped {oov_skipped:,} ({oov_rate:.4%})")
     _print_table_stats(lm)
     if seg_nll:
         final_ppl = float(np.exp(np.mean(seg_nll[-min(2000, len(seg_nll)):])))
-        print(f"末段滑动 PPL ≈ {final_ppl:.3f}")
+        print(f"tail sliding PPL ≈ {final_ppl:.3f}")
         print(f"[METRIC] preset={args.preset} data={args.data} tokens={i:,} "
               f"ms_per_token={spent / max(1, i - done) * 1000:.2f} "
               f"final_ppl={final_ppl:.3f} oov_rate={oov_rate:.5f}")
-    print(f"模型：{final}")
-    print(f"检查点：{ckpt}")
-    print(f"[log] 日志已保存：{log_path}")
+    print(f"model: {final}")
+    print(f"checkpoint: {ckpt}")
+    print(f"[log] log saved: {log_path}")
 
 
 if __name__ == "__main__":
