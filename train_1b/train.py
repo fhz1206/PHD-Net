@@ -67,6 +67,7 @@ from config_1b import capacity_report, print_capacity_report         # noqa: E40
 from corpus_stream import PrefetchChars, SEP, StreamingTokenizer     # noqa: E402
 from corpus_stream import build_vocab_text, char_chunks              # noqa: E402
 from phdnet.corpus import expand_paths                              # noqa: E402
+from phdnet.telemetry import Telemetry                              # noqa: E402
 from corpus_stream import mix_chunks, zh_char_chunks                 # noqa: E402
 from phdnet.corpus import expand_paths                               # noqa: E402
 from phdnet.model import count_params                                # noqa: E402
@@ -319,6 +320,7 @@ def main() -> None:
     cfg.nll_sync_every = args.nll_sync_every           # P34 nll 同步周期（默认 1）
     cfg.step_profiling = args.step_profiling           # P35 step 分段计时（默认关）
     cfg.torch_compile = args.torch_compile             # P38 kernel 融合（默认关）
+    _tel = Telemetry()                                 # P41：系统/设备遥测
 
     if args.data == "mix":
         try:
@@ -616,6 +618,11 @@ def main() -> None:
                     print("      分段: " + "  ".join(
                         f"{k} {v * 1000 / max(1, i - done):.2f}" for k, v in _pr)
                           + " ms/tok", flush=True)
+                # P41：系统/设备遥测（CPU/RAM/NPU/HBM；IPC 需外部 perf）
+                try:
+                    print("      " + _tel.fmt(_tel.sample()), flush=True)
+                except Exception:                       # noqa: BLE001
+                    pass
             if args.ckpt_every and (i - done) and (i - done) % args.ckpt_every == 0:
                 save_model(ckpt, lm, cfg, i)
                 print(f"  [检查点] 已保存 {i:,} tokens → {ckpt}", flush=True)
