@@ -86,6 +86,19 @@ class SparseLTM:
         cur = self.encode(rate)
         if self._prev is not None and cur:
             self.table.learn(self._prev, cur)
+            # P66 诊断（2026-09-29）：服务器 1B 档 `M4b_ltm` 段从 0.14 涨到
+            # 19.5 ms/tok 且**超线性**——`learn` 的代价是 |prev|×|cur| 次
+            # `_find_slot`，而活跃索引数 = f(rate 的稀疏度)，随训练可能变大。
+            # 这里按固定间隔打印规模，下一份日志即可把「猜测」变成数据。
+            self._diag_n = getattr(self, "_diag_n", 0) + 1
+            if self._diag_n % 1000 == 0:
+                t = self.table
+                rows = len(getattr(t, "keys", getattr(t, "out", {})))
+                print(f"[ltm-diag] imprints={self._diag_n} "
+                      f"prev={len(self._prev) if self._prev else 0} "
+                      f"cur={len(cur)} combos={len(self._prev or []) * len(cur)} "
+                      f"rows={rows:,} k_hash={self.k_hash} n_dim={self.n_dim}",
+                      flush=True)
         self._prev = cur
         self.table.step_count += 1
 
@@ -104,9 +117,17 @@ class SparseLTM:
         if not scores:
             return np.zeros(self.n_dim)
         out = np.zeros(self.n_dim)
+        n_s = 0
         for big_i, s in scores.items():
-            for j in self.rev.get(big_i, ()):        # 仅遍历被激活索引绑定的维度
+            js = self.rev.get(big_i, ())            # 仅遍历被激活索引绑定的维度
+            n_s += len(js)
+            for j in js:
                 out[j] += s
+        # P66：召回侧的遍历量（active × 平均绑定维度）也随表增长，一并记录
+        self._diag_r = getattr(self, "_diag_r", 0) + 1
+        if self._diag_r % 1000 == 0:
+            print(f"[ltm-diag] recalls={self._diag_r} active={len(active)} "
+                  f"scores={len(scores)} bindings={n_s}", flush=True)
         out /= float(self.k_hash)
         m = float(np.abs(out).max())
         return out / m if m > 0 else out
