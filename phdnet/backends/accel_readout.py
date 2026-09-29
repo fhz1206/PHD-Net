@@ -153,10 +153,19 @@ class AccelReadout:
         P38：调用方已算好 `y32 = (W@h).float()`（前向缓存），这里**不重复
         matvec**（否则 W 读两次，抵消 P28 收益）。编译器融合 softmax/log/sub/
         addmm_ 四个小 kernel、摊薄 launch 开销；eager 路径不走这里。
+
+        ⚠ P55（fhz 服务器 2026-09-29 NPU 首次真跑即崩）：P45 把「target_idx
+        路径就地改 p」实现在了 **eager 分支**，本融合核仍是旧的
+        `dp = p - t32` → `t32=None` 时 `FakeTensor - None` 崩 dynamo。两条路径
+        现在**逐行等价**（数值也等价：p − onehot ≡ p[c] −= 1）。
         """
         p = torch.softmax(y32, dim=0)
         nll_dev = -torch.log(p[correct:correct + 1] + 1e-12).reshape(())
-        dp = (p - t32).to(self.tdtype)
+        if t32 is None:                  # P45 就地改 p（target_idx 路径）
+            dp = p.to(self.tdtype)
+            dp[correct] -= 1.0
+        else:
+            dp = (p - t32).to(self.tdtype)
         self.W.addmm_(dp.reshape(-1, 1), ht.reshape(1, -1), alpha=-float(eta))
         if self.w_clip > 0.0:
             self.W.clamp_(-self.w_clip, self.w_clip)
@@ -192,7 +201,6 @@ class AccelReadout:
             y = torch.as_tensor(np.ascontiguousarray(y_pre, dtype=np.float32),
                                 device=ht.device, dtype=self.tdtype)
         y32 = y.float()
-        p = torch.softmax(y32, dim=0)
         # P40：target 两种来源——`target_idx`（int，推荐）在**设备上**构造 onehot，
         # 省掉每步 289 KiB 的 host onehot 构造 + H2D；`target`（host 数组）为
         # 兼容旧接口保留。
@@ -210,19 +218,25 @@ class AccelReadout:
         # 上 CPU 与 NPU 从此可以重叠（这是 NPU 上最大的延迟收益）。
         # P38：`_compiled` 时 softmax/nll/addmm_ 四个 kernel 交给编译器融合
         #（eager 路径逐算子执行，语义一致）
-        # nll 先取（必须在改 p 之前）
-        nll_dev = -torch.log(p[correct:correct + 1] + 1e-12).reshape(())
+        # P55：softmax/nll 只在 eager 路径算——compiled 路径由融合核内部算，
+        # 此处重算会白付一次 51962 元素 softmax + 一次 log（纯浪费）。
+        # P55 加固：融合核**首次执行**才真正触发 inductor 编译（构造期
+        # torch.compile() 只是包装，不会失败）——编译失败若不捕获，生产训练
+        # 直接崩（Windows 无 cl / NPU 上 inductor 异常均可能发生）。按 P19
+        # 「回落 + 记原因」纪律：首次失败即**永久回落 eager** 并告警。
         if self._compiled:
-            nll_dev = self._fused(y32, ht, t, correct, float(eta))
+            try:
+                nll_dev = self._fused(y32, ht, t, correct, float(eta))
+            except Exception as e:                        # noqa: BLE001
+                import warnings
+                warnings.warn(f"torch.compile 融合核执行失败，永久回落 eager"
+                              f"（原因：{type(e).__name__}: {e}）",
+                              RuntimeWarning)
+                self._compiled = False
+                self._fused = None
+                nll_dev = self._eager_step(y32, ht, t, correct, eta)
         else:
-            if t is None:                 # P45：p 就地变成 dp（p − t）
-                dp = p.to(self.tdtype)
-                dp[correct] -= 1.0
-            else:
-                dp = (p - t).to(self.tdtype)
-            self.W.addmm_(dp.reshape(-1, 1), ht.reshape(1, -1), alpha=-float(eta))
-            if self.w_clip > 0.0:
-                self.W.clamp_(-self.w_clip, self.w_clip)
+            nll_dev = self._eager_step(y32, ht, t, correct, eta)
         if self.nll_sync_every <= 1:
             return float(nll_dev.item())
         self._nll_sum = (nll_dev if self._nll_sum is None
@@ -233,6 +247,21 @@ class AccelReadout:
             self._nll_sum = None
             self._nll_n = 0
         return self._last_nll
+
+    def _eager_step(self, y32, ht, t, correct: int, eta: float):
+        """eager 逐步执行（softmax→nll→addmm_）；compiled 回落时也走这里。"""
+        p = torch.softmax(y32, dim=0)
+        # nll 先取（必须在改 p 之前）
+        nll_dev = -torch.log(p[correct:correct + 1] + 1e-12).reshape(())
+        if t is None:                     # P45：p 就地变成 dp（p − t）
+            dp = p.to(self.tdtype)
+            dp[correct] -= 1.0
+        else:
+            dp = (p - t).to(self.tdtype)
+        self.W.addmm_(dp.reshape(-1, 1), ht.reshape(1, -1), alpha=-float(eta))
+        if self.w_clip > 0.0:
+            self.W.clamp_(-self.w_clip, self.w_clip)
+        return nll_dev
 
     def _lookup_ht(self, h):
         """复用缓存的设备 h（`forward` 刚上传过同一个 h 时省一次 H2D）。
