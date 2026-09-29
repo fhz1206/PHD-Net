@@ -167,7 +167,8 @@ def main() -> None:
     from phdnet.backends.multi_device import (BACKEND_MATRIX, capability_report)
     rep = capability_report(verbose=False)
     numba_row = next(r for k, r in BACKEND_MATRIX.items() if k.startswith("numba"))
-    torch_row = next(r for k, r in BACKEND_MATRIX.items() if k.startswith("torch"))
+    torch_row = next(r for k, r in BACKEND_MATRIX.items()
+                     if k.startswith("加速读出"))   # P30：键名改为「加速读出」
     check("G.numba 仅 CPU（物理限制）",
           numba_row["cpu"] == "yes" and all(numba_row[d] == "no"
                                              for d in ("npu", "cuda", "rocm", "dml")))
