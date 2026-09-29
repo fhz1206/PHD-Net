@@ -54,12 +54,15 @@ class SparseLTM:
 
     def _check_sparse(self, rate: np.ndarray) -> None:
         """A2 契约校验：SparseLTM 接受稀疏率（激活维度 ≪ n_dim）。
-
         传入 ±1 稠密模式（如 LongTermMemory 的 Hebb 接口）会一次性激活全部维度，
         生成 n_dim×k_hash 个哈希索引，造成性能崩塌 + 语义错误且无任何报错。
         此处显式拦截并提示正确用法。
         """
         dims = int((np.asarray(rate) > 0.0).sum())
+        # P66：记录 rate 的活跃维度数——`M4b_ltm` 的组合数 = f(活跃维度)，
+        # 若它随训练单调上升，说明「稀疏度退化」是设计缺口（而非某次改动的
+        # bug）；同时也能反查 bf16 读出退化是否间接推高了活跃度。
+        self._last_dims = dims
         cap = max(1, self.n_dim // 4)
         if dims > cap:
             raise ValueError(
@@ -97,8 +100,8 @@ class SparseLTM:
                 print(f"[ltm-diag] imprints={self._diag_n} "
                       f"prev={len(self._prev) if self._prev else 0} "
                       f"cur={len(cur)} combos={len(self._prev or []) * len(cur)} "
-                      f"rows={rows:,} k_hash={self.k_hash} n_dim={self.n_dim}",
-                      flush=True)
+                      f"rate_dims={getattr(self, '_last_dims', 0)}/{self.n_dim} "
+                      f"rows={rows:,} k_hash={self.k_hash}", flush=True)
         self._prev = cur
         self.table.step_count += 1
 
