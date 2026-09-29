@@ -110,6 +110,21 @@ class PHDNet:
         self.step_count = 0
         self._sleep_count = 0                       # C2：consolidate 节流计数
 
+        # P35：step 分段计时（诊断 CPU 侧耗时分布；默认关，零开销）
+        self._prof_on = bool(getattr(cfg, "step_profiling", False))
+        self._prof: dict = {}
+
+    # ---------- P35 分段计时 ----------
+    def _prof_t(self, name: str):
+        """段起点（未开启 profiling 时返回 None，零开销）。"""
+        if self._prof_on:
+            return time.perf_counter()
+        return None
+
+    def _prof_end(self, name: str, t0) -> None:
+        if t0 is not None:
+            self._prof[name] = self._prof.get(name, 0.0) + time.perf_counter() - t0
+
     @staticmethod
     def _rate(r2: np.ndarray) -> np.ndarray:
         """tanh 表示 → 稀疏发放率：半波整流后 k-WTA 竞争（~6% 激活）。
@@ -203,25 +218,34 @@ class PHDNet:
                 "拼接输入维度），**不是 cfg.k_sparse**（k_sparse 只决定 encoder 输出"
                 "SDR 的活跃数）；target 的维度则是 **net.n_out**（读出输出维度）。")
         cfg = self.cfg
+        _p = self._prof_t('M1_encode')
         s0, _ = self.encoder.encode(x)                       # 1. M1 稀疏编码
+        self._prof_end('M1_encode', _p)
+        _p = self._prof_t('M2_infer')
         cache = self.pc.infer(s0, cfg.n_infer_steps)         # 2. M2 预测编码推理
+        self._prof_end('M2_infer', _p)
         r2, rate = cache["r2"], self._rate(cache["r2"])
         fused = self._fused_feature(rate)                    # T3.2（默认 None = 零参与）
 
+        _p = self._prof_t('M3_pred')
         pred = self.stdp.predict(self._prev_rate)            # 3. M3 时序预测（诊断指标）
         pred_feat = self.stdp.predict(self._last_rate)       # T3.1 读出预测特征（评估时保持新鲜）
+        self._prof_end('M3_pred', _p)
         cos = float(pred @ rate / (np.linalg.norm(pred) * np.linalg.norm(rate) + 1e-9))
         seq_err = 1.0 - cos
 
         surprise = float(np.linalg.norm(cache["e0"]) / np.sqrt(len(cache["e0"])))
         if not readonly:
+            _p = self._prof_t('M5_mod')
             gate, mode = self.modulator.observe(surprise)    # 4. M5 神经调制
+            self._prof_end('M5_mod', _p)
             if cfg.multi_modulation:
                 self._last_da = self.modulator.da           # DA 巩固信号（供 sleep 回放）
         else:
             gate, mode = 0.0, ""                             # 只读：不更新调制器内部状态
 
         if not readonly:
+            _p = self._prof_t('M4a_wm')
             self.wm.decay()                                  # 5. M4a 工作记忆
             # T1.3 错误驱动写入：任务误差门控（滞后一步）优先于输入惊讶
             mem_gate = self._task_gate if cfg.error_gated_memory else gate
@@ -235,6 +259,7 @@ class PHDNet:
         else:
             wm_written = False
 
+        self._prof_end("M4a_wm", _p)
         recall_hit = False                                   # 6. M4b 长期记忆交互
         if not readonly:
             # T3.2-lite 错误触发检索：预测失败时额外检索，每 4 步至多一次
@@ -250,7 +275,9 @@ class PHDNet:
             if learn and mode == "encode" and mem_gate > cfg.ltm_imprint_gate:
                 p = np.sign(rate); p[p == 0] = 1.0
                 # 大容量表按**稀疏率**印迹：±1 稠密码会激活全部维度，破坏事件驱动稀疏性
+                _p = self._prof_t('M4b_ltm')
                 self.ltm.imprint(rate if cfg.big_ltm else p)     # 预测失败/极新颖 → 快速印迹
+                self._prof_end('M4b_ltm', _p)
             elif retrieve_now:
                 cue = np.sign(rate); cue[cue == 0] = 1.0
                 rec = self.ltm.recall(rate if cfg.big_ltm else cue)  # 吸引子/联想补全
@@ -266,14 +293,25 @@ class PHDNet:
         # P20：读出计时（后端可能是 numba CPU 或加速器设备）。两次 perf_counter
         # ≈ 0.2 μs，相对读出本身（ms 级）可忽略；只累计时间不改变任何数值。
         _t_ro = time.perf_counter()
-        y = self.readout(h)
+        # P36：训练步走**设备张量直通**（`forward_dev`，零同步）——y 的 numpy
+        # 化（D2H 289 KiB + 硬同步）只在推理/评估路径需要（`sample_next` 与
+        # 评估分支消费 `d["y"]`）。配合 P34 的 nll 设备累积，训练步的 CPU/NPU
+        # 完全异步：墙钟从「NPU+CPU 串行相加」趋近 max()。
+        _dev_readout = (learn and not readonly
+                        and hasattr(self.readout, "forward_dev"))
+        if _dev_readout:
+            y_dev = self.readout.forward_dev(h)
+            y = None                                          # 训练步不需要 numpy
+        else:
+            y_dev = None
+            y = self.readout(h)
         nll = 0.0
         if target is not None and learn:
             if cfg.readout_softmax:
                 # P6 性能修复：前向 y 已算得，传给 learn_softmax 省一次 W@h
                 # （与内部重算逐位一致；y_pre 不被原地修改，下方返回值不受影响）
                 nll = self.readout.learn_softmax(
-                    h, target, self._ro_eta * learn_scale, y_pre=y,
+                    h, target, self._ro_eta * learn_scale, y_pre=(y_dev if _dev_readout else y),
                     accumulate=int(cfg.minibatch_size))   # B7：默认 1 = 逐步更新（逐位不变）
             else:
                 self.readout.learn(
@@ -347,6 +385,7 @@ class PHDNet:
             dev_frozen = (cfg.pc_dev_steps > 0 and self.step_count >= cfg.pc_dev_steps)
             if self.learn_pc:
                 pc_scale = mod_scale * ((1.0 - stability) if cfg.auto_development else 1.0)
+                _p = self._prof_t('PC_learn')
                 if not dev_frozen:
                     if cfg.pc_predictive_target and self._prev_pc is not None:
                         # T1.2 预测编码主目标化：生成权重学习「下一时间步」表示
@@ -361,6 +400,7 @@ class PHDNet:
                     # T2.2 可学习稀疏词典：Foldiak 局部规则慢调 W_enc（同一可塑门控）
                     if cfg.learnable_encoder:
                         self.encoder.learn(x, s0, cfg.eta_enc * pc_scale)
+                    self._prof_end('PC_learn', _p)
                 # 脑同构 M6：突触修剪——PC 权重低于阈值归零（突触消除，降噪+释容）
                 if cfg.critical_period:
                     if hasattr(self.pc, "prune_silence"):      # O1-2 结构性稀疏表
@@ -375,7 +415,9 @@ class PHDNet:
                 stdp_scale = mod_scale * ne_gain * (
                     (cfg.dev_floor + (1.0 - cfg.dev_floor) * stability)
                     if cfg.auto_development else 1.0)
+                _p = self._prof_t('STDP_learn')
                 self.stdp.step(self._prev_rate, rate, eta_scale=stdp_scale)
+                self._prof_end('STDP_learn', _p)
                 # 脑同构 M6：突触修剪——STDP 权重低于阈值归零
                 if cfg.critical_period:
                     self.stdp.W[np.abs(self.stdp.W) < cfg.prune_threshold] = 0.0

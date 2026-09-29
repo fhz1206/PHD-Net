@@ -183,6 +183,8 @@ def main() -> None:
                     choices=["fp32", "fp16", "bf16", "fp8", "fp4"],
                     help="读出精度（P9/P12：默认 fp32；fp64 已停止支持；"
                          "fp4 = MX 块缩放 e2m1，2026-09-28 解禁")
+    ap.add_argument("--step-profiling", action="store_true",
+                    help="P35：step 分段计时（诊断 CPU 侧耗时分布；日志按段打印）")
     ap.add_argument("--nll-sync-every", type=int, default=1,
                     help="读出 nll 同步周期（P34）：1=每步同步（旧行为）；N>1 时 "
                          "nll 累积到设备、每 N 步同步一次 → CPU/NPU 重叠，"
@@ -236,7 +238,9 @@ def main() -> None:
                          "fhz 2026-09-25 指令）")
     ap.add_argument("--context-milestone", type=int, default=1_000_000,
                     help="context 里程碑间隔 tokens（0=关闭；默认 1M）")
-    ap.add_argument("--ckpt-every", type=int, default=10000)
+    ap.add_argument("--ckpt-every", type=int, default=50000,
+                    help="每 N token 存一次检查点（P36：默认 50,000；"
+                         "每次保存含 867 MiB 读出权重 D2H + 写盘，约数秒）")
     ap.add_argument("--log-every", type=int, default=500)
     ap.add_argument("--resume", action="store_true",
                     help="从 models/ 检查点续训（快进至断点，状态由检查点恢复）")
@@ -287,9 +291,11 @@ def main() -> None:
                       "（环境矩阵 / 试分配 / 真实负载计时）")
     except Exception:                                       # noqa: BLE001
         pass
+    _inflight_samples = min(PREFETCH_DEPTH or 8192, 8192) * (PREFETCH_BATCH or 64)
     print(f"[并行] 分词线程（numba nogil）={vw} | 预取进程={_pf}"
           f" | 预取深度={PREFETCH_DEPTH or 8192}，每批={PREFETCH_BATCH or 64} 样本"
-          f"（注：深度受按文件序归并约束，囤积上限≈生产者数）"
+          f"（队列容量≈{_inflight_samples:,} 样本 ≈ 数百万 tokens；"
+          f"实际在途 ≈ 生产者数 × 领先批——多生产者才能装满队列）"
           f"（解码核/进程≈{max(1, _cpu // _pf)}，合计≈{_pf * max(1, _cpu // _pf)}）"
           f" | 数据侧并行不与分词线程叠加争抢")
     print(f"[log] 日志文件：{log_path}")

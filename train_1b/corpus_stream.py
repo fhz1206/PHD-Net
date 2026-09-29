@@ -39,9 +39,13 @@ SEP = "\n\n"
 # ① parquet 解码在 pyarrow 内**自身多线程且释放 GIL**，单进程即可吃满核；
 # ② 进程数越多，每进程一份 Python+pyarrow 上下文（~100–200 MB）线性增长；
 # ③ 主进程的分词/扫描是 numba nogil 线程（真正的多核来源）。
-# 故默认 **1 进程 + 满核解码**；需要跨文件并行时用 --prefetch-workers 调高
-# （进程数 × 每进程解码核 ≈ 核数，仍不超订）。
-PREFETCH_MAX_PROCS = 1
+# P37：默认 auto = min(8, 核数, 文件数) 多进程（跨文件并行 + 队列囤积，
+# 数据供给可到 1M tokens 级）；--prefetch-workers 显式优先。
+# P37（fhz「预取提升到 1M tokens」）：多生产者是**必要条件**——单生产者受
+# 「按文件序归并」约束，囤积≈0，depth 调多大都不增加实际在途量。8 进程 ×
+# depth 8192 批 → 在途可达 52 万样本 ≈ 数百万 tokens（每进程 ~150 MB 上下文，
+# 服务器内存充裕）。训练稳态默认仍由 train.py 传 workers 控制。
+PREFETCH_MAX_PROCS = 8
 
 
 def char_chunks(path, sep: str = SEP) -> Iterator[str]:

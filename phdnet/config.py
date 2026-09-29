@@ -282,6 +282,10 @@ class PHDNetConfig:
     # P34：nll 同步周期（AccelReadout）。1=每步同步（默认，旧行为）；N>1 时
     # nll 累积到设备、每 N 步同步一次 → CPU/NPU 重叠（NPU 上端到端约 -30~40%）。
     nll_sync_every: int = 1
+    # P35：step 分段计时（诊断 CPU 侧 11.4 ms/tok 的分布）。默认关（零开销）；
+    # 开启后 train.py 日志按段打印累计耗时（M1 编码/M2 推理/M3 预测/M5 调制/
+    # M4a WM/M4b LTM/PC 学习/STDP 学习/读出）。
+    step_profiling: bool = False
                                     # fp4 已禁用（fhz 2026-09-27）：+5.88% 劣化，待 MX 块缩放；代码保留
                                     #   可选 fp32 / fp16 / bf16 / fp8 / fp4
                                     #   低精度 = 原生位型码本存储 + 查表反量化计算
