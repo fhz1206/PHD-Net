@@ -206,6 +206,89 @@ def _transpose_csr(indptr, idx, val, n_new_rows: int, scale: float = 1.0):
     return new_indptr, flat_src.astype(np.int64), flat_val
 
 
+# ── P52：M2 推理融合核（把 5 次 matvec + n_steps 循环融进一次调用）────────
+# 逐位一致的关键：**每行入边仍按 indptr 顺序累加**（s += val[p]*x[idx[p]]），
+# 与 `_csr_matvec` 完全同序；行级并行沿用 prange 口径。
+# 收益来源：① Python 层 5 次 kernel 调用 → 1 次；② 中间数组（e1/d2/e0/d1）
+# 从「每步重新分配」变成「核内一次分配 + 循环内复用」；③ 消除 4×n_steps 次
+# 跨核的写回/读回。返回独立数组 → `cache` 跨步持有语义与原版完全相同。
+if NUMBA_OK:
+    @njit(cache=True, nogil=True, parallel=True, fastmath=True)
+    def _pc_infer_fused(up0, up1, dn0, dn1, s0, n_steps):
+        n1 = up0[0].shape[0] - 1
+        n2 = up1[0].shape[0] - 1
+        r1 = np.empty(n1)
+        r2 = np.empty(n2)
+        for i in prange(n1):                      # up0 @ s0 → tanh
+            s = 0.0
+            for p in range(up0[0][i], up0[0][i + 1]):
+                s += up0[2][p] * s0[up0[1][p]]
+            r1[i] = np.tanh(s)
+        for i in prange(n2):                      # up1 @ r1 → tanh
+            s = 0.0
+            for p in range(up1[0][i], up1[0][i + 1]):
+                s += up1[2][p] * r1[up1[1][p]]
+            r2[i] = np.tanh(s)
+        for _ in range(n_steps):
+            e1 = np.empty(n1)                     # e1 = r1 - dn1 @ r2
+            d2 = np.empty(n2)
+            for i in prange(n1):
+                s = 0.0
+                for p in range(dn1[0][i], dn1[0][i + 1]):
+                    s += dn1[2][p] * r2[dn1[1][p]]
+                e1[i] = r1[i] - s
+            for i in prange(n2):                  # d2 = clip(up1 @ e1)
+                s = 0.0
+                for p in range(up1[0][i], up1[0][i + 1]):
+                    s += up1[2][p] * e1[up1[1][p]]
+                d2[i] = min(0.5, max(-0.5, s))
+            for i in prange(n2):                  # r2 = tanh(r2 + 0.15*d2)
+                r2[i] = np.tanh(r2[i] + 0.15 * d2[i])
+            e0 = np.empty(n1)                     # e0 = s0 - dn0 @ r1
+            d1 = np.empty(n1)
+            for i in prange(n1):
+                s = 0.0
+                for p in range(dn0[0][i], dn0[0][i + 1]):
+                    s += dn0[2][p] * r1[dn0[1][p]]
+                e0[i] = s0[i] - s
+            for i in prange(n1):                  # d1 = clip(up0 @ e0)
+                s = 0.0
+                for p in range(up0[0][i], up0[0][i + 1]):
+                    s += up0[2][p] * e0[up0[1][p]]
+                d1[i] = min(0.5, max(-0.5, s))
+            for i in prange(n1):                  # r1 = tanh(r1 + 0.15*d1)
+                r1[i] = np.tanh(r1[i] + 0.15 * d1[i])
+        e0 = np.empty(n1)                          # 末尾误差（与原版同序）
+        e1 = np.empty(n1)
+        for i in prange(n1):
+            s = 0.0
+            for p in range(dn0[0][i], dn0[0][i + 1]):
+                s += dn0[2][p] * r1[dn0[1][p]]
+            e0[i] = s0[i] - s
+        for i in prange(n1):
+            s = 0.0
+            for p in range(dn1[0][i], dn1[0][i + 1]):
+                s += dn1[2][p] * r2[dn1[1][p]]
+            e1[i] = r1[i] - s
+        return r1, r2, e0, e1
+else:                                                   # numba 缺失回退
+    def _pc_infer_fused(up0, up1, dn0, dn1, s0, n_steps):
+        """无 numba 时的等价回退（逐算子，语义同原版）。"""
+        r1 = np.tanh(_csr_matvec(*up0, s0))
+        r2 = np.tanh(_csr_matvec(*up1, r1))
+        for _ in range(n_steps):
+            e1 = r1 - _csr_matvec(*dn1, r2)
+            d2 = np.clip(_csr_matvec(*up1, e1), -0.5, 0.5)
+            r2 = np.tanh(r2 + 0.15 * d2)
+            e0 = s0 - _csr_matvec(*dn0, r1)
+            d1 = np.clip(_csr_matvec(*up0, e0), -0.5, 0.5)
+            r1 = np.tanh(r1 + 0.15 * d1)
+        e0 = s0 - _csr_matvec(*dn0, r1)
+        e1 = r1 - _csr_matvec(*dn1, r2)
+        return r1, r2, e0, e1
+
+
+
 class SparsePCStack:
     """结构性稀疏预测编码栈（接口与 `PredictiveCodingStack` 对齐，可 drop-in）。
 
@@ -299,17 +382,16 @@ class SparsePCStack:
 
     # ---------- 推理（稀疏前向，逻辑与稠密版逐条对应） ----------
     def infer(self, s0: np.ndarray, n_steps: int = 1) -> dict:
-        r1 = np.tanh(_csr_matvec(*self.up0, s0))
-        r2 = np.tanh(_csr_matvec(*self.up1, r1))
-        for _ in range(n_steps):
-            e1 = r1 - _csr_matvec(*self.dn1, r2)
-            d2 = np.clip(_csr_matvec(*self.up1, e1), -0.5, 0.5)
-            r2 = np.tanh(r2 + 0.15 * d2)
-            e0 = s0 - _csr_matvec(*self.dn0, r1)
-            d1 = np.clip(_csr_matvec(*self.up0, e0), -0.5, 0.5)
-            r1 = np.tanh(r1 + 0.15 * d1)
-        e0 = s0 - _csr_matvec(*self.dn0, r1)
-        e1 = r1 - _csr_matvec(*self.dn1, r2)
+        """M2 预测编码推理（**融合核**版，P52：最大段做 numba 融合）。
+
+        融合前后**逐位一致**：每行入边仍按 indptr 顺序累加
+        （`s += val[p]*x[idx[p]]`），只是把原来「5 次独立 kernel 调用 +
+        4×n_steps 个中间数组分配」换成「1 次核调用」，中间数组在核内一次分配、
+        循环内复用。**返回独立数组**（与原版语义相同，`cache` 可安全跨步持有）。
+        行级并行沿用 `_csr_matvec` 的 prange 口径。
+        """
+        r1, r2, e0, e1 = _pc_infer_fused(self.up0, self.up1, self.dn0,
+                                        self.dn1, s0, n_steps)
         return {"s0": s0, "r1": r1, "r2": r2, "e0": e0, "e1": e1}
 
     # ---------- 学习（只更新存在的突触） ----------
