@@ -110,6 +110,31 @@ def _main() -> int:
           "stream_factory" not in (_ROOT / "train_1b" / "train.py").read_text(
               encoding="utf-8"))
 
+    # ── 语法门禁：改动过的文件必须能编译（审计 P54 教训：fast 门禁不 import
+    #    train_1b/train.py，缩进错误曾直接漏到服务器才炸）──────────────────
+    import py_compile
+    import tempfile
+    for rel in ("train_1b/train.py", "train_1b/corpus_stream.py",
+                "phdnet/ms_stream.py", "phdnet/corpus.py", "phdnet/readout.py",
+                "tests/verifiers/verify_ms_stream.py"):
+        ok = True
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                py_compile.compile(str(_ROOT / rel), doraise=True,
+                                   cfile=str(Path(td) / "out.pyc"))
+            except py_compile.PyCompileError as e:
+                ok = False
+                print(f"    ! {rel}: {e}")
+        check(f"编译通过: {rel}", ok)
+    # train.py 必须真的能被 import（argparse 层不出错）——不跑训练
+    import subprocess
+    r = subprocess.run([sys.executable, str(_ROOT / "train_1b" / "train.py"),
+                        "--help"], capture_output=True, text=True,
+                       cwd=str(_ROOT), timeout=180)
+    check("train.py --help 可执行（导入 + argparse 正常）",
+          r.returncode == 0 and "--remote-data" in r.stdout
+          and "--remote-fraction" in r.stdout)
+
     n_ok = sum(1 for _, ok in CASES if ok)
     print(f"\n通过 {n_ok}/{len(CASES)}")
     return 0 if n_ok == len(CASES) else 1

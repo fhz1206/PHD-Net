@@ -185,7 +185,7 @@ def main() -> None:
     ap.add_argument("--torch-compile", dest="torch_compile",
                     action="store_true", default=True,
                     help="P45: fuse the accelerated-readout kernels via "
-                         "torch.compile (default ON; measured 15% faster "
+                         "torch.compile (default ON; measured 15%% faster "
                          "locally after removing the per-step target buffer "
                          "allocation: 26.34 vs 30.98 ms/tok)")
     ap.add_argument("--no-torch-compile", dest="torch_compile",
@@ -372,7 +372,8 @@ def main() -> None:
     else:                                   # 远程：MsFile 自带 API Size
         from phdnet.ms_stream import ms_total_size
         total_mb = ms_total_size(data_files) / 1e6
-
+        print(f"[data] {len(data_files)} remote shards, ~{total_mb:.0f} MB "
+              f"(ModelScope HTTP Range streaming, zero local copy)")
     # 数据口径随检查点落盘（审计 D2：--remote-fraction 变化 + --resume 会静默
     # 改变数据分布 → 恢复训练时须能看出这次续训用的是哪份数据）
     _data_provenance = {
@@ -382,8 +383,6 @@ def main() -> None:
         "data_shards": len(data_files),
         "data_spec": str(data_path),
     }
-        print(f"[data] {len(data_files)} remote shards, ~{total_mb:.0f} MB "
-              f"(ModelScope HTTP Range streaming, zero local copy)")
     dl_w = max(1, min(vw, len(data_files)))    # 数据加载进程数（≤文件数）
 
     # ── 词表构建（采样 or 全量扫描；训练数据本身永不截断）──
