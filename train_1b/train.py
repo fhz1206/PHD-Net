@@ -212,10 +212,19 @@ def main() -> None:
                          "cudagraphs due to mutated inputs' and lose that benefit")
     ap.add_argument("--step-profiling", action="store_true",
                     help="P35：step 分段计时（诊断 CPU 侧耗时分布；日志按段打印）")
-    ap.add_argument("--nll-sync-every", type=int, default=1,
+    ap.add_argument("--numba-threads", type=int, default=8,
+                    help="P62：numba prange 线程上限（0=用 numba 默认=全部核）。"
+                         "服务器实测 191 核上主循环只用 1.3 核、CS/s 250 万+"
+                         "（百万级上下文切换 = 线程空转等锁）；P22 实测核内 "
+                         "1→6 线程仅 1.16×（访存带宽饱和）→ 8 线程足够，"
+                         "默认从「全部核」降到 8")
+    ap.add_argument("--nll-sync-every", type=int, default=8,
                     help="读出 nll 同步周期（P34）：1=每步同步（旧行为）；N>1 时 "
                          "nll 累积到设备、每 N 步同步一次 → CPU/NPU 重叠，"
-                         "NPU 场景端到端约 -30~40%%（PPL 统计滞后 N 步，滑动均值下可忽略）")
+                         "NPU 场景端到端约 -30~40%%（PPL 统计滞后 N 步，滑动均值下可忽略）"
+                         "｜P62 默认 8：服务器实测（2026-09-29 读出 12.9 ms/tok、"
+                         "CPU 仅 1.3-3.2/191 核、CS/s 250 万+ = 线程空转等同步）"
+                         "确认每步 .item() 是主要暴露点")
     ap.add_argument("--accel", default="auto",
                     help="读出计算设备（P19，fhz「有 cuda/cann(npu)/rocm 就跑"
                          "对应设备」）：auto = 有加速器就用（昇腾→ROCm→CUDA→"
@@ -349,6 +358,19 @@ def main() -> None:
     signal.signal(signal.SIGINT, _on_sigint)
     args.save_dir.mkdir(parents=True, exist_ok=True)
     ckpt = args.save_dir / f"phdnet1b_{args.preset}_{args.data}.npz"
+
+    # P62：numba prange 线程上限（必须在任何核首次执行**之前**设置）。
+    # 服务器 191 核实测：主循环只用 1.3–3.2 核、CS/s 250 万–600 万——大量
+    # 上下文切换来自「用 191 线程跑千行级 prange」的线程空转。P22 实测核内
+    # 1→6 线程仅 1.16×（访存带宽饱和），8 线程足够。
+    if args.numba_threads > 0:
+        try:
+            import numba
+            numba.set_num_threads(min(args.numba_threads, _cpu))
+            print(f"[parallel] numba prange threads = {numba.get_num_threads()}"
+                  f" (cap {args.numba_threads}; P22: 1→6 threads only 1.16x)")
+        except Exception as e:                          # noqa: BLE001
+            print(f"[parallel] numba thread cap not applied: {e}")
 
     cfg = build_cfg(args.preset, args.width, args.big_n,
                     args.csr_online, args.readout_conn_k, args.seed)

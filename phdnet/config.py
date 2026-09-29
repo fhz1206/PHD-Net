@@ -294,9 +294,12 @@ class PHDNetConfig:
     # numba CPU 原路径（逐位不变）；cpu/off/numba = 强制原路径；
     # npu/cuda/rocm/dml = 显式设备（不可用则回落并如实报告）。
     accel_readout: str = "auto"
-    # P34：nll 同步周期（AccelReadout）。1=每步同步（默认，旧行为）；N>1 时
+    # P34：nll 同步周期（AccelReadout）。1=每步同步（旧行为）；N>1 时
     # nll 累积到设备、每 N 步同步一次 → CPU/NPU 重叠（NPU 上端到端约 -30~40%）。
-    nll_sync_every: int = 1
+    # P62（2026-09-29）：默认 1 → **8**。服务器日志证据：读出 12.9 ms/tok、
+    # CPU 仅 1.3–3.2/191 核、CS/s 250 万–600 万（线程空转等同步）——每步
+    # .item() 把 NPU 延迟完全暴露给 CPU，流水线无法重叠。
+    nll_sync_every: int = 8
     # P35：step 分段计时（诊断 CPU 侧 11.4 ms/tok 的分布）。默认关（零开销）；
     # 开启后 train.py 日志按段打印累计耗时（M1 编码/M2 推理/M3 预测/M5 调制/
     # M4a WM/M4b LTM/PC 学习/STDP 学习/读出）。
