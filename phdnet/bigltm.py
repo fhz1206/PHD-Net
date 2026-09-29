@@ -5,6 +5,7 @@
 
 import numpy as np
 
+from .ltm_kernel import NUMBA_LTM, _recall_project
 from .sparse_table import OnlineCSRTable, SparseSynapseTable
 from .tokenizer import U64, _mix64
 
@@ -50,7 +51,32 @@ class SparseLTM:
         for j in range(n_dim):
             for i in self.idx[j].tolist():
                 self.rev.setdefault(i, []).append(j)
+        # P68：rev 是**静态**的（上面一次性构建完就不再变），所以零维护成本地
+        # 预 CSR 化，供 numba 核 `_recall_project` 使用。维度序保持与 dict 的
+        # list 序一致（j 升序）→ 与 Python 版逐位相同。
+        self._rev_indptr, self._rev_indices = self._rev_to_csr()
         self._prev: list[int] | None = None
+
+    def _rev_to_csr(self):
+        """把 `rev`（dict[big_i] → [维度…]）转成 (indptr, indices) CSR 数组。
+
+        维度序 = 原 list 序（j 升序）；`indptr` 按 big_i 升序排布。数组只覆盖
+        **rev 实际有键的域**（n_keys = max(键)+1）——查询时越界的 big_i 由核内
+        边界检查跳过，等价于原 dict `.get(big_i, ())` 返回空元组。
+        """
+        max_key = 0
+        if self.rev:
+            max_key = max(max_key, max(self.rev))
+        max_key = max(max_key, int(self.idx.max()) if self.idx.size else 0)
+        n_keys = max_key + 1
+        indptr = np.zeros(n_keys + 1, dtype=np.int64)
+        indices: list[int] = []
+        for i in range(n_keys):
+            js = self.rev.get(i)
+            indptr[i + 1] = indptr[i] + (len(js) if js else 0)
+            if js:
+                indices.extend(js)
+        return indptr, np.asarray(indices, dtype=np.int64)
 
     def _check_sparse(self, rate: np.ndarray) -> None:
         """A2 契约校验：SparseLTM 接受稀疏率（激活维度 ≪ n_dim）。
@@ -71,7 +97,13 @@ class SparseLTM:
                 f"或使用 LongTermMemory（稠密 Hebb 接口）。")
 
     def encode(self, rate: np.ndarray) -> list[int]:
-        """稀疏率 → 大空间活跃神经元索引（去重，确定性）。"""
+        """稀疏率 → 大空间活跃神经元索引（去重，确定性）。
+
+        ⚠ P68 试过 numba 化（`ltm_kernel._encode_hash_uniq`），实测 **0.84×
+        负收益**并已回滚：核内去重是 O(n²) 线性扫描，输给 Python `set` 的
+        O(1) 哈希（200 维 → 799 索引时 304 → 362 µs）。要 numba 化得改成
+        排序+相邻去重或小型开放寻址哈希表（参照 P18 的词表合并做法）。
+        """
         dims = np.nonzero(rate > 0.0)[0]
         if dims.size == 0:
             return []
@@ -90,11 +122,14 @@ class SparseLTM:
         if self._prev is not None and cur:
             self.table.learn(self._prev, cur)
             # P66 诊断（2026-09-29）：服务器 1B 档 `M4b_ltm` 段从 0.14 涨到
-            # 19.5 ms/tok 且**超线性**——`learn` 的代价是 |prev|×|cur| 次
-            # `_find_slot`，而活跃索引数 = f(rate 的稀疏度)，随训练可能变大。
-            # 这里按固定间隔打印规模，下一份日志即可把「猜测」变成数据。
+            # 19.5 ms/tok 且**超线性**——`learn` 的代价 = |prev|×|cur| 次
+            # `_find_slot`（且 `ltp<=0` 短路永不生效，因为 `_touch` 把 cur 每个
+            # 键都置 ≥1.0）；两者都来自 `encode(rate)`，随表示稠密化变大。
+            # ⚠ 门槛为每 10 次（fhz 2026-09-29 指示）：imprint 是**条件触发**
+            # （mode=="encode" 且 gate 达标），设 1000 次时 3500 token 一行都
+            # 不出；recall 同理。
             self._diag_n = getattr(self, "_diag_n", 0) + 1
-            if self._diag_n % 1000 == 0:
+            if self._diag_n % 10 == 0:
                 t = self.table
                 rows = len(getattr(t, "keys", getattr(t, "out", {})))
                 print(f"[ltm-diag] imprints={self._diag_n} "
@@ -121,14 +156,25 @@ class SparseLTM:
             return np.zeros(self.n_dim)
         out = np.zeros(self.n_dim)
         n_s = 0
-        for big_i, s in scores.items():
-            js = self.rev.get(big_i, ())            # 仅遍历被激活索引绑定的维度
-            n_s += len(js)
-            for j in js:
-                out[j] += s
+        if NUMBA_LTM:
+            # P68：核内累加（nogil 串行——输出维度被多个 big_i 共享，prange 会
+            # 竞态）。遍历次序与 Python 版一致 → 逐位相同。
+            ks = np.fromiter(scores.keys(), dtype=np.int64, count=len(scores))
+            ws = np.fromiter(scores.values(), dtype=np.float64, count=len(scores))
+            _recall_project(ks, ws, out, self._rev_indptr, self._rev_indices)
+            n_rev = self._rev_indptr.shape[0] - 1
+            valid = ks[ks < n_rev]
+            n_s = int(np.diff(self._rev_indptr)[valid].sum()) if valid.size else 0
+        else:
+            for big_i, s in scores.items():
+                js = self.rev.get(big_i, ())            # 仅遍历被激活索引绑定的维度
+                n_s += len(js)
+                for j in js:
+                    out[j] += s
         # P66：召回侧的遍历量（active × 平均绑定维度）也随表增长，一并记录
+        # （门槛同 imprint：recall 同样是条件触发，不能设 1000）
         self._diag_r = getattr(self, "_diag_r", 0) + 1
-        if self._diag_r % 1000 == 0:
+        if self._diag_r % 10 == 0:
             print(f"[ltm-diag] recalls={self._diag_r} active={len(active)} "
                   f"scores={len(scores)} bindings={n_s}", flush=True)
         out /= float(self.k_hash)
