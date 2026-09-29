@@ -155,7 +155,7 @@ V=9,219 时约 37 KB×2 ≈ 数 μs，不构成瓶颈。softmax 主回路在主�
 | 后端 | CPU | 昇腾 NPU | CUDA | ROCm | DirectML |
 |---|---|---|---|---|---|
 | numba（**生产**：`train_1b/train.py`、`infer.py`） | ✓ | ✗ | ✗ | ✗ | ✗ |
-| torch 栈（`tools/train_torch_lm.py`、`phdnet.backends`） | ✓ | ✓ | ✓ | ✓ | ✓ |
+| torch 栈（`phdnet/backends/accel_readout.py`（生产加速读出）、`phdnet.backends`） | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 numba 的 `@njit` **只能编译到 CPU 机器码**（物理限制）。生产路径的分词核、读出
 融合核、稀疏主循环全部是 numba，因此 NPU 机器上它们依然跑在 CPU 上——日志里
@@ -321,3 +321,22 @@ token 100  … | 读出 1.234 ms/tok（accel:npu@npu, 占 12.3%）
 从不衰减其他行」的纯 Hebbian 规则，与 fp32 的 `p − t` 不是同一个学习规则。
 现有 PPL 表（fp16 −0.17%）是 CPU 码本路径、在 `eta=0.05` 下测的；现行默认
 `eta=0.15` 更激进，需重测。
+
+## 十二、旧 torch 栈删除（P30，2026-09-29，fhz「旧的可以删除」）
+
+删除范围（约 1,400 行死代码）：
+
+| 删除项 | 理由 |
+|---|---|
+| `torch_lm.TorchPHDNet` / `TorchWordLM` / `TorchSparsePC` / `TorchLTM` / `TorchReadoutDense` / `TorchSparseEncoder` / `_ProdSTDPCore` | 完整 torch 版 PHD-Net：**权重与生产 npz 不通用**、**缺 7 项机制**（`big_ltm` 等），从未进入生产路径 |
+| `torch_backend.TorchReadout` / `TorchSTDPCore` / `selftest_torch` | 被 `accel_readout.AccelReadout`（P19/P28）取代；P29 还发现基准曾测错对象 |
+| `tools/train_torch_lm.py` / `tests/verifiers/verify_torch_lm.py` | 上述栈的入口与验证 |
+| `phdnet/torch_backend.py`（旧位置 shim） | 迁移期兼容层 |
+
+**保留**（生产依赖）：`resolve_device`（auto 择优，`accel_readout` 用）、
+`probe_devices`、`bench_readout`（P29 修正版）、`multi_device`（多卡 +
+`capability_report`）、`AccelReadout`。
+
+删除理由归结为一句话：**加速的正确姿势是"只迁移读出"（P19），而不是维护
+一套永远赶不上 numba 主循环机制数的平行实现**。此后读出加速只有一个实现
+（`AccelReadout`），基准只测生产对象（P29），不会再出现「测错对象」类 bug。

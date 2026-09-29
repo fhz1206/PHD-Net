@@ -18,7 +18,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)
 
-from phdnet.torch_backend import bench_readout, probe_devices   # noqa: E402
+from phdnet.backends.torch_backend import (bench_readout,          # noqa: E402
+                                           probe_devices)
 
 
 def main() -> None:

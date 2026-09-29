@@ -213,9 +213,9 @@ def plan_parallel(devices: list[str], V: int, H: int,
 
 
 class MultiDeviceReadout:
-    """读出按 V 维分片的列并行封装（语义对齐 `TorchReadoutDense`）。
+    """读出按 V 维分片的列并行封装（语义对齐单设备 `AccelReadout`）。
 
-    单设备（len(devices)==1）时行为与 `TorchReadoutDense` 完全一致。
+    单设备（len(devices)==1）时行为与 `AccelReadout` 完全一致。
     多设备：各卡持 W[s:e, :] 分片；前向 = 分片 matvec → 主设备 cat（无跨卡算子
     调用，行切分逐位等价）；更新 = 主卡 fp32 softmax 后把 dp 分片下发，各卡本地
     `add_(outer(dp_i, h), alpha=-eta)`（外积逐行独立，无通信依赖）。
@@ -326,7 +326,7 @@ BACKEND_MATRIX = {
         "note": "numba njit 只能编译到 CPU 机器码；分词核/读出融合核/稀疏主循环"
                 "全部 CPU。NPU 上它表现为『已启用（numba nogil 线程）』但实际是 CPU。",
     },
-    "torch 栈（tools/train_torch_lm.py、phdnet.backends）": {
+    "加速读出（phdnet.backends.accel_readout.AccelReadout）": {
         "cpu": "yes", "npu": "yes", "cuda": "yes", "rocm": "yes",
         "dml": "yes",
         "note": "torch_npu / CUDA / ROCm / DirectML 均支持（--device auto 自动"
@@ -351,7 +351,7 @@ def capability_report(verbose: bool = True) -> dict:
         "action": (None if not accel else
                    f"检测到加速器 {accel}：生产入口（train_1b）仍走 numba/CPU，"
                    f"这是 numba 的物理限制，非探测失败。若要真正用上 {accel}，"
-                   f"请走 torch 栈：python tools/train_torch_lm.py --device auto"
+                   f"读出走 accel_readout（P19 起生产默认 auto）"
                    f"（注意机制覆盖与权重不通用，见下表 note）。"),
     }
     if verbose:

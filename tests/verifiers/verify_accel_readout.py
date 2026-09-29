@@ -148,7 +148,8 @@ def main() -> None:
     for name in sorted(used):
         if name in ("py", "Readout", "forward", "device", "X",
                     "_accel_fallback_reason", "backends", "_csr",
-                    "AccelReadout"):   # from .accel_readout import AccelReadout
+                    "AccelReadout",          # from .accel_readout import AccelReadout
+                    "resolve_accel_device"):  # from .accel_readout import resolve_accel_device
 
             continue                                    # 模块名/自身属性/诊断用
         if not hasattr(inst, name):

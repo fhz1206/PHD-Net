@@ -45,7 +45,7 @@ if __name__ == "__main__":
 
     if "--torch" in sys.argv:
         print("\n--- 强制 torch 后端等价性自检 ---")
-        from phdnet.torch_backend import selftest_torch
+        from phdnet.backends.accel_readout import AccelReadout  # P30
         dev = select_backend("torch").device
         ok = selftest_torch(device=dev)
         print(f"  device={dev}: {'✓ torch 后端与 numpy 参考一致' if ok else '✗ 不一致/不可用'}")

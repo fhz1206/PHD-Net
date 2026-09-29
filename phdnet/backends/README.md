@@ -8,7 +8,7 @@ device/dtype 不同），跨设备判据为**容差一致**（不宣称逐位—
 | 文件 | 内容 |
 |---|---|
 | `torch_backend.py` | 基础层：设备探针、STDP 核、读出热路径、自检、基准 |
-| `torch_lm.py` | 词级 LM 全栈（M1–M6）torch 化：`TorchWordLM` / `TorchPHDNet` |
+| `torch_lm.py（仅存 `resolve_device` 设备解析）` | 词级 LM 全栈（M1–M6）torch 化：`TorchWordLM` / `TorchPHDNet` |
 | `multi_device.py` | 多卡自动适配（P14）：`resolve_devices` / `probe_multi` / `shard_ranges` / `plan_parallel` / `MultiDeviceReadout`（读出列并行）+ `capability_report`（后端×设备能力矩阵） |
 | `accel_readout.py` | 读出加速后端（P19）：`AccelReadout`（torch，W 常驻设备）+ `pick_readout_backend`（auto 选设备 / 不兼容时回落并记原因） |
 | `__init__.py` | 公共 API re-export |
@@ -16,7 +16,7 @@ device/dtype 不同），跨设备判据为**容差一致**（不宣称逐位—
 多卡（P14）：PHD-Net 无 batch 维/无梯度 → DDP/DP 不适用，走**模型并行**：
 读出 W∈R^{V×H} 按词表行列并行（每步通信 ~2×V×4B），4 路分片与单设备**逐位一致**
 （`tests/verifiers/verify_multi_device.py` 24 例）；LTM 2^24 按神经元区间分片为
-计划层（`shard_ranges`），真机待验。入口 `tools/train_torch_lm.py --devices auto`。
+计划层（`shard_ranges`），真机待验。入口 `tools/train_torch_lm.py（仅存 `resolve_device` 设备解析） --devices auto`。
 
 旧路径 `phdnet.torch_backend` 保留兼容 shim（`from .backends.torch_backend import *`），
 7 处既有引用零改动。
@@ -24,15 +24,15 @@ device/dtype 不同），跨设备判据为**容差一致**（不宣称逐位—
 ## torch_backend.py 公共 API
 
 - `probe_devices() -> dict`：统一设备探针（npu / rocm / cuda / dml / cpu），诚实降级 + 告警；
-- `TorchSTDPCore`：STDP 时序关联核（numpy↔torch 每步小向量互转）；
-- `TorchReadout`：读出热路径（fp32 / fp16 / bf16；fp8 需 CUDA≥8.9 真机）；
+- `（已随 torch 栈删除）`：STDP 时序关联核（numpy↔torch 每步小向量互转）；
+- `AccelReadout`：读出热路径（fp32 / fp16 / bf16；fp8 需 CUDA≥8.9 真机）；
 - `selftest_torch(device, dtype, cls=, reference=, eta=, stimulus=)`：等价性自检
   （容差判据）。`cls` 指定被测 STDP 类（传 `"_ProdSTDPCore"` 惰性 import 生产类），
   `reference` 选参考口径（`"numpy"`=formB / `"numba"`=numpy 端生产主路径 formA），
   `stimulus="walk"` 用逐帧游走发放率；
 - `bench_readout(device, V, H, ...)`：读出前向/更新基准。
 
-## torch_lm.py —— 词级 LM 全栈（M1–M6 同一份算子覆盖多硬件）
+## torch_lm.py（仅存 `resolve_device` 设备解析） —— 词级 LM 全栈（M1–M6 同一份算子覆盖多硬件）
 
 ### 设计要点（诚实声明）
 
@@ -69,24 +69,24 @@ device/dtype 不同），跨设备判据为**容差一致**（不宣称逐位—
   critical_period / task_modulation / auto_development /
   pc_predictive_target / neuron_target_rate**（后 7 项 2026-09-28 补入：numpy 端
   真实生效但 torch `step()` 从未实现，此前被静默 no-op）；
-- M3 复用 TorchSTDPCore 的 numpy↔torch 每步互转：CPU 上开销可忽略，
+- M3 复用 （已随 torch 栈删除） 的 numpy↔torch 每步互转：CPU 上开销可忽略，
   CUDA 真机上是已知优化点。
 
 ## 验证与使用
 
 ```bash
 # 等价性验证（torch vs numpy 主实现，同 seed、冻结语料；逐设备对比）
-python tests/verifiers/verify_torch_lm.py --device cpu          # 或 --device all / cuda,npu
+python tests/verifiers/verify_torch_lm.py（仅存 `resolve_device` 设备解析） --device cpu          # 或 --device all / cuda,npu
 
 # 独立训练入口（数据侧 CPU 多进程留 numpy，网络计算在指定设备）
-python tools/train_torch_lm.py --device cpu --preset smoke --data eval --tokens 2000
-python tools/train_torch_lm.py --device auto --preset base --data eval \
+python tools/train_torch_lm.py（仅存 `resolve_device` 设备解析） --device cpu --preset smoke --data eval --tokens 2000
+python tools/train_torch_lm.py（仅存 `resolve_device` 设备解析） --device auto --preset base --data eval \
     --tokens 50000 --ckpt outputs/torch_lm_base.npz --resume
 ```
 
 验收结果（2026-09-28，CPU）：
 
-- `verify_torch_lm.py`：PPL 相对差 **0.00003%**（容差 1%），权重轨迹
+- `verify_torch_lm.py（仅存 `resolve_device` 设备解析）`：PPL 相对差 **0.00003%**（容差 1%），权重轨迹
   readout / stdp / pc Pearson 相关全部 **1.000000**（容差 0.99）→ PASS；
 - fast 11/11 零回归 PASS；
 - 冒烟训练 2,000 token 跑通（15 ms/token，OOV 0）；smoke preset 的 PPL

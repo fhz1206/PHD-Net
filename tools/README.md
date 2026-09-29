@@ -11,7 +11,7 @@
 | 入口 | 定位 | 何时用 |
 |---|---|---|
 | `train_1b/train.py` | **生产单轨**（numba CPU，1B 词级 LM 全量流式训练） | 1B 正式训练、SFT、评测 |
-| `tools/train_torch_lm.py` | torch 栈轨（多卡自动适配 P14，权重与生产 ckpt **不通用**） | 有 GPU/多卡时的实验与加速验证 |
+| `tools/train_rl.py`（RL）与 `tools/bench_accel.py` | torch 栈轨（多卡自动适配 P14，权重与生产 ckpt **不通用**） | 有 GPU/多卡时的实验与加速验证 |
 | `tools/train_1b_capacity.py` | 1B **容量验证**（BillionSynapseNet 在线 CSR，无词表/无流式管线） | 复现「1B 容量本机可训」结论（docs 引用） |
 
 推理：`train_1b/infer.py`（生产 ckpt，numba CPU 单路）/ torch 栈见上表说明。

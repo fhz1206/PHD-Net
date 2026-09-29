@@ -24,9 +24,7 @@ if str(ROOT) not in sys.path:
 TESTS = ROOT / "tests"
 PY = sys.executable
 
-from checks_backend import (t_backend_probe, t_prod_stdp_equivalence,
-                            t_torch_equivalence, t_torch_lm_switches,
-                            t_torch_model_smoke)
+from checks_backend import t_backend_probe
 from checks_common import ENV, TESTS, _check, _results, reset_results
 from checks_core import (t_bigltm_smoke, t_brain_homologues, t_capacity_small,
                          t_core_demo, t_copy_task, t_switches_construct,
@@ -80,10 +78,6 @@ def main() -> None:
     t_bigltm_smoke()
     t_copy_task()
     t_backend_probe()
-    t_torch_equivalence()
-    t_prod_stdp_equivalence()
-    t_torch_model_smoke()
-    t_torch_lm_switches()
     t_switches_construct()
     t_brain_homologues()
     if mode == "full":

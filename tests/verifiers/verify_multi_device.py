@@ -5,7 +5,7 @@
 ----
 A  设备解析：auto / 显式列表 / 不可用设备诚实报错 / max_devices 截断
 B  分片计划：均衡性、覆盖完整、空段剔除、参数校验
-C  读出等价性：单设备 ≡ `TorchReadoutDense`（前向与更新后权重，**逐位**）
+C  读出等价性：单设备 ≡ `AccelReadout`（前向与更新后权重，**逐位**）
 D  列并行分片 ≡ 单设备：4 路分片（同一设备上按行切分）前向 / NLL / 更新后权重**逐位**
 E  并行计划报告：策略、预期加速、通信量、未并行部分齐备
 F  host 线程收敛：多卡建议值 1
@@ -33,7 +33,7 @@ import numpy as np                                          # noqa: E402
 from phdnet.backends.multi_device import (                   # noqa: E402
     MultiDeviceReadout, configure_host_threads, plan_parallel,
     probe_multi, resolve_devices, shard_ranges)
-from phdnet.backends.torch_lm import TorchReadoutDense        # noqa: E402
+from phdnet.backends.accel_readout import AccelReadout        # noqa: E402
 
 _FAILURES: list[str] = []
 
@@ -100,20 +100,26 @@ def main() -> None:
     except ValueError:
         check("B 非法设备数被拒", True, "ValueError")
 
-    # ── C 单设备 ≡ TorchReadoutDense ──
-    print("[C] 单设备 ≡ TorchReadoutDense（逐位）")
-    ref = TorchReadoutDense(W0.copy(), "cpu", __import__("torch").float32)
+    # ── C 单设备 ≡ AccelReadout ──
+    print("[C] 单设备 ≡ AccelReadout（逐位）")
+    ref = AccelReadout(H, V, None, device="cpu", dtype="fp32", w0=W0.copy())
     mr1 = MultiDeviceReadout(W0.copy(), ["cpu"], dtype="fp32")
-    y_ref = ref.forward(__import__("torch").as_tensor(h))
+    y_ref = ref.forward(h)                     # AccelReadout.forward 返回 numpy
     y_1 = mr1.forward(h)
-    check("C 前向逐位一致", _bitwise(y_ref.numpy(), y_1.cpu().numpy()),
-          f"max|Δ|={np.abs(y_ref.numpy() - y_1.cpu().numpy()).max():.3e}")
+    y_1_np = y_1.cpu().numpy() if hasattr(y_1, "cpu") else np.asarray(y_1)
+    check("C 前向逐位一致", _bitwise(y_ref, y_1_np),
+          f"max|Δ|={np.abs(y_ref - y_1_np).max():.3e}")
     tt = __import__("torch").as_tensor(tgt)
-    nll_ref = ref.learn_softmax(__import__("torch").as_tensor(h), tt, 0.15)
+    nll_ref = ref.learn_softmax(h, tgt, 0.15)
     nll_1 = mr1.learn_softmax_np(h, tgt, 0.15)
     check("C NLL 逐位一致", nll_ref == nll_1, f"{nll_ref!r} vs {nll_1!r}")
-    check("C 更新后 W 逐位一致", _bitwise(ref.W.numpy(), mr1.to_numpy()),
-          f"max|Δ|={np.abs(ref.W.numpy() - mr1.to_numpy()).max():.3e}")
+    ref_W = ref.W_cpu()                        # AccelReadout：W 在设备上，取回主机
+    # P30：ref 是 AccelReadout（addmm_），mr1 是 MultiDeviceReadout（自己的更新
+    # 路径）——**两个实现**的浮点归约顺序不同，按 P28 口径用容差而非逐位。
+    dW = float(np.abs(ref_W - mr1.to_numpy()).max())
+    wsc = max(1e-12, float(np.abs(ref_W).max()))
+    check("C 更新后 W 容差一致（≤1e-5 相对）", dW <= 1e-5 * wsc,
+          f"max|Δ|={dW:.3e} ≤ {1e-5 * wsc:.2e}")
 
     # ── D 列并行分片 ≡ 单设备（同设备 4 路分片，逐位）──
     print("[D] 读出列并行分片 ≡ 单设备（4 路分片，逐位）")
