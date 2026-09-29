@@ -289,7 +289,16 @@ class PHDNetConfig:
     # P38/P41（fhz 指令默认开）：torch.compile 融合加速读出的 softmax/nll/
     # addmm_ 小 kernel（CANN 上 launch 开销 ~50-200μs/kernel，每步 5 个）。
     # 失败自动回落 eager 并告警；昇腾实测进行中。
+    # P45：**默认开**（fhz 指令）。数据依据：修掉 `zeros_like` 每步 289 KiB
+    # 设备分配后，本机 A/B（400-token smoke）——开 26.34 vs 关 30.98 ms/tok
+    #（**快 15%**）。修之前是反向的（开 30.54 vs 关 28.70），说明瓶颈在分配而
+    # 不在融合本身。模式固定用 `torch_compile_mode="default"`（P44：cudagraph
+    # 与 W 原地更新冲突，勿用 reduce-overhead）。
     torch_compile: bool = True
+    # P44：torch.compile 模式。**默认 "default"**（只融合 kernel，不启用
+    # cudagraphs）——cudagraph 与 `W.addmm_` 原地更新冲突（"skipping cudagraphs
+    # due to mutated inputs" 警告 + 静默回退），W 每步原地更新是硬约束。
+    torch_compile_mode: str = "default"
                                     # fp4 已禁用（fhz 2026-09-27）：+5.88% 劣化，待 MX 块缩放；代码保留
                                     #   可选 fp32 / fp16 / bf16 / fp8 / fp4
                                     #   低精度 = 原生位型码本存储 + 查表反量化计算

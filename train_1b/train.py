@@ -188,12 +188,20 @@ def main() -> None:
                          "fp4 = MX 块缩放 e2m1，2026-09-28 解禁")
     ap.add_argument("--torch-compile", dest="torch_compile",
                     action="store_true", default=True,
-                    help="P38: fuse the accelerated-readout kernels via "
-                         "torch.compile (default ON per fhz; falls back to "
-                         "eager with a warning on failure)")
+                    help="P45: fuse the accelerated-readout kernels via "
+                         "torch.compile (default ON; measured 15% faster "
+                         "locally after removing the per-step target buffer "
+                         "allocation: 26.34 vs 30.98 ms/tok)")
     ap.add_argument("--no-torch-compile", dest="torch_compile",
                     action="store_false",
                     help="disable the P38 kernel fusion")
+    ap.add_argument("--torch-compile-mode", default="default",
+                    choices=["default", "reduce-overhead", "max-autotune"],
+                    help="P44: default='default' fuses kernels WITHOUT cudagraphs "
+                         "(required, because the readout updates W in place and "
+                         "cudagraphs reject mutated inputs); reduce-overhead / "
+                         "max-autotune enable graph capture but will log 'skipping "
+                         "cudagraphs due to mutated inputs' and lose that benefit")
     ap.add_argument("--step-profiling", action="store_true",
                     help="P35：step 分段计时（诊断 CPU 侧耗时分布；日志按段打印）")
     ap.add_argument("--nll-sync-every", type=int, default=1,
@@ -324,7 +332,8 @@ def main() -> None:
     cfg.accel_readout = args.accel                     # P19 读出设备（默认 auto）
     cfg.nll_sync_every = args.nll_sync_every           # P34 nll 同步周期（默认 1）
     cfg.step_profiling = args.step_profiling           # P35 step 分段计时（默认关）
-    cfg.torch_compile = args.torch_compile             # P38 kernel 融合（默认关）
+    cfg.torch_compile = args.torch_compile             # P38 kernel 融合（默认开）
+    cfg.torch_compile_mode = args.torch_compile_mode   # P44 模式（default=无 cudagraph）
     _tel = Telemetry()                                 # P41：系统/设备遥测
 
     data_path = DATA_FILES[args.data]

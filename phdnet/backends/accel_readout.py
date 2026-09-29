@@ -56,7 +56,8 @@ class AccelReadout:
 
     def __init__(self, n_h: int, n_out: int, rng=None, device: str = "auto",
                  dtype: str = "fp32", w_clip: float = 0.0, w0=None,
-                 nll_sync_every: int = 1, compile: bool = False):
+                 nll_sync_every: int = 1, compile: bool = False,
+                 compile_mode: str = "default"):
         if torch is None:
             raise RuntimeError("未安装 torch，加速读出不可用")
         if dtype not in _DT:
@@ -70,16 +71,24 @@ class AccelReadout:
         self._nll_sum = None
         self._nll_n = 0
         self._last_nll = 0.0
-        # P38（实验性）：`torch.compile` 融合读出热路径的 5 个小 kernel
-        # （matvec / softmax / log / sub / addmm_）。CANN 上每个 kernel 的
-        # launch 开销 ~50-200 μs，每步 5 个 → 占读出延迟的大头。reduce-overhead
-        # 模式（NPU 对应 npu_graph）可摊薄 launch。⚠ 昇腾上未实测（本机无
-        # NPU）；数值走容差判据；失败自动回落非编译路径并告警。
+        # P38/P44：`torch.compile` 融合读出热路径的 4 个小 kernel
+        # （softmax / log / sub / addmm_；CANN 上每个 launch 开销 ~50-200 μs）。
+        #
+        # ⚠ **模式选择的关键取舍（服务器实测得到）**：`mode="reduce-overhead"`
+        # 启用 CUDA Graph，而 `self.W.addmm_(...)` **原地修改 W** —— cudagraph
+        # 捕获的张量不允许被后续 kernel mutate，故每次调用都会打印
+        #     "skipping cudagraphs due to mutated inputs"
+        # 并**静默退回**无 graph 模式（功能正确，但拿不到 graph 收益）。
+        # 这是**本质冲突**：W 每步都在原地更新（908 MiB/step；改成非原地重新
+        # 分配会让流量翻倍，更不可接受）。因此默认用 `mode="default"`
+        # （只做 kernel 融合，不启用 cudagraphs）——融合收益保留，无 mutate 限制。
+        # 需要图级优化时可选 reduce-overhead/max-autotune（接受上述回退）。
         self._compiled = False
+        self._compile_mode = str(compile_mode or "default")
         if compile:
             try:
                 self._fused = torch.compile(self._train_step_core,
-                                            mode="reduce-overhead",
+                                            mode=self._compile_mode,
                                             fullgraph=False)
                 self._compiled = True
             except Exception as e:                       # noqa: BLE001
@@ -188,9 +197,10 @@ class AccelReadout:
         # 省掉每步 289 KiB 的 host onehot 构造 + H2D；`target`（host 数组）为
         # 兼容旧接口保留。
         if target_idx is not None:
+            # P45：直接把 p 变成 dp（p[c] -= 1），**不新建 zeros_like 缓冲**
+            # ——后者每步多一次 289 KiB 设备分配 + scatter kernel，比原 H2D 更贵。
             correct = int(target_idx)
-            t = torch.zeros_like(y32)
-            t[correct] = 1.0
+            t = None                      # 标记：走「就地改 p」路径
         else:
             t = self._to_dev(target).float()
             # correct 在主机侧求（target 是 host 数组）——省一次 .item() 硬同步
@@ -200,11 +210,16 @@ class AccelReadout:
         # 上 CPU 与 NPU 从此可以重叠（这是 NPU 上最大的延迟收益）。
         # P38：`_compiled` 时 softmax/nll/addmm_ 四个 kernel 交给编译器融合
         #（eager 路径逐算子执行，语义一致）
-        nll_dev = self._fused(y32, ht, t, correct, float(eta)) \
-            if self._compiled else \
-            -torch.log(p[correct:correct + 1] + 1e-12).reshape(())
-        if not self._compiled:
-            dp = (p - t).to(self.tdtype)
+        # nll 先取（必须在改 p 之前）
+        nll_dev = -torch.log(p[correct:correct + 1] + 1e-12).reshape(())
+        if self._compiled:
+            nll_dev = self._fused(y32, ht, t, correct, float(eta))
+        else:
+            if t is None:                 # P45：p 就地变成 dp（p − t）
+                dp = p.to(self.tdtype)
+                dp[correct] -= 1.0
+            else:
+                dp = (p - t).to(self.tdtype)
             self.W.addmm_(dp.reshape(-1, 1), ht.reshape(1, -1), alpha=-float(eta))
             if self.w_clip > 0.0:
                 self.W.clamp_(-self.w_clip, self.w_clip)
@@ -376,7 +391,10 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
                              dtype=cfg.readout_dtype,
                              w_clip=cfg.readout_w_clip,
                              nll_sync_every=int(getattr(cfg, "nll_sync_every", 1)),
-                             compile=bool(getattr(cfg, "torch_compile", False))),
+                             compile=bool(getattr(cfg, "torch_compile", False)),
+                             compile_mode=str(getattr(cfg,
+                                                     "torch_compile_mode",
+                                                     "default"))),
                 f"accel:{spec}")
     except Exception as e:                                   # noqa: BLE001
         return _fallback(f"{type(e).__name__}: {e}")
