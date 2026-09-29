@@ -298,7 +298,7 @@ class PHDNet:
         # 评估分支消费 `d["y"]`）。配合 P34 的 nll 设备累积，训练步的 CPU/NPU
         # 完全异步：墙钟从「NPU+CPU 串行相加」趋近 max()。
         _dev_readout = (learn and not readonly
-                        and hasattr(self.readout, "forward_dev"))
+                        and getattr(self.readout, "_is_accel", False))
         if _dev_readout:
             y_dev = self.readout.forward_dev(h)
             y = None                                          # 训练步不需要 numpy
@@ -310,9 +310,18 @@ class PHDNet:
             if cfg.readout_softmax:
                 # P6 性能修复：前向 y 已算得，传给 learn_softmax 省一次 W@h
                 # （与内部重算逐位一致；y_pre 不被原地修改，下方返回值不受影响）
-                nll = self.readout.learn_softmax(
-                    h, target, self._ro_eta * learn_scale, y_pre=(y_dev if _dev_readout else y),
-                    accumulate=int(cfg.minibatch_size))   # B7：默认 1 = 逐步更新（逐位不变）
+                # P40：设备直通路径传 target_idx（int）——target onehot 在
+                # 设备上构造，省每步 289 KiB 的 host 构造 + H2D；
+                # numba 路径保持 onehot 契约不变（不传 target_idx）。
+                if _dev_readout:
+                    nll = self.readout.learn_softmax(
+                        h, target, self._ro_eta * learn_scale, y_pre=y_dev,
+                        accumulate=int(cfg.minibatch_size),
+                        target_idx=int(np.argmax(target)))
+                else:
+                    nll = self.readout.learn_softmax(
+                        h, target, self._ro_eta * learn_scale, y_pre=y,
+                        accumulate=int(cfg.minibatch_size))
             else:
                 self.readout.learn(
                     h, target, self._ro_eta * learn_scale)   # A3 修复：非 softmax 路径同样尊重 eta_readout/退火

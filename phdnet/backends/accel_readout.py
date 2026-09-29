@@ -46,6 +46,7 @@ def resolve_accel_device(spec: str = "auto") -> str:
 
 
 class AccelReadout:
+    _is_accel = True          # P40：供 model.step 区分加速后端（设备直通 + target_idx）
     """设备无关（cpu / npu / cuda / rocm）的稠密读出，接口对齐 `Readout`。
 
     W **常驻设备**（NPU 上 908 MB 级），每步只往返 h 与 y：
@@ -154,7 +155,7 @@ class AccelReadout:
 
     # ---------- 学习（softmax 感知器，局部梯度 p − t）----------
     def learn_softmax(self, h, target, eta: float, y_pre=None,
-                      accumulate: int = 1) -> float:
+                      accumulate: int = 1, target_idx: int | None = None) -> float:
         """P6 感知器更新（softmax 交叉熵的局部梯度 ∂L/∂y = p − t）。
 
         P28 的三处性能修正（数值语义不变，仍属「容差一致」）：
@@ -183,9 +184,17 @@ class AccelReadout:
                                 device=ht.device, dtype=self.tdtype)
         y32 = y.float()
         p = torch.softmax(y32, dim=0)
-        t = self._to_dev(target).float()
-        # correct 在主机侧求（target 是 host 数组）——省一次 .item() 硬同步
-        correct = int(np.argmax(np.asarray(target)))
+        # P40：target 两种来源——`target_idx`（int，推荐）在**设备上**构造 onehot，
+        # 省掉每步 289 KiB 的 host onehot 构造 + H2D；`target`（host 数组）为
+        # 兼容旧接口保留。
+        if target_idx is not None:
+            correct = int(target_idx)
+            t = torch.zeros_like(y32)
+            t[correct] = 1.0
+        else:
+            t = self._to_dev(target).float()
+            # correct 在主机侧求（target 是 host 数组）——省一次 .item() 硬同步
+            correct = int(np.argmax(np.asarray(target)))
         # nll：P34 双模式。sync_every=1 时每步 .item()（旧行为）；N>1 时
         # 累积到设备标量、每 N 步同步一次——中间步返回滞后均值，训练热路径
         # 上 CPU 与 NPU 从此可以重叠（这是 NPU 上最大的延迟收益）。
