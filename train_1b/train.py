@@ -386,6 +386,8 @@ def main() -> None:
                   f" | OMP_PROC_BIND={os.environ.get('OMP_PROC_BIND', '-')}"
                   f" OMP_PLACES={os.environ.get('OMP_PLACES', '-')}",
                   flush=True)
+        except Exception as e:                          # noqa: BLE001
+            print(f"[parallel] numba thread cap not applied: {e}")
 
     cfg = build_cfg(args.preset, args.width, args.big_n,
                     args.csr_online, args.readout_conn_k, args.seed)
@@ -689,6 +691,10 @@ def main() -> None:
         if args.epochs > 1 and ep > 0 and i > 0:
             print(f"[epoch {ep + 1}/{args.epochs}] continuing stream across epochs: state continuous"
                   f" (net not reset), first step's prev link severed", flush=True)
+        # P72：主循环分段计时（此前只有 net.step 内部九段，**主循环开销
+        # 从未被测量**——实测分段之和 < 总耗时，差额就落在这里）。
+        _lp = {"tokenize": 0.0, "encode_onehot": 0.0, "step": 0.0}
+        _lpn = 0
         while t0 is not None:
             if _STOP["flag"]:
                 break
@@ -700,8 +706,12 @@ def main() -> None:
             if p2_in and p1 in lm.tok.stoi and t0 in lm.tok.stoi:
                 # p2 为 OOV 时按 None 处理（组合编码退化为无前词上下文）——
                 # 2026-09-25 审计修复：原条件漏查 p2，OOV 落在 p2 位会 KeyError 崩溃
+                _eo0 = time.perf_counter() if args.step_profiling else 0.0
                 x = lm.tok.encode_composite(p1, p2)
                 tgt = lm.tok.onehot(lm.tok.stoi[t0])
+                if args.step_profiling:
+                    _lp["encode_onehot"] += time.perf_counter() - _eo0
+                    _lpn += 1
                 # P69：语种自检用——保留最近 8 个真实 token（每 log_every 反查词表
                 # 拼文本片段 + CJK 占比，一眼看出 --lang 是否生效）
                 _lang_tail.append(int(lm.tok.stoi[t0]))
@@ -709,7 +719,10 @@ def main() -> None:
                     _lang_tail.pop(0)
                 # P26 SFT：p1（当前 token）属 prompt 段 → 只推进状态不学习。
                 # 损失由 (p1, p2) → p0 这一步产生，故用 **p0** 的可训练标记。
+                _st0 = time.perf_counter() if args.step_profiling else 0.0
                 d = lm.net.step(x, target=tgt, learn=trainable)
+                if args.step_profiling:
+                    _lp["step"] += time.perf_counter() - _st0
                 if trainable:
                     seg_nll.append(d["nll"])
                 else:
@@ -717,7 +730,10 @@ def main() -> None:
             else:
                 oov_skipped += 1                          # OOV：跳过该步，流不断
             i += 1
+            _tk0 = time.perf_counter() if args.step_profiling else 0.0
             _nxt, _flag = _next_tok()
+            if args.step_profiling:
+                _lp["tokenize"] += time.perf_counter() - _tk0
             p2, p1, t0, trainable = p1, t0, _nxt, _flag
 
             if args.context_milestone and i // args.context_milestone > last_mile:
@@ -744,6 +760,11 @@ def main() -> None:
                       f"  | readout {_ro_ms / _ro_n:>7.3f} ms/tok"
                       f" ({_rb.split('(')[0]}@{_ro_dev}, {_ro_ms / 1000 / max(1e-9, spent) * 100:>5.1f}% of total)",
                       flush=True)
+                if args.step_profiling and _lpn:
+                    _dt = max(1, _lpn)
+                    print("      loop: " + "  ".join(
+                        f"{k} {v * 1000 / _dt:.2f}" for k, v in _lp.items())
+                          + " ms/tok", flush=True)
                 if getattr(lm.net, "_prof_on", False) and lm.net._prof:
                     _pr = sorted(lm.net._prof.items(), key=lambda kv: -kv[1])[:6]
                     print("      segments: " + "  ".join(
