@@ -30,7 +30,6 @@ for p in (str(_ROOT / "train_1b"), str(_ROOT)):
 
 from infer import load_from_ckpt                               # noqa: E402
 from corpus_stream import StreamingTokenizer, char_chunks      # noqa: E402
-from corpus_stream import mix_chunks, zh_char_chunks           # noqa: E402
 
 
 def eval_tokens(lm, tokens, V: int):
@@ -110,7 +109,7 @@ def main() -> None:
     ap.add_argument("--skip-tokens", type=int, default=150000,
                     help="域内 held-out 从训练流第 N 个 token 开始（=训练 token 数）")
     ap.add_argument("--indomain-tokens", type=int, default=30000)
-    ap.add_argument("--data", default="sft", choices=["sft", "mix"],
+    ap.add_argument("--data", default="sft", choices=["sft"],
                     help="训练流类型（须与训练时一致）：sft / mix（sft+pretrain_zh 轮转）")
     ap.add_argument("--sft", default="datasets/sft/sft_000.*.parquet")
     args = ap.parse_args()
@@ -129,11 +128,8 @@ def main() -> None:
     segs: dict[str, list[str]] = {}
 
     # 1) 域内 held-out：重放训练流，skip 后取段（同时收集训练段 token 供 2-gram）
-    if args.data == "mix":
-        src = mix_chunks([char_chunks(_ROOT / "datasets/sft/sft_000.*.parquet"),
-                          zh_char_chunks(_ROOT / "datasets/pretrain/pretrain_*.parquet")])
-    else:
-        src = char_chunks(_ROOT / args.sft)
+    # P42：mix 混合流已删除（fhz「直接预训练和 SFT，数据全量」）
+    src = char_chunks(_ROOT / args.sft)
     stream = StreamingTokenizer(lm.tok.seg, src)
     train_toks: list[str] = []
     for i, t in enumerate(stream):

@@ -49,7 +49,7 @@ train/
 │   ├── config_1b.py            1B 预设（big_ltm 2^24×60 + 稀疏 CSR/STDP 主干，总参 ≥1B）
 │   ├── ckpt_1b.py              完整可续训检查点（含 CSR 快照 / Welford / STDP 迹）
 │   ├── infer.py                推理与对话（--chat；检查点自包含加载；词表快照自动交叉校验）
-│   ├── corpus_stream.py        流式语料（多进程 PrefetchChars + zh 过滤 + mix 轮转）
+│   ├── corpus_stream.py        流式语料（多进程 PrefetchChars + zh 过滤；P42 起两阶段：pretrain_zh / sft 各自全量）
 │   └── vocab_parallel.py       词表 / 分词多核构建（与串行逐位一致；
 │                               33.4 亿 tokens / 520s @ 191 核）
 ├── datasets/                   语料（**自身是独立仓库** → atomgit.com/fhz1206/Mixture-General-Mini）

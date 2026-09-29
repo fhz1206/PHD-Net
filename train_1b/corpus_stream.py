@@ -90,24 +90,6 @@ def zh_char_chunks(path, lang: str = "zh", sep: str = SEP) -> Iterator[str]:
         yield t + sep
 
 
-def mix_chunks(sources, sep: str = SEP) -> Iterator[str]:
-    """多源样本级轮转交错（round-robin）——泛化优化 P0 的混合域训练流。
-
-    sources = 各源的样本迭代器（如 [char_chunks(sft), zh_char_chunks(pretrain)]）；
-    等概率轮转产出（样本 + sep），某源耗尽后其余源继续。确定性顺序。
-    """
-    iters = [iter(s) for s in sources]
-    idx = 0
-    while iters:
-        k = idx % len(iters)
-        try:
-            yield next(iters[k])         # 各源已自带样本分隔符（char_chunks 约定）
-        except StopIteration:
-            iters.pop(k)                 # 该源耗尽 → 移除（idx 不前进，避免跳源）
-            continue
-        idx += 1
-
-
 def _prefetch_producer(tasks, sep: str, batch_samples: int, q,
                        lang: str | None = None,
                        decode_threads: int = 0) -> None:

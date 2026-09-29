@@ -68,7 +68,6 @@ from corpus_stream import PrefetchChars, SEP, StreamingTokenizer     # noqa: E40
 from corpus_stream import build_vocab_text, char_chunks              # noqa: E402
 from phdnet.corpus import expand_paths                              # noqa: E402
 from phdnet.telemetry import Telemetry                              # noqa: E402
-from corpus_stream import mix_chunks, zh_char_chunks                 # noqa: E402
 from phdnet.corpus import expand_paths                               # noqa: E402
 from phdnet.model import count_params                                # noqa: E402
 from phdnet.word_encoder import WordTokenizer                         # noqa: E402
@@ -102,28 +101,29 @@ DATA_FILES = {
     # 训练数据一律用上传分片 parquet（sft/ pretrain/ 根）；raw/ 仅归档不触碰
     # （fhz 2026-09-25 指令，与 tools/train_production.py 同步）。
     "sft": _ROOT / "datasets" / "sft" / "sft_000.*.parquet",
+    # P43（fhz「数据要中英文全部都拿来训练」）：`pretrain` = **全量**（中文 3708 万
+    # 块 + 英文 Magpie-R1 201 万块，无过滤）；`pretrain_zh` = 仅中文（lang 过滤，
+    # 保留作对照/消融）。两者指向同一目录，过滤逻辑在 stream_factory 区分。
+    "pretrain": _ROOT / "datasets" / "pretrain" / "pretrain_*.parquet",
     "pretrain_zh": _ROOT / "datasets" / "pretrain" / "pretrain_*.parquet",
     "eval": _ROOT / "eval_corpus" / "internal_corpus.txt",
-    # 泛化优化 P0（2026-09-25 审计）：sft 与 pretrain 中文子集样本级轮转混合
-    "mix": None,
 }
 
 
 def stream_factory(data: str):
-    """返回 () -> 新的独立样本字符块流（mix = sft 与 pretrain 中文源轮转交错）。"""
-    if data == "mix":
-        # 双源均走多进程加载（文件级并行 + 顺序归并 → 与串行产出逐位一致）：
-        # sft 全量源 + pretrain 中文过滤源（lang="zh" 在生产者进程内过滤）
-        return lambda: mix_chunks([
-            PrefetchChars(DATA_FILES["sft"], SEP, depth=PREFETCH_DEPTH,
-                          batch_samples=PREFETCH_BATCH or 64,
-                          workers=PREFETCH_W),
-            PrefetchChars(DATA_FILES["pretrain_zh"], SEP, lang="zh",
-                          depth=PREFETCH_DEPTH,
-                          batch_samples=PREFETCH_BATCH or 64,
-                          workers=PREFETCH_W),
-        ])
-    return lambda: char_chunks(DATA_FILES[data])
+    """返回 () -> 新的独立样本字符块流。
+
+    P42（fhz「去除 mix 参数，直接预训练和 SFT，数据全量」）：删除 mix 混合流。
+    两阶段各自全量：预训练 `--data pretrain_zh`（**带 lang="zh" 过滤**——pretrain
+    52 分片含 201 万英文块，不过滤会混入 5% 英文），SFT `--data sft`。
+    """
+    if data == "pretrain_zh":                      # 仅中文口径（对照/消融）
+        return lambda: PrefetchChars(DATA_FILES["pretrain_zh"], SEP, lang="zh",
+                                     depth=PREFETCH_DEPTH,
+                                     batch_samples=PREFETCH_BATCH or 64,
+                                     workers=PREFETCH_W)
+    return lambda: char_chunks(DATA_FILES[data])  # pretrain = 全量（中+英）
+
 
 _STOP = {"flag": False}
 
@@ -327,20 +327,12 @@ def main() -> None:
     cfg.torch_compile = args.torch_compile             # P38 kernel 融合（默认关）
     _tel = Telemetry()                                 # P41：系统/设备遥测
 
-    if args.data == "mix":
-        try:
-            data_files = (expand_paths(DATA_FILES["sft"])
-                          + expand_paths(DATA_FILES["pretrain_zh"]))
-        except FileNotFoundError as e:
-            print(f"data file not found: {e}")
-            sys.exit(1)
-    else:
-        data_path = DATA_FILES[args.data]
-        try:
-            data_files = expand_paths(data_path)
-        except FileNotFoundError as e:
-            print(f"data file not found: {e}")
-            sys.exit(1)
+    data_path = DATA_FILES[args.data]
+    try:
+        data_files = expand_paths(data_path)
+    except FileNotFoundError as e:
+        print(f"data file not found: {e}")
+        sys.exit(1)
     total_mb = sum(p.stat().st_size for p in data_files) / 1e6
     dl_w = max(1, min(vw, len(data_files)))    # 数据加载进程数（≤文件数）
 
@@ -354,15 +346,6 @@ def main() -> None:
                    and Path(args.vocab_file).exists())
     if _resume_vocab or _file_vocab:
         vocab_text, seg, tokens = "", None, None      # 下方按来源填充
-    elif args.data == "mix":
-        parts: list[str] = []
-        nvc = 0
-        for c in stream_factory("mix")():
-            parts.append(c)
-            nvc += len(c)
-            if nvc >= args.vocab_sample_chars:
-                break
-        vocab_text = "".join(parts)[:args.vocab_sample_chars]
     else:
         vocab_text = build_vocab_text(data_path, args.vocab_sample_chars, SEP)
     if not (_resume_vocab or _file_vocab):
@@ -427,13 +410,14 @@ def main() -> None:
             print(f"[vocab] scan decode processes: {_scan_w} (core-pinned: one dedicated core per process;"
                   f" training steady-state prefetch still {PREFETCH_W or 1})", flush=True)
             seen, n_seen = scan_vocab_parallel(seg.vocab, seg.max_len,
-                                               (stream_factory(args.data)()
-                                                if args.data == "mix"
-                                                else PrefetchChars(
-                                                    data_path, SEP,
-                                                    depth=PREFETCH_DEPTH,
-                                                    batch_samples=PREFETCH_BATCH or 64,
-                                                    workers=_scan_w)),
+                                               PrefetchChars(
+                                                   data_path, SEP,
+                                                   lang=("zh"
+                                                        if args.data == "pretrain_zh"
+                                                        else None),
+                                                   depth=PREFETCH_DEPTH,
+                                                   batch_samples=PREFETCH_BATCH or 64,
+                                                   workers=_scan_w),
                                                vw, progress=_scan_prog)
         else:
             for tk in StreamingTokenizer(seg, char_chunks(data_path, SEP)):
@@ -496,7 +480,7 @@ def main() -> None:
           f" | shards: {len(data_files)} ({total_mb:.0f} MB, streaming, never truncated)")
     print(f"epochs={args.epochs} | token budget={args.tokens or '∞'} "
           f"minutes={args.minutes or '∞'} | milestone={args.context_milestone or '∞'}"
-          f" | vocab workers={vw} | data prefetch=multiproc×{dl_w}{'+zh filter' if args.data == 'mix' else ''}"
+          f" | vocab workers={vw} | data prefetch=multiproc×{dl_w}{'+zh filter' if args.data == 'pretrain_zh' else ''}"
           f" | build time {time.perf_counter() - t0:.1f}s")
     _rb = getattr(lm.net, "_readout_backend", "numba-cpu")
     print(f"[readout] backend={_rb}"
@@ -542,14 +526,12 @@ def main() -> None:
     for ep in range(args.epochs):
         if _STOP["flag"] or (args.tokens and i - done >= args.tokens):
             break
-        # 多核数据加载：生产者进程预取（与 char_chunks 产出逐位一致）；
-        # mix 模式为样本级轮转交错流（串行源，混合语义需要全局轮转顺序）
-        if args.data == "mix":
-            src = stream_factory("mix")()
-        else:
-            src = PrefetchChars(data_path, SEP, depth=PREFETCH_DEPTH,
-                                batch_samples=PREFETCH_BATCH or 64,
-                                workers=PREFETCH_W)
+        # 多核数据加载：生产者进程预取（与 char_chunks 产出逐位一致）
+        src = PrefetchChars(data_path, SEP,
+                            lang=("zh" if args.data == "pretrain_zh" else None),
+                            depth=PREFETCH_DEPTH,
+                            batch_samples=PREFETCH_BATCH or 64,
+                            workers=PREFETCH_W)
         stream = StreamingTokenizer(lm.tok.seg, src,
                                    assistant_marker=(args.assistant_marker
                                                      or None))

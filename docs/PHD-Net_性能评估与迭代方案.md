@@ -85,12 +85,14 @@ numba 不可用时自动回退进程池（逐位一致）。P7 融合读出核�
 | 加速器可用性（P18） | 能力矩阵显式声明 | **numba 只能编译到 CPU**（物理限制），故 NPU/CUDA 机器上生产入口仍走 CPU；加速器需走 torch 栈（权重不通用） |
 | 读出计时（P20） | 训练日志 `[计时] 读出 X ms/tok（后端@设备，占 Y%）` | 直接看出加速是否生效、耗时是否转移到 PC 栈；配 `tools/accel_doctor.py` 做设备侧一次性诊断 |
 | 设备张量兼容（P17） | `to_numpy()` / `_nelem()` 统一转换 | 昇腾机器实测：`np.asarray(npu:0 tensor)` 抛 "can't convert npu:0 device type tensor" → 参数统计与检查点保存双崩，现已兼容 torch 设备张量 |
-| 顺序归并保序 | 按全局文件序号 reorder | 与串行产出逐位一致（`verify_vocab_parallel` D 例）；mix 模式样本级轮转 |
+| 顺序归并保序 | 按全局文件序号 reorder | 与串行产出逐位一致（`verify_vocab_parallel` D 例） |
 | 零等待代码 | 主循环无 sleep/轮询/忙等 | 仅 OS 级阻塞 |
 
 ## 五、泛化能力（`tools/audit_gen_eval.py`，2026-09-26 实测）
 
-**协议**：sft（中文对话）单域 100K tokens vs **mix**（sft + pretrain 中文子集样本级 50/50 轮转）
+**协议（历史记录，P42 已删除 mix 训练流）**：sft 单域 100K vs mix（sft+pretrain
+50/50 轮转）——结论保留（混合域泛化更好：近域 −19% / 远域 −23%），但**现行训练
+改为两阶段全量**（`--data pretrain_zh` 预训练 → `--data sft` 微调），不再用 mix。
 100K tokens（smoke 256 维，词表 ≈31K）；域内 held-out / 近域（技术文档）/ 远域（维基）三域 readonly
 评测；2-gram 无泄漏基线。
 
@@ -144,8 +146,8 @@ python tests/run_tests.py fast                 # 零回归门槛（9 项）
 python tools/rebaseline.py                     # 当前基线复测（90.2480 / 73.1166，eta=0.15）
 python tools/audit_precision.py                # 精度体系验证（L1 逐位 / L2 带宽 / L3 PPL）
 python tools/audit_prof_1b.py                  # 1B 生产配置模块级剖析
-python tools/audit_gen_eval.py --ckpt outputs/smoke/phdnet1b_smoke_mix.npz \
-    --skip-tokens 100000 --indomain-tokens 30000 --data mix   # 三域泛化评测
+python tools/audit_gen_eval.py --ckpt outputs/smoke/phdnet1b_smoke_sft.npz \
+    --skip-tokens 100000 --indomain-tokens 30000   # 域内泛化评测（P42：--data mix 已删）
 python tools/audit_imprint_gate.py [--full]    # big_ltm 印迹门控实验
 python tests/verifiers/verify_vocab_parallel.py  # 多核词表/加载逐位对拍
 python tools/bench_accel.py                    # 加速器探针 + 读出基准（CUDA/ROCm/NPU/CPU）
