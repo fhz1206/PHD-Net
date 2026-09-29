@@ -248,6 +248,7 @@ Math-L3 122.5 GB（4 子集）；合计 **994.3 GB** → 50 GB 云端预算下�
 
 ## 文档索引
 
+- **缺陷与教训台账（症状 → 根因 → 修复 → 门禁缺口）→ `BUGS.md`**
 - 架构与设计 → `docs/PHD-Net_架构设计.md`
 - 对标 Transformer 的五轨道结论与开放项 → `docs/PHD-Net_对标Transformer优化路线图.md`
 - 与 LLM 的竞争力 / 100B 预估 / 与人脑的同构性 → `docs/PHD-Net_竞争力与脑同构性评估.md`
