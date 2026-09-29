@@ -182,7 +182,7 @@ def main() -> None:
                     help="smoke=管线验证 / 1b=标准档(容量≥1B) / 1b_max=大主干档")
     ap.add_argument("--data", choices=list(DATA_FILES), default="sft")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
-    ap.add_argument("--readout-dtype", default="fp32",
+    ap.add_argument("--readout-dtype", default="bf16",
                     choices=["fp32", "fp16", "bf16", "fp8", "fp4"],
                     help="读出精度（P9/P12：默认 fp32；fp64 已停止支持；"
                          "fp4 = MX 块缩放 e2m1，2026-09-28 解禁")
@@ -257,6 +257,13 @@ def main() -> None:
                          "fhz 2026-09-25 指令）")
     ap.add_argument("--context-milestone", type=int, default=1_000_000,
                     help="context 里程碑间隔 tokens（0=关闭；默认 1M）")
+    ap.add_argument("--ckpt-dtype", default="bf16",
+                    choices=["", "fp8", "bf16", "fp16"],
+                    help="P46: checkpoint storage precision for the big matrices "
+                         "(readout W etc). fp8/bf16 are stored as raw bit patterns "
+                         "and decoded losslessly on load. NOT the training "
+                         "precision: torch cannot do fp8 matmul, and fp8 would "
+                         "flush the perceptron's non-target-row updates to zero.")
     ap.add_argument("--ckpt-every", type=int, default=50000,
                     help="每 N token 存一次检查点（P36：默认 50,000；"
                          "每次保存含 867 MiB 读出权重 D2H + 写盘，约数秒）")
@@ -492,6 +499,13 @@ def main() -> None:
           f" | vocab workers={vw} | data prefetch=multiproc×{dl_w}{'+zh filter' if args.data == 'pretrain_zh' else ''}"
           f" | build time {time.perf_counter() - t0:.1f}s")
     _rb = getattr(lm.net, "_readout_backend", "numba-cpu")
+    if cfg.readout_dtype in ("bf16", "fp16", "fp8", "fp4"):
+        print(f"[readout] compute precision = {cfg.readout_dtype} "
+              f"(checkpoint storage = {args.ckpt_dtype or 'fp32'}); "
+              f"NOTE: half precision rounds away the perceptron's non-target-row "
+              f"updates (|dp| ~1e-6 vs bf16 half-ULP ~2e-4), so learning "
+              f"degenerates toward pure Hebbian. Use --readout-dtype fp32 to "
+              f"restore the exact rule.", flush=True)
     print(f"[readout] backend={_rb}"
           + (f" (device {lm.net.readout.device})"
              if _rb.startswith("accel:") else "")
@@ -621,14 +635,14 @@ def main() -> None:
                 except Exception:                       # noqa: BLE001
                     pass
             if args.ckpt_every and (i - done) and (i - done) % args.ckpt_every == 0:
-                save_model(ckpt, lm, cfg, i)
+                save_model(ckpt, lm, cfg, i, ckpt_dtype=args.ckpt_dtype)
                 print(f"  [checkpoint] saved {i:,} tokens → {ckpt}", flush=True)
                 _print_table_stats(lm)
         if _STOP["flag"] or (args.tokens and i - done >= args.tokens):
             break
 
     # ── 收尾：滚动检查点 + final 模型 ──
-    save_model(ckpt, lm, cfg, i)
+    save_model(ckpt, lm, cfg, i, ckpt_dtype=args.ckpt_dtype)
     final = args.save_dir / f"phdnet1b_{args.preset}_{args.data}_final.npz"
     save_model(final, lm, cfg, i, extra={"final": True})
 

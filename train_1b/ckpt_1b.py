@@ -99,8 +99,19 @@ def to_numpy(x, dtype=None):
     return _tn(x, dtype)
 
 
-def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None) -> dict:
-    """保存完整可续训状态到 path（.npz + 同名 .json 元数据）。返回元数据 dict。"""
+def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None,
+               ckpt_dtype: str = "") -> dict:
+    """保存完整可续训状态到 path（.npz + 同名 .json 元数据）。返回元数据 dict。
+
+    P46（fhz「训练精度改为 fp8」→ 落在**存储**）：`ckpt_dtype="fp8"|"bf16"|"fp16"`
+    只压缩**检查点里的大矩阵**（读出 W 等），加载时自动转回 cfg.readout_dtype。
+    动机（实测依据）：① torch 2.14 **不支持 fp8 matmul**（"dot" not implemented
+    for Float8_e4m3fn），用它做训练计算需每步 fp8→bf16 转换（+3.4 GB/step）
+    → 比 fp32 的 2.6 GB **更慢**；② fp8 最小次正规数 0.00195 远大于 P6 非目标
+    行梯度 1.35e-5 → **非目标行更新全部下溢为 0**，「p − t」退化为纯 Hebbian。
+    而检查点侧：读出 W fp32 → fp8 让 1B 档 npz 从 898 → 约 465 MiB，**无任何
+    训练语义变化**（加载即转回原精度）。
+    """
     from dataclasses import asdict
 
     net = lm.net
@@ -111,6 +122,25 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None) -> dic
         "stdp_W": to_numpy(net.stdp.W),
         "wm_slots": to_numpy(net.wm.slots), "wm_strength": to_numpy(net.wm.strength),
     }
+    # P46：检查点存储精度压缩。
+    # numpy 没有 bfloat16 / float8_e4m3fn dtype → 必须存**位模式**（uint16 /
+    # uint8）才能真正减小 npz；加载侧按 meta["ckpt_dtype"] 无损解回原精度。
+    # 体积：fp32 → fp16/bf16 减半，fp8 减到 1/4（1B 档 898 → ~225 MiB）。
+    if ckpt_dtype in ("fp8", "bf16", "fp16"):
+        def _down(a):
+            if (not isinstance(a, np.ndarray) or a.dtype.kind != "f"
+                    or a.ndim < 2 or a.size < 4096):        # 只压大矩阵
+                return a
+            if ckpt_dtype == "fp16":
+                return a.astype(np.float16)                  # numpy 原生
+            import torch as _t                             # bf16 / fp8 → 位模式
+            src = _t.from_numpy(np.ascontiguousarray(a))
+            if ckpt_dtype == "bf16":
+                return src.to(_t.bfloat16).view(_t.uint16).numpy()
+            return src.to(_t.float8_e4m3fn).view(_t.uint8).numpy()
+
+        arrs = {k: _down(v) for k, v in arrs.items()}
+
     # 主干：CSR 存三元组值（结构由 conn_k 决定，重建时形状校验）；稠密存整矩阵
     if hasattr(net.pc, "up0"):
         for nm in ("up0", "up1", "dn0", "dn1"):
@@ -191,6 +221,7 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None) -> dic
         "int8_store": bool(getattr(net.ltm.table, "int8_store", False)),
         "vocab_size": int(len(lm.tok)), "when": time.strftime("%Y-%m-%d %H:%M:%S"),
         "cfg": asdict(cfg),
+        "ckpt_dtype": str(ckpt_dtype or ""),   # P46：位模式压缩的 dtype（加载侧据此解码）
     }
     if extra:
         meta.update(extra)
@@ -246,7 +277,22 @@ def load_model(path: Path, lm) -> dict:
                 raise ValueError("稀疏读出形状不一致（词表或 conn_k 变了？）")
             val[:] = z["ro_val"]
         else:
-            net.readout.W = np.asarray(z["ro_W"])
+            _rw = np.asarray(z["ro_W"])
+            # P46：位模式解码（fp8/bf16 存 uint8/uint16，无损转回 fp32）
+            _cd = str(meta.get("ckpt_dtype", "") or "")
+            if _cd in ("fp8", "bf16") and _rw.dtype.kind in "ui":
+                try:
+                    import torch as _t
+                    _tt = _t.from_numpy(_rw)
+                    if _cd == "bf16":
+                        _rw = _tt.view(_t.bfloat16).float().numpy()
+                    else:
+                        _rw = _tt.view(_t.float8_e4m3fn).float().numpy()
+                except Exception:                        # noqa: BLE001
+                    pass
+            elif _cd == "fp16" and _rw.dtype == np.float16:
+                _rw = _rw.astype(np.float32)
+            net.readout.W = _rw
 
         if meta["big_ltm"]:
             _restore_table(net.ltm.table, z)
