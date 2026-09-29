@@ -54,7 +54,8 @@ class AccelReadout:
     """
 
     def __init__(self, n_h: int, n_out: int, rng=None, device: str = "auto",
-                 dtype: str = "fp32", w_clip: float = 0.0, w0=None):
+                 dtype: str = "fp32", w_clip: float = 0.0, w0=None,
+                 nll_sync_every: int = 1):
         if torch is None:
             raise RuntimeError("未安装 torch，加速读出不可用")
         if dtype not in _DT:
@@ -63,6 +64,11 @@ class AccelReadout:
         self.tdtype = getattr(torch, _DT[dtype])
         self.n_out, self.n_h = int(n_out), int(n_h)
         self.w_clip = float(w_clip)
+        # P34：nll 设备侧累积（消除每步 .item() 同步 → CPU/NPU 重叠）
+        self.nll_sync_every = max(1, int(nll_sync_every))
+        self._nll_sum = None
+        self._nll_n = 0
+        self._last_nll = 0.0
         if w0 is None:
             g = rng if rng is not None else np.random.default_rng(0)
             init = (g.normal(0.0, 0.05, (self.n_out, self.n_h)) if hasattr(g, "normal")
@@ -154,9 +160,20 @@ class AccelReadout:
         self.W.addmm_(dp.reshape(-1, 1), ht.reshape(1, -1), alpha=-float(eta))
         if self.w_clip > 0.0:
             self.W.clamp_(-self.w_clip, self.w_clip)
-        # 唯一一次同步：取 nll（训练日志要它）
-        nll = float(-torch.log(p[correct] + 1e-12).item())
-        return nll
+        # nll：P34 双模式。sync_every=1 时每步 .item()（旧行为）；N>1 时
+        # 累积到设备标量、每 N 步同步一次——中间步返回滞后均值，训练热路径
+        # 上 CPU 与 NPU 从此可以重叠（这是 NPU 上最大的延迟收益）。
+        nll_dev = -torch.log(p[correct:correct + 1] + 1e-12).reshape(())
+        if self.nll_sync_every <= 1:
+            return float(nll_dev.item())
+        self._nll_sum = (nll_dev if self._nll_sum is None
+                         else self._nll_sum + nll_dev)
+        self._nll_n += 1
+        if self._nll_n >= self.nll_sync_every:
+            self._last_nll = float(self._nll_sum.item()) / self._nll_n
+            self._nll_sum = None
+            self._nll_n = 0
+        return self._last_nll
 
     def _lookup_ht(self, h):
         """复用缓存的设备 h（`forward` 刚上传过同一个 h 时省一次 H2D）。
@@ -311,8 +328,10 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
                            lognormal_init=cfg.lognormal_init), "numba-cpu"
         spec = "auto"                                       # 交给 resolve_device 择优
     try:
-        return AccelReadout(n_h, n_out, rng, device=spec,
-                            dtype=cfg.readout_dtype,
-                            w_clip=cfg.readout_w_clip), f"accel:{spec}"
+        return (AccelReadout(n_h, n_out, rng, device=spec,
+                             dtype=cfg.readout_dtype,
+                             w_clip=cfg.readout_w_clip,
+                             nll_sync_every=int(getattr(cfg, "nll_sync_every", 1))),
+                f"accel:{spec}")
     except Exception as e:                                   # noqa: BLE001
         return _fallback(f"{type(e).__name__}: {e}")

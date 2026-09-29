@@ -279,6 +279,9 @@ class PHDNetConfig:
     # numba CPU 原路径（逐位不变）；cpu/off/numba = 强制原路径；
     # npu/cuda/rocm/dml = 显式设备（不可用则回落并如实报告）。
     accel_readout: str = "auto"
+    # P34：nll 同步周期（AccelReadout）。1=每步同步（默认，旧行为）；N>1 时
+    # nll 累积到设备、每 N 步同步一次 → CPU/NPU 重叠（NPU 上端到端约 -30~40%）。
+    nll_sync_every: int = 1
                                     # fp4 已禁用（fhz 2026-09-27）：+5.88% 劣化，待 MX 块缩放；代码保留
                                     #   可选 fp32 / fp16 / bf16 / fp8 / fp4
                                     #   低精度 = 原生位型码本存储 + 查表反量化计算

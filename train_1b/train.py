@@ -183,6 +183,10 @@ def main() -> None:
                     choices=["fp32", "fp16", "bf16", "fp8", "fp4"],
                     help="读出精度（P9/P12：默认 fp32；fp64 已停止支持；"
                          "fp4 = MX 块缩放 e2m1，2026-09-28 解禁")
+    ap.add_argument("--nll-sync-every", type=int, default=1,
+                    help="读出 nll 同步周期（P34）：1=每步同步（旧行为）；N>1 时 "
+                         "nll 累积到设备、每 N 步同步一次 → CPU/NPU 重叠，"
+                         "NPU 场景端到端约 -30~40%%（PPL 统计滞后 N 步，滑动均值下可忽略）")
     ap.add_argument("--accel", default="auto",
                     help="读出计算设备（P19，fhz「有 cuda/cann(npu)/rocm 就跑"
                          "对应设备」）：auto = 有加速器就用（昇腾→ROCm→CUDA→"
@@ -300,6 +304,7 @@ def main() -> None:
                     args.csr_online, args.readout_conn_k, args.seed)
     cfg.readout_dtype = args.readout_dtype            # P9 精度（默认 fp32）
     cfg.accel_readout = args.accel                     # P19 读出设备（默认 auto）
+    cfg.nll_sync_every = args.nll_sync_every           # P34 nll 同步周期（默认 1）
 
     if args.data == "mix":
         try:
