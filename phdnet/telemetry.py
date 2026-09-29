@@ -209,6 +209,12 @@ class Telemetry:
             r = subprocess.run([self._smi_path, "info"], capture_output=True,
                                text=True, timeout=10)
             got = _parse_npu_smi(r.stdout)
+            if got is None and not self._smi_reported:
+                # 解析失败：把原始输出打出来一次，便于按真实格式修解析器
+                self._smi_reported = True
+                head = "\n".join(r.stdout.splitlines()[:14])
+                print(f"[telemetry] npu-smi parse FAILED; raw head://n{head}",
+                      flush=True)
         except Exception:                               # noqa: BLE001
             return
         if got is not None:
@@ -238,27 +244,44 @@ class Telemetry:
 
 
 def _parse_npu_smi(text: str):
-    """解析 `npu-smi info` 输出 → (AI Core%, HBM used MB, HBM total MB)。
+    """解析 `npu-smi info` → (AI Core%, HBM used MB, HBM total MB)；失败 None。
 
-    npu-smi 表格为「两行一设备」：NPU 行（Power/Temp/Huge-Pages）与 Chip 行
-    （Bus-Id 0x… | AICore(%) | AI-Real(%) | HBM-Usage used / total）。**只认
-    Chip 行**（特征 = 含 0x 总线号）；AICore = HBM `used / total` 之前的
-    第一个整数（`0x0000` 会被 findall 误读成 0，勿用 Bus-Id 列）。
-    单卡训练取首个设备；解析失败返回 None。
+    **按表头定位列**（fhz 服务器 2026-09-29 实测：先前的「找含 0x 总线号的
+    数据行」启发式在该机输出上匹配不到 → NPU% 恒 `--`；不同型号/版本的
+    Bus-Id 列并不通用）。做法：先找到含 `AICore` 的**表头行**，切列得到
+    AICore / HBM-Usage 的列序，再逐行按列号取值 → 与型号无关。
     """
-    for line in text.splitlines():
-        if "0x" not in line or "/" not in line:
+    lines = text.splitlines()
+    hdr = None
+    for i, ln in enumerate(lines):
+        if "AICore" in ln:
+            hdr = i
+            break
+    if hdr is None:                                  # 表头可能叫 Aicore
+        for i, ln in enumerate(lines):
+            if "aicore" in ln.lower():
+                hdr = i
+                break
+    if hdr is None:
+        return None
+    cols = [c.strip() for c in lines[hdr].split("|")]
+    ai_col = next((k for k, c in enumerate(cols) if "aicore" in c.lower()), None)
+    hbm_col = next((k for k, c in enumerate(cols) if "hbm" in c.lower()), None)
+    if ai_col is None or hbm_col is None:
+        return None
+    for ln in lines[hdr + 1:]:
+        if "|" not in ln:
             continue
-        segs = [s.strip() for s in line.split("|")]
-        if len(segs) < 4:
+        segs = [s.strip() for s in ln.split("|")]
+        if len(segs) <= max(ai_col, hbm_col):
             continue
-        m_hbm = re.search(r"(\d+)\s*/\s*(\d+)", segs[3])
-        if not m_hbm:
+        m = re.search(r"(\d+)\s*/\s*(\d+)", segs[hbm_col])
+        if not m:
             continue
-        before = re.findall(r"\d+", segs[3][:m_hbm.start()])
-        if not before:
+        ai = re.findall(r"\d+", segs[ai_col])
+        if not ai:
             continue
-        return float(before[0]), int(m_hbm.group(1)), int(m_hbm.group(2))
+        return float(ai[0]), int(m.group(1)), int(m.group(2))
     return None
 
 
