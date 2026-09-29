@@ -19,6 +19,9 @@
 from __future__ import annotations
 
 import os
+import re
+import shutil
+import subprocess
 import time
 
 import numpy as np
@@ -32,7 +35,7 @@ except Exception:                                        # pragma: no cover
 class Telemetry:
     """训练遥测采样器（非阻塞；所有字段容错，不可用即 None）。"""
 
-    def __init__(self, device: str | None = None):
+    def __init__(self, device: str | None = None, npu_smi: bool = True):
         self._proc = psutil.Process() if psutil else None
         self._last_wall = time.perf_counter()
         self._last_ptime = time.process_time()
@@ -43,7 +46,32 @@ class Telemetry:
                 self._last_ctx = psutil.cpu_stats().ctx_switches
             except Exception:                            # noqa: BLE001
                 pass
-        self.device = device or ""
+        # P57（fhz 2026-09-29「NPU 和 HBM 的数据读不出来」）：生产训练一直
+        # 用 Telemetry() 无参构造 → device="" → sample() 的加速器分支永远
+        # 不触发，日志 NPU/HBM 恒 `--`（P41 遗留：P19 读出上 NPU 后没人回补
+        # 遥测）。现在**自动探测**：显式传入的 device 优先，否则 torch.npu /
+        # torch.cuda 谁可用用谁。
+        self.device = device or self._auto_probe_device()
+        self._acc_err: str | None = None        # 首次加速器采样失败原因
+        self._acc_err_reported = False
+        self._smi_path = shutil.which("npu-smi") if npu_smi else None
+
+    def _auto_probe_device(self) -> str:
+        """无显式 device 时自动探测（torch.npu → torch.cuda → 无）。"""
+        if not torch_available():
+            return ""
+        import torch
+        try:
+            if hasattr(torch, "npu") and torch.npu.is_available():
+                return "npu"
+        except Exception:                                # noqa: BLE001
+            pass
+        try:
+            if hasattr(torch, "cuda") and torch.cuda.is_available():
+                return "cuda"
+        except Exception:                                # noqa: BLE001
+            pass
+        return ""
 
     def sample(self) -> dict:
         out: dict = {"cpu_sys": None, "cpu_proc_cores": None,
@@ -81,23 +109,57 @@ class Telemetry:
         self._last_ptime = ptime
         # ── 加速器 ──
         if torch_available() and self.device:
+            dev = self.device.lower()
             try:
-                if self.device.startswith("npu") and hasattr(torch, "npu"):
+                if dev.startswith("npu") and hasattr(torch, "npu"):
                     if hasattr(torch.npu, "utilization"):
                         out["acc_util"] = float(torch.npu.utilization())
                     out["hbm_alloc_gb"] = torch.npu.memory_allocated() / 2 ** 30
                     out["hbm_total_gb"] = (torch.npu.get_device_properties()
                                            .total_memory) / 2 ** 30
-                elif self.device.startswith("cuda") and hasattr(torch, "cuda"):
+                elif dev.startswith("cuda") and hasattr(torch, "cuda"):
                     out["acc_util"] = float(torch.cuda.utilization())
                     out["hbm_alloc_gb"] = torch.cuda.memory_allocated() / 2 ** 30
                     out["hbm_total_gb"] = (torch.cuda.get_device_properties(
                         torch.cuda.current_device()).total_memory) / 2 ** 30
-            except Exception:                            # noqa: BLE001
-                pass
+            except Exception as e:                       # noqa: BLE001
+                # P57：不再静默——首次失败把原因带出来（此前 except: pass 吞掉
+                # 全部错误，NPU/HBM 恒 `--` 且无法区分「没有加速器」与「读失败」）
+                self._note_acc_err(e)
+            # torch 层空缺时用 npu-smi 补（AI Core% / HBM 用量；HBM 带宽
+            # 利用率任何软件层都读不到，需 profiler）
+            if out["acc_util"] is None and out["hbm_alloc_gb"] is None:
+                self._npu_smi_fill(out)
         # ── IPC：硬件计数器，Python 层不可得（诚实 None）──
         # 外部测量：perf stat -p <pid> -- sleep 5（Linux + perf 权限）
         return out
+
+    def _note_acc_err(self, e: Exception) -> None:
+        """首次加速器采样失败时打印原因（只报一次，不刷屏）。"""
+        if not self._acc_err_reported:
+            self._acc_err_reported = True
+            self._acc_err = f"{type(e).__name__}: {e}"
+            print(f"[telemetry] ⚠ 加速器采样失败（本次运行不再重试上报，"
+                  f"NPU/GPU 与 HBM 列将显示 --）：{self._acc_err}", flush=True)
+
+    def _npu_smi_fill(self, out: dict) -> None:
+        """`npu-smi info` 兜底：解析 AI Core(%) 与 HBM-Usage(MB)（best-effort）。
+
+        解析失败静默（torch 层已兜底过一次）。
+        """
+        if not self._smi_path:
+            return
+        try:
+            r = subprocess.run([self._smi_path, "info"], capture_output=True,
+                               text=True, timeout=10)
+            got = _parse_npu_smi(r.stdout)
+        except Exception:                               # noqa: BLE001
+            return
+        if got is not None:
+            util, used, total = got
+            out["acc_util"] = util
+            out["hbm_alloc_gb"] = used / 1024
+            out["hbm_total_gb"] = total / 1024
 
     @staticmethod
     def fmt(d: dict) -> str:
@@ -115,6 +177,31 @@ class Telemetry:
         if d.get("ctx_switches") is not None:
             parts.append(f"CS/s {d['ctx_switches'] / max(1e-9, 1):.0f}")
         return " | " + "  ".join(parts)
+
+
+def _parse_npu_smi(text: str):
+    """解析 `npu-smi info` 输出 → (AI Core%, HBM used MB, HBM total MB)。
+
+    npu-smi 表格为「两行一设备」：NPU 行（Power/Temp/Huge-Pages）与 Chip 行
+    （Bus-Id 0x… | AICore(%) | AI-Real(%) | HBM-Usage used / total）。**只认
+    Chip 行**（特征 = 含 0x 总线号）；AICore = HBM `used / total` 之前的
+    第一个整数（`0x0000` 会被 findall 误读成 0，勿用 Bus-Id 列）。
+    单卡训练取首个设备；解析失败返回 None。
+    """
+    for line in text.splitlines():
+        if "0x" not in line or "/" not in line:
+            continue
+        segs = [s.strip() for s in line.split("|")]
+        if len(segs) < 4:
+            continue
+        m_hbm = re.search(r"(\d+)\s*/\s*(\d+)", segs[3])
+        if not m_hbm:
+            continue
+        before = re.findall(r"\d+", segs[3][:m_hbm.start()])
+        if not before:
+            continue
+        return float(before[0]), int(m_hbm.group(1)), int(m_hbm.group(2))
+    return None
 
 
 def torch_available() -> bool:

@@ -117,7 +117,11 @@ _STOP = {"flag": False}
 
 
 class TeeLogger:
-    """控制台 + 日志文件双写（行缓冲落盘，异常中断最多丢当前行）。"""
+    """控制台 + 日志文件双写（行缓冲落盘，异常中断最多丢当前行）。
+
+    P57：同时接管 sys.stderr——warnings.warn（如读出融合核回落 eager 的
+    告警）与 torch inductor 日志此前不落盘，服务器排障时丢失关键原因。
+    """
 
     def __init__(self, path: Path):
         self.terminal = sys.stdout
@@ -303,6 +307,7 @@ def main() -> None:
         log_path = LOG_DIR / f"train_1b_{args.preset}_{args.data}_{stamp}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     sys.stdout = TeeLogger(log_path)
+    sys.stderr = sys.stdout          # P57：warnings / inductor 日志也落盘
 
     # 后端 × 设备能力矩阵：显式说明「numba 只能上 CPU」这一物理限制，
     # 避免在 NPU/CUDA 机器上被误判为「加速器没被识别」（P18）。
