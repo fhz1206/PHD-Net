@@ -148,6 +148,10 @@ class WordTokenizer:
         self.tokens = sorted(set(self.seg.tokenize(vocab_text)))
         self.stoi = {t: i for i, t in enumerate(self.tokens)}
         self.n_sdr = n_sdr
+        # P51：预分配缓冲（编码 2×n_sdr、onehot len(tokens)）
+        self._enc_buf = np.zeros(2 * n_sdr, dtype=np.float32)
+        self._oh_buf = np.zeros(len(self.tokens), dtype=np.float32)
+        self._oh_last = -1
         self.n_active = n_active
         self.seed = seed
         self._sdrs: dict[str, np.ndarray] = {}
@@ -171,12 +175,38 @@ class WordTokenizer:
         与 train_1b/train.py 的 p2 OOV 修复同语义；tok 自身的 OOV 由调用方守卫
         （word_lm._pass / evaluate 均为「任一端 OOV 整步跳过」）。
         """
-        s = np.concatenate([self._sdrs[tok], np.zeros(self.n_sdr)])
-        if prev is not None and prev in self._sdrs:
-            s[self.n_sdr:] = self._sdrs[prev]
+        # P51（fhz「CPU 需要更多预计算」）：**预分配复用缓冲**，消除每步
+        # np.concatenate 的分配（2×n_sdr fp32）+ 零填充。语义逐位相同。
+        # 安全性：调用方（model.step / RL replay）不持有该数组的跨步引用
+        # （RL 显式 .copy()）——复用不会污染别处。
+        s = getattr(self, "_enc_buf", None)
+        if s is None:            # 兼容 __new__ 构造路径（ckpt 注入式重建）
+            s = self._enc_buf = np.zeros(2 * self.n_sdr, dtype=np.float32)
+        sdr_tok = self._sdrs.get(tok)
+        if sdr_tok is None:                    # OOV：整体清零（与原 zeros 语义一致）
+            s[:] = 0.0
+            return s
+        np.copyto(s[:self.n_sdr], sdr_tok)
+        if prev is not None:
+            sdr_prev = self._sdrs.get(prev)
+            if sdr_prev is None:
+                s[self.n_sdr:] = 0.0
+            else:
+                np.copyto(s[self.n_sdr:], sdr_prev)
+        else:
+            s[self.n_sdr:] = 0.0
         return s
 
     def onehot(self, idx: int) -> np.ndarray:
-        t = np.zeros(len(self.tokens))
+        # P51：预分配复用缓冲（1B 词表 = 289 KB/步的分配被消除）。每步只写
+        # 目标位并清掉上次的位 → 与 np.zeros+置 1 逐位相同。
+        t = getattr(self, "_oh_buf", None)
+        if t is None:             # 兼容 __new__ 构造路径
+            t = self._oh_buf = np.zeros(len(self.tokens), dtype=np.float32)
+            self._oh_last = -1
+        last = getattr(self, "_oh_last", -1)
+        if last >= 0:
+            t[last] = 0.0
         t[idx] = 1.0
+        self._oh_last = idx
         return t
