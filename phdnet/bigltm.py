@@ -70,13 +70,21 @@ class SparseLTM:
         max_key = max(max_key, int(self.idx.max()) if self.idx.size else 0)
         n_keys = max_key + 1
         indptr = np.zeros(n_keys + 1, dtype=np.int64)
-        indices: list[int] = []
-        for i in range(n_keys):
-            js = self.rev.get(i)
-            indptr[i + 1] = indptr[i] + (len(js) if js else 0)
-            if js:
-                indices.extend(js)
-        return indptr, np.asarray(indices, dtype=np.int64)
+        if not self.rev:
+            return indptr, np.empty(0, dtype=np.int64)
+        # 审计 B2：原实现 `for i in range(n_keys)` 逐个查 dict —— 1B 档
+        # n_keys = 16,774,731，即 **1677 万次 Python 循环**（本机 ~10 s 启动）。
+        # 改为**只遍历实际存在的 key**（≤ n_dim·k_hash = 4096 条），并保持
+        # **key 升序**（与原实现 range(n_keys) 的段序完全一致 → 逐位相同）。
+        ks = np.array(sorted(self.rev), dtype=np.int64)
+        cnts = np.fromiter((len(self.rev[int(i)]) for i in ks),
+                           dtype=np.int64, count=len(ks))
+        indptr[ks + 1] = cnts
+        indptr = np.cumsum(indptr)                  # 稠密前缀和
+        indices = (np.concatenate([np.asarray(self.rev[int(i)], dtype=np.int64)
+                                   for i in ks]) if ks.size
+                   else np.empty(0, dtype=np.int64))
+        return indptr, indices
 
     def _check_sparse(self, rate: np.ndarray) -> None:
         """A2 契约校验：SparseLTM 接受稀疏率（激活维度 ≪ n_dim）。
@@ -165,15 +173,13 @@ class SparseLTM:
             if ks.size == 0:
                 return np.zeros(self.n_dim)
             _recall_project(ks, ws, out, self._rev_indptr, self._rev_indices)
-            n_rev = self._rev_indptr.shape[0] - 1
-            valid = ks[ks < n_rev]
-            n_s = int(np.diff(self._rev_indptr)[valid].sum()) if valid.size else 0
             n_scores = int(ks.size)
         else:
             scores = self.table.predict(active)
             if not scores:
                 return np.zeros(self.n_dim)
             n_scores = len(scores)
+            ks = np.fromiter(scores.keys(), dtype=np.int64, count=n_scores)
             for big_i, s in scores.items():
                 js = self.rev.get(big_i, ())            # 仅遍历被激活索引绑定的维度
                 n_s += len(js)
@@ -183,6 +189,15 @@ class SparseLTM:
         # （门槛同 imprint：recall 同样是条件触发，不能设 1000）
         self._diag_r = getattr(self, "_diag_r", 0) + 1
         if self._diag_r % 10 == 0:
+            # ⚠ 审计 B1：`rev_indptr` 按大空间最大 key 铺开 → 1B 档长
+            # 16,774,731（134 MB）。`np.diff(indptr)` 会**完整物化 134 MB**
+            # （本机 33 ms，每 8 步一次 ≈ 6 ms/tok）——只为算这一行诊断。
+            # 改为按需取区间长度（O(|valid|)，数值完全相同）**且只在打印时算**。
+            n_rev = self._rev_indptr.shape[0] - 1
+            valid = ks[ks < n_rev] if ks.size else ks
+            n_s = (int((self._rev_indptr[valid + 1]
+                        - self._rev_indptr[valid]).sum())
+                   if valid.size else 0)
             print(f"[ltm-diag] recalls={self._diag_r} active={len(active)} "
                   f"scores={n_scores} bindings={n_s}", flush=True)
         out /= float(self.k_hash)

@@ -200,6 +200,7 @@ class PHDNet:
     def step(self, x: np.ndarray, target: np.ndarray | None = None,
              learn: bool = True, readonly: bool = False,
              learn_scale: float = 1.0,
+             target_idx: int | None = None,
              recur_cue: np.ndarray | None = None) -> dict:
         """单个时间步：推理 +（可选）学习。返回诊断信息。
 
@@ -230,7 +231,15 @@ class PHDNet:
 
         _p = self._prof_t('M3_pred')
         pred = self.stdp.predict(self._prev_rate)            # 3. M3 时序预测（诊断指标）
-        pred_feat = self.stdp.predict(self._last_rate)       # T3.1 读出预测特征（评估时保持新鲜）
+        # T3.1 读出预测特征。审计 M3：训练路径下 `self._prev_rate is
+        # self._last_rate`（同一个 rate 对象的别名，model.py 末尾两处赋值），
+        # 原实现因此**对同一份数据算了两遍**（本机 11–12 μs/次）。
+        # ⚠ 只在训练路径复用：readonly=True 时 `_prev_rate` 不更新而
+        # `_last_rate` 更新，两者**确实不同** → 保留原调用。
+        if not readonly and self._prev_rate is self._last_rate:
+            pred_feat = pred
+        else:
+            pred_feat = self.stdp.predict(self._last_rate)
         self._prof_end('M3_pred', _p)
         cos = float(pred @ rate / (np.linalg.norm(pred) * np.linalg.norm(rate) + 1e-9))
         seq_err = 1.0 - cos
@@ -318,7 +327,8 @@ class PHDNet:
                     nll = self.readout.learn_softmax(
                         h, target, self._ro_eta * learn_scale, y_pre=y_dev,
                         accumulate=int(cfg.minibatch_size),
-                        target_idx=int(np.argmax(target)))
+                        target_idx=(int(target_idx) if target_idx is not None
+                                else int(np.argmax(target))))
                 else:
                     nll = self.readout.learn_softmax(
                         h, target, self._ro_eta * learn_scale, y_pre=y,

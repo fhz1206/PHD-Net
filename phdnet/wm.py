@@ -32,10 +32,18 @@ class WorkingMemory:
         """每步漏积分衰减（模拟 PFC 持续放电的自然消退）。
 
         摘要槽位不衰减 —— 对应前额叶对重要内容的主动维持（rehearsal）。
+
+        审计 M1：`summary_slot is None` 时（默认，`wm_summary_every=0` 从不触发）
+        原实现仍构造全 True 的布尔掩码并做**花式索引**——把 (4, 1024) 数组拷贝
+        出来乘完再散射写回。改成纯原地乘法（本机 11.6 → 2.2 μs/步），数值逐位
+        相同（同一 gamma、同一顺序）。
         """
+        if self.summary_slot is None:
+            self.slots *= self.gamma
+            self.strength *= self.gamma
+            return
         mask = np.ones(len(self.strength), dtype=bool)
-        if self.summary_slot is not None:
-            mask[self.summary_slot] = False
+        mask[self.summary_slot] = False
         self.slots[mask] *= self.gamma
         self.strength[mask] *= self.gamma
 

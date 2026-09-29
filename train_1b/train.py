@@ -51,6 +51,15 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# 审计 H4：**必须在 import numpy 之前**限 BLAS 线程——OpenBLAS 初始化后
+# 再设环境变量无效。191 核机器上 OpenBLAS 默认拉 191 线程去跑
+# 1024×2048 的 sgemv（M1 编码器），是「只用 1.1–3.2 核 + 250 万 CS/s」的
+# 头号嫌疑（P62 只限了 numba prange 线程，漏了 BLAS）。
+_DEFAULT_THREADS = str(max(1, min(8, os.cpu_count() or 1)))
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+           "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_v, _DEFAULT_THREADS)
+
 import numpy as np
 
 _HERE = Path(__file__).resolve().parent
@@ -691,6 +700,7 @@ def main() -> None:
         if args.epochs > 1 and ep > 0 and i > 0:
             print(f"[epoch {ep + 1}/{args.epochs}] continuing stream across epochs: state continuous"
                   f" (net not reset), first step's prev link severed", flush=True)
+        _stoi = lm.tok.stoi                   # 局部绑定（省每步属性链解析）
         # P72：主循环分段计时（此前只有 net.step 内部九段，**主循环开销
         # 从未被测量**——实测分段之和 < 总耗时，差额就落在这里）。
         _lp = {"tokenize": 0.0, "encode_onehot": 0.0, "step": 0.0}
@@ -708,19 +718,21 @@ def main() -> None:
                 # 2026-09-25 审计修复：原条件漏查 p2，OOV 落在 p2 位会 KeyError 崩溃
                 _eo0 = time.perf_counter() if args.step_profiling else 0.0
                 x = lm.tok.encode_composite(p1, p2)
-                tgt = lm.tok.onehot(lm.tok.stoi[t0])
+                _i0 = _stoi[t0]                    # 复用：省两次 dict 查找
+                tgt = lm.tok.onehot(_i0)
                 if args.step_profiling:
                     _lp["encode_onehot"] += time.perf_counter() - _eo0
                     _lpn += 1
                 # P69：语种自检用——保留最近 8 个真实 token（每 log_every 反查词表
                 # 拼文本片段 + CJK 占比，一眼看出 --lang 是否生效）
-                _lang_tail.append(int(lm.tok.stoi[t0]))
+                _lang_tail.append(int(_i0))
                 if len(_lang_tail) > 8:
                     _lang_tail.pop(0)
                 # P26 SFT：p1（当前 token）属 prompt 段 → 只推进状态不学习。
                 # 损失由 (p1, p2) → p0 这一步产生，故用 **p0** 的可训练标记。
                 _st0 = time.perf_counter() if args.step_profiling else 0.0
-                d = lm.net.step(x, target=tgt, learn=trainable)
+                d = lm.net.step(x, target=tgt, learn=trainable,
+                                target_idx=_i0)
                 if args.step_profiling:
                     _lp["step"] += time.perf_counter() - _st0
                 if trainable:

@@ -35,6 +35,10 @@
 | 23 | M4b 占 76% ms/tok：`predict` 的 1.8 万次 dict 更新 | 性能（已修） | `391fa06` |
 | 24 | NPU% 恒 `--`：解析器依赖该机没有的 Bus-Id 列 | 环境/解析 | `7d7dc54` |
 | 25 | 编辑时删掉 `try` 的 `except` → SyntaxError | 我引入（当场修） | `7d7dc54` |
+| 26 | 诊断行 `np.diff(rev_indptr)` 每次物化 134 MB | **我引入（P68）** | 待提交 |
+| 27 | `_rev_to_csr` 构造期 1677 万次 Python 循环 | 我引入（P68） | 待提交 |
+| 28 | BLAS 线程未限（191 线程跑小 sgemv） | 既有遗留 | 待提交 |
+| 29 | 每步 `argmax` 扫全词表 + 重复 `stdp.predict` | 既有遗留 | 待提交 |
 
 ---
 
@@ -181,6 +185,34 @@
   `except Exception` 块截掉了**——与 #1（孤立缩进块）同源的「改结构不动配对」。
 - **修复**：补回 `except` 块。
 - **门禁**：本次 `py_compile` 立刻抓到 → 印证 #3 的语法门禁有效。
+
+### #26–#29 双子代理性能审计（2026-09-29）
+两个子代理分别审计 `phdnet/` 机制层与 `train_1b/` 主循环，交叉验证出 4 条：
+
+- **#26（我引入，最严重）**：P68 给 recall 加诊断时写的
+  `np.diff(self._rev_indptr)` —— `rev_indptr` 按**大空间最大 key** 铺开，1B 档
+  长 16,774,731（**134 MB**）；每次 recall 都完整物化这 134 MB（本机 33 ms，
+  每 8 步一次 ≈ **6 ms/tok**），**只为打印一行 `bindings` 数**。
+  修复：只在打印分支内计算 + 改 `(indptr[v+1]-indptr[v]).sum()`（O(|valid|)，
+  数值完全相同）。
+- **#27（我引入）**：`_rev_to_csr()` 构造期 `for i in range(n_keys)` 逐个查 dict
+  → 1B 档 **1677 万次 Python 循环**（~10 s 启动）。修复：只遍历实际存在的 key
+  （≤ 4096 条）+ 向量化前缀和，**保持 key 升序**（与原实现段序一致 → 逐位相同）。
+  ⚠ 第一次改成「dict 插入序 + 生成器」时 `indices` 与 `indptr` 段序错位，
+  被 `verify_ltm_kernels.py` 的「rev CSR 逐维一致」用例当场抓出。
+- **#28（既有）**：`OPENBLAS/MKL/OMP_NUM_THREADS` 从未限上限。P62 只限了 numba
+  prange 线程 → 191 核机器上 OpenBLAS 拉 **191 线程**跑 1024×2048 的 sgemv，
+  是「只用 1.1–3.2 核 + 250 万 CS/s」的头号嫌疑。修复：在 **`import numpy` 之前**
+  设四个环境变量（仓库里早就有 `multi_device.configure_host_threads()`，但无生产
+  调用点 —— 典型的「修了一半」）。
+- **#29（既有）**：①每步 `int(np.argmax(target))` 扫全词表（51,962–73,958 元素），
+  而调用方 `stoi[t0]` 就在手边 → `step(..., target_idx=...)` 形参（零风险，
+  且兑现 P40 注释里「设备侧 onehot 路径」的技术债）；②`stdp.predict` 每步被调
+  **两次且输入是同一对象**（`_prev_rate is _last_rate`）→ 训练路径复用，
+  ⚠ `readonly=True` 时两者确实不同 → 保留原调用。
+
+未采纳（记录理由）：`learn` 侧 numba 化需先建逐位门禁（当前无覆盖）；
+`_ensure` 的 O(n²) 字符串切片（收益小、需改 tokenize 状态机）。
 
 ### #15 fp32 权重 @ fp64 输入 → 脱离 BLAS 慢 5.9×（`0f203d5`）
 - **症状**：M1 编码器改 fp32 后反而从 857 µs 变 5047 µs。
