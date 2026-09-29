@@ -26,6 +26,7 @@ python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 
 from __future__ import annotations
 
+import os
 import argparse
 import sys
 import time
@@ -38,6 +39,8 @@ _ROOT = _HERE.parent
 for p in (str(_HERE), str(_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
+os.environ.setdefault(  # P39：numba 缓存持久化（不被 __pycache__ 清理波及）
+    "NUMBA_CACHE_DIR", str(_ROOT / "outputs" / "numba_cache"))
 
 from ckpt_1b import _rebuild_sdrs, load_model                      # noqa: E402
 from corpus_stream import SEP, StreamingTokenizer, char_chunks     # noqa: E402

@@ -33,6 +33,8 @@ _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
 os.chdir(_ROOT)
 sys.path.insert(0, str(_ROOT))
+os.environ.setdefault(  # P39：numba 缓存持久化（不被 __pycache__ 清理波及）
+    "NUMBA_CACHE_DIR", str(_ROOT / "outputs" / "numba_cache"))
 sys.path.insert(0, str(_ROOT / "train_1b"))
 
 import numpy as np                                          # noqa: E402

@@ -58,6 +58,8 @@ _ROOT = _HERE.parent
 for p in (str(_HERE), str(_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
+os.environ.setdefault(  # P39：numba 缓存持久化（不被 __pycache__ 清理波及）
+    "NUMBA_CACHE_DIR", str(_ROOT / "outputs" / "numba_cache"))
 
 from ckpt_1b import _rebuild_sdrs, load_model, save_model            # noqa: E402
 from config_1b import PRESETS, SEG_KWARGS, build_cfg                 # noqa: E402
