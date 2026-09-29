@@ -177,6 +177,12 @@ def main() -> None:
                     help="--remote-data 时取排序后前多少比例的分片"
                          "（默认 0.3 = fhz 2026-09-29「数据集只取30%%」；"
                          "前缀子集，词表扫描与训练流开头一致）")
+    ap.add_argument("--lang", choices=["all", "zh", "en"], default="all",
+                    help="训练语料语言过滤（fhz 2026-09-29）：all=全量（默认，"
+                         "与旧逐位一致）；zh/en=按 parquet 的 lang 列过滤"
+                         "（--data pretrain --lang zh 等价旧 --data pretrain_zh；"
+                         "sft 分片同样适用）。词表扫描不受影响（词表是训练流的"
+                         "超集，OOV 恒 0）")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
     ap.add_argument("--readout-dtype", default="bf16",
                     choices=["fp32", "fp16", "bf16", "fp8", "fp4"],
@@ -376,10 +382,20 @@ def main() -> None:
               f"(ModelScope HTTP Range streaming, zero local copy)")
     # 数据口径随检查点落盘（审计 D2：--remote-fraction 变化 + --resume 会静默
     # 改变数据分布 → 恢复训练时须能看出这次续训用的是哪份数据）
+    # 语言过滤（fhz 2026-09-29）：--lang zh/en 按 parquet 的 lang 列过滤训练流；
+    # 旧 --data pretrain_zh 等价 --data pretrain --lang zh（保留兼容）。
+    # 词表扫描不受影响（词表是训练流超集 → OOV 恒 0）。
+    _lang_filter = None
+    if args.data == "pretrain_zh":
+        _lang_filter = "zh"
+    elif args.lang != "all":
+        _lang_filter = args.lang
+        print(f"[data] lang filter: {_lang_filter} (parquet `lang` column)")
     _data_provenance = {
         "data": args.data,
         "remote": bool(remote_active),
         "remote_fraction": (float(args.remote_fraction) if remote_active else None),
+        "lang": (_lang_filter or "all"),
         "data_shards": len(data_files),
         "data_spec": str(data_path),
     }
@@ -590,7 +606,7 @@ def main() -> None:
             from phdnet.ms_stream import REMOTE_MAX_PROCS
             _pw = min(PREFETCH_W or REMOTE_MAX_PROCS, REMOTE_MAX_PROCS)
         src = PrefetchChars(data_path, SEP,
-                            lang=("zh" if args.data == "pretrain_zh" else None),
+                            lang=_lang_filter,
                             depth=PREFETCH_DEPTH,
                             batch_samples=PREFETCH_BATCH or 64,
                             workers=_pw)

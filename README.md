@@ -133,8 +133,12 @@ python tools/bench_accel.py       # 读出基准（fp32 / fp16 / bf16 三档 + �
 python train_1b/train.py --preset smoke --data sft --tokens 100000
 
 # 阶段① 预训练：中英全量 3906 万块（中文 3708 万 + 英文 Magpie-R1 201 万，无 lang 过滤；
-#          `pretrain_zh` 为仅中文对照；`mix` 轮转已删除）
+#          `mix` 轮转已删除）
 python train_1b/train.py --data pretrain --nll-sync-every 8 --resume
+
+# 语言选择（fhz 2026-09-29）：--lang zh / en / all（默认 all 逐位不变）；
+#          `--data pretrain --lang zh` 等价旧 `--data pretrain_zh`；sft 同样适用
+python train_1b/train.py --data pretrain --lang zh --nll-sync-every 8 --resume
 
 # 服务器无本地数据集时：ModelScope 直读（HTTP Range 流式零落盘，仅支持 ModelScope；
 #          --remote-fraction 0.3 = 取排序后前 30% 分片，前缀子集顺序语义不变）

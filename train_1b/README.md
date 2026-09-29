@@ -69,10 +69,17 @@ GPU 也能在小预算内真实训练与续训（每步成本只正比于活跃�
 
 - **`--data mix` 已删除**。训练为**两阶段**：
   1. **预训练**：`--data pretrain` —— **中英全量 3906 万块**（中文 3708 万 +
-     英文 Magpie-R1 201 万，无 lang 过滤）；`--data pretrain_zh` 保留为
-     **仅中文对照**档。
+     英文 Magpie-R1 201 万，无 lang 过滤）。
   2. **SFT**：`--data sft --init-from <预训练ckpt> --assistant-marker "助手："`
      （见下文 SFT 一节）。
+- **语言选择（fhz 2026-09-29）**：`--lang all|zh|en`（默认 all = 逐位不变），
+  按 parquet 的 `lang` 列过滤**训练流**；`--data pretrain --lang zh` 等价
+  旧 `--data pretrain_zh`（后者保留兼容）。sft 分片同样适用。词表扫描不受
+  影响（词表是训练流超集 → OOV 恒 0）；选择结果随检查点 meta 落盘。
+- **远程数据源（P54，fhz 2026-09-29）**：`--remote-data` 直读 ModelScope
+  （`fhzfhz/Mixture-General-Mini`，HTTP Range 流式零落盘，仅支持
+  ModelScope）；`--remote-fraction 0.3` 取排序后前 30% 分片（前缀子集）。
+  本地 `datasets/` 仍是默认（逐位不变）。
 - **三源统一采样器** `tools/fetch_ms.py`：web/code/math 三源按计划采样
   （`--plan web=3,code=2,math=1`），产出进 `datasets/pretrain/`（P48/P49）。
 - **本机数据集已删除**（fhz 指令，29 GB；清单
