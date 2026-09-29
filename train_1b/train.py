@@ -214,8 +214,16 @@ def main() -> None:
                          "DirectML），否则回落 numba CPU 原路径（逐位不变）；"
                          "亦可显式 cpu/npu/cuda/rocm/dml")
     ap.add_argument("--big-n", type=int, default=0, help="覆盖大空间神经元数（0=用预设）")
-    ap.add_argument("--csr-online", action="store_true",
-                    help="大空间表切换在线可写 CSR（长跑内存 ≈10×省，逐位等价已验证）")
+    ap.add_argument("--csr-online", dest="csr_online",
+                    action="store_true", default=True,
+                    help="大空间表使用在线可写 CSR（**默认开**，P50）。"
+                         "每条突触 ~16 B（int8 权重 + CSR 索引）vs dict 的 "
+                         "~100+ B → 1B 档实测 5.74× 省（91.8→16.0 B/条目）；"
+                         "内存只随**已生长**突触数增长，与容量无关 → 32 GB "
+                         "机器上长跑/30B 档的安全前提")
+    ap.add_argument("--no-csr-online", dest="csr_online",
+                    action="store_false",
+                    help="关闭在线 CSR，回退 dict 邻接表（仅短跑/调试用）")
     ap.add_argument("--readout-conn-k", type=int, default=0,
                     help="稀疏读出每输出单元入边数（0=稠密；大词表时建议 512–2048）")
     ap.add_argument("--seed", type=int, default=11)
