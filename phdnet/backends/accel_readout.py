@@ -55,7 +55,7 @@ class AccelReadout:
 
     def __init__(self, n_h: int, n_out: int, rng=None, device: str = "auto",
                  dtype: str = "fp32", w_clip: float = 0.0, w0=None,
-                 nll_sync_every: int = 1):
+                 nll_sync_every: int = 1, compile: bool = False):
         if torch is None:
             raise RuntimeError("未安装 torch，加速读出不可用")
         if dtype not in _DT:
@@ -69,6 +69,22 @@ class AccelReadout:
         self._nll_sum = None
         self._nll_n = 0
         self._last_nll = 0.0
+        # P38（实验性）：`torch.compile` 融合读出热路径的 5 个小 kernel
+        # （matvec / softmax / log / sub / addmm_）。CANN 上每个 kernel 的
+        # launch 开销 ~50-200 μs，每步 5 个 → 占读出延迟的大头。reduce-overhead
+        # 模式（NPU 对应 npu_graph）可摊薄 launch。⚠ 昇腾上未实测（本机无
+        # NPU）；数值走容差判据；失败自动回落非编译路径并告警。
+        self._compiled = False
+        if compile:
+            try:
+                self._fused = torch.compile(self._train_step_core,
+                                            mode="reduce-overhead",
+                                            fullgraph=False)
+                self._compiled = True
+            except Exception as e:                       # noqa: BLE001
+                import warnings
+                warnings.warn(f"torch.compile 不可用，回落 eager：{e}",
+                              RuntimeWarning)
         if w0 is None:
             g = rng if rng is not None else np.random.default_rng(0)
             init = (g.normal(0.0, 0.05, (self.n_out, self.n_h)) if hasattr(g, "normal")
@@ -121,6 +137,21 @@ class AccelReadout:
         self._cache_y = y
         return y
 
+    def _train_step_core(self, y32, ht, t32, correct: int, eta: float):
+        """读出更新一体步（softmax→nll→addmm_），供 `torch.compile` 融合。
+
+        P38：调用方已算好 `y32 = (W@h).float()`（前向缓存），这里**不重复
+        matvec**（否则 W 读两次，抵消 P28 收益）。编译器融合 softmax/log/sub/
+        addmm_ 四个小 kernel、摊薄 launch 开销；eager 路径不走这里。
+        """
+        p = torch.softmax(y32, dim=0)
+        nll_dev = -torch.log(p[correct:correct + 1] + 1e-12).reshape(())
+        dp = (p - t32).to(self.tdtype)
+        self.W.addmm_(dp.reshape(-1, 1), ht.reshape(1, -1), alpha=-float(eta))
+        if self.w_clip > 0.0:
+            self.W.clamp_(-self.w_clip, self.w_clip)
+        return nll_dev
+
     # ---------- 学习（softmax 感知器，局部梯度 p − t）----------
     def learn_softmax(self, h, target, eta: float, y_pre=None,
                       accumulate: int = 1) -> float:
@@ -155,15 +186,19 @@ class AccelReadout:
         t = self._to_dev(target).float()
         # correct 在主机侧求（target 是 host 数组）——省一次 .item() 硬同步
         correct = int(np.argmax(np.asarray(target)))
-        dp = (p - t).to(self.tdtype)
-        # rank-1 AXPY：W -= eta · dp ⊗ h（不物化 (n_out × n_in) 临时张量）
-        self.W.addmm_(dp.reshape(-1, 1), ht.reshape(1, -1), alpha=-float(eta))
-        if self.w_clip > 0.0:
-            self.W.clamp_(-self.w_clip, self.w_clip)
         # nll：P34 双模式。sync_every=1 时每步 .item()（旧行为）；N>1 时
         # 累积到设备标量、每 N 步同步一次——中间步返回滞后均值，训练热路径
         # 上 CPU 与 NPU 从此可以重叠（这是 NPU 上最大的延迟收益）。
-        nll_dev = -torch.log(p[correct:correct + 1] + 1e-12).reshape(())
+        # P38：`_compiled` 时 softmax/nll/addmm_ 四个 kernel 交给编译器融合
+        #（eager 路径逐算子执行，语义一致）
+        nll_dev = self._fused(y32, ht, t, correct, float(eta)) \
+            if self._compiled else \
+            -torch.log(p[correct:correct + 1] + 1e-12).reshape(())
+        if not self._compiled:
+            dp = (p - t).to(self.tdtype)
+            self.W.addmm_(dp.reshape(-1, 1), ht.reshape(1, -1), alpha=-float(eta))
+            if self.w_clip > 0.0:
+                self.W.clamp_(-self.w_clip, self.w_clip)
         if self.nll_sync_every <= 1:
             return float(nll_dev.item())
         self._nll_sum = (nll_dev if self._nll_sum is None
@@ -331,7 +366,8 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
         return (AccelReadout(n_h, n_out, rng, device=spec,
                              dtype=cfg.readout_dtype,
                              w_clip=cfg.readout_w_clip,
-                             nll_sync_every=int(getattr(cfg, "nll_sync_every", 1))),
+                             nll_sync_every=int(getattr(cfg, "nll_sync_every", 1)),
+                             compile=bool(getattr(cfg, "torch_compile", False))),
                 f"accel:{spec}")
     except Exception as e:                                   # noqa: BLE001
         return _fallback(f"{type(e).__name__}: {e}")

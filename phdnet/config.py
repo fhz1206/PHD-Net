@@ -286,6 +286,10 @@ class PHDNetConfig:
     # 开启后 train.py 日志按段打印累计耗时（M1 编码/M2 推理/M3 预测/M5 调制/
     # M4a WM/M4b LTM/PC 学习/STDP 学习/读出）。
     step_profiling: bool = False
+    # P38（实验性）：torch.compile 融合加速读出的 softmax/nll/addmm_ 小 kernel
+    #（CANN 上 launch 开销 ~50-200μs/kernel，每步 5 个）。默认关；昇腾未实测，
+    # 失败自动回落 eager 并告警。
+    torch_compile: bool = False
                                     # fp4 已禁用（fhz 2026-09-27）：+5.88% 劣化，待 MX 块缩放；代码保留
                                     #   可选 fp32 / fp16 / bf16 / fp8 / fp4
                                     #   低精度 = 原生位型码本存储 + 查表反量化计算

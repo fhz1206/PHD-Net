@@ -183,6 +183,10 @@ def main() -> None:
                     choices=["fp32", "fp16", "bf16", "fp8", "fp4"],
                     help="读出精度（P9/P12：默认 fp32；fp64 已停止支持；"
                          "fp4 = MX 块缩放 e2m1，2026-09-28 解禁")
+    ap.add_argument("--torch-compile", action="store_true",
+                    help="P38（实验性）：torch.compile 融合加速读出的小 kernel"
+                         "（CANN launch 开销 ~50-200μs/kernel）。默认关；昇腾未"
+                         "实测，失败自动回落 eager 并告警")
     ap.add_argument("--step-profiling", action="store_true",
                     help="P35：step 分段计时（诊断 CPU 侧耗时分布；日志按段打印）")
     ap.add_argument("--nll-sync-every", type=int, default=1,
@@ -311,6 +315,8 @@ def main() -> None:
     cfg.readout_dtype = args.readout_dtype            # P9 精度（默认 fp32）
     cfg.accel_readout = args.accel                     # P19 读出设备（默认 auto）
     cfg.nll_sync_every = args.nll_sync_every           # P34 nll 同步周期（默认 1）
+    cfg.step_profiling = args.step_profiling           # P35 step 分段计时（默认关）
+    cfg.torch_compile = args.torch_compile             # P38 kernel 融合（默认关）
 
     if args.data == "mix":
         try:
@@ -603,6 +609,11 @@ def main() -> None:
                       f"  | 读出 {_ro_ms / _ro_n:>7.3f} ms/tok"
                       f"（{_rb.split('(')[0]}@{_ro_dev}，占 {_ro_ms / 1000 / max(1e-9, spent) * 100:>5.1f}%）",
                       flush=True)
+                if getattr(lm.net, "_prof_on", False) and lm.net._prof:
+                    _pr = sorted(lm.net._prof.items(), key=lambda kv: -kv[1])[:6]
+                    print("      分段: " + "  ".join(
+                        f"{k} {v * 1000 / max(1, i - done):.2f}" for k, v in _pr)
+                          + " ms/tok", flush=True)
             if args.ckpt_every and (i - done) and (i - done) % args.ckpt_every == 0:
                 save_model(ckpt, lm, cfg, i)
                 print(f"  [检查点] 已保存 {i:,} tokens → {ckpt}", flush=True)
