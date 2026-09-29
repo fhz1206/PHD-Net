@@ -28,6 +28,15 @@ from pathlib import Path as _Path
 _PREFIX = "ms://"
 # Range 随机读块大小（fsspec http block_size；顺序读时退化为预取窗口）
 _BLOCK_MB = 8
+# 列目录分页大小：取 modelscope SDK 默认值（服务端同量级，已实测 /pretrain
+# root_path 带前导斜杠 + page_size=100 一次取全 52 分片）
+_PAGE_SIZE = 100
+# Range 读超时/重试（审计 C1：长跑中一次网络抖动不该崩全局训练）
+_HTTP_TIMEOUT_S = 60
+_READ_RETRIES = 3
+_RETRY_BACKOFF_S = 2.0
+# 远程模式的预取进程上限（审计 B2：8 进程 × 独立连接池可能打爆服务端）
+REMOTE_MAX_PROCS = 4
 
 
 class MsFile:
@@ -75,20 +84,30 @@ def _parse(spec: str) -> tuple[str, str]:
 
     ns 是 ModelScope repo_id（owner/dataset **两段**）——⚠ 不能用单段
     partition 解析（会把数据集名切进路径，服务器 400 的根因）。
+    路径按 URL 规范解码一次（防「已编码的 %20」被二次编码成 %2520）。
     """
-    parts = spec[len(_PREFIX):].split("/", 2)
+    parts = str(spec)[len(_PREFIX):].split("/", 2)
     if len(parts) < 3 or not all(p.strip() for p in parts):
         raise ValueError(
             f"ms:// 路径格式应为 ms://<owner>/<dataset>/<path>: {spec}")
-    return f"{parts[0]}/{parts[1]}", parts[2].lstrip("/")
+    tail = urllib.parse.unquote(parts[2])
+    if parts[2].startswith("/") or "//" in tail:
+        raise ValueError(f"ms:// 路径不得含空段 '//': {spec}")
+    if ".." in tail.split("/"):
+        raise ValueError(f"ms:// 路径不得含 '..'（路径穿越）: {spec}")
+    return f"{parts[0]}/{parts[1]}", tail.lstrip("/")
 
 
 def _fraction() -> float:
     """分片抽样比例（环境变量传递——spawn worker 不继承模块级变量）。"""
+    raw = os.environ.get("PHDNET_REMOTE_FRACTION", "1")
     try:
-        return min(1.0, max(0.01, float(os.environ.get("PHDNET_REMOTE_FRACTION", "1"))))
+        f = float(raw)
     except ValueError:
-        return 1.0
+        raise ValueError(f"PHDNET_REMOTE_FRACTION 不是数字: {raw!r}")
+    if f <= 0 or f > 1:
+        raise ValueError(f"--remote-fraction 必须在 (0, 1]（收到 {f}）")
+    return f
 
 
 def _api():
@@ -110,17 +129,23 @@ def _auth_headers() -> dict:
 
 
 def _list_tree(repo_id: str, root: str) -> list[dict]:
-    """列数据集目录（官方 SDK 分页循环；root 允许为空 = 仓库根）。"""
+    """列数据集目录（官方 SDK 分页循环；root 允许为空 = 仓库根）。
+
+    分页判据用**空页终止**而非 `len(files) < page_size`：服务端可能把
+    page_size 钳到更小值（SDK 默认 100 暗示服务端同量级），用请求值比较会
+    在首页就误判「已到末页」→ **静默丢数据**（审计 B3，必修）。
+    page_size 取 SDK 默认 100（与端点已验证组合一致）。
+    """
     api = _api()
     out, page = [], 1
     while True:
-        files = api.get_dataset_files(repo_id=repo_id, root_path="/" + root
-                                      if root else "/",
+        files = api.get_dataset_files(repo_id=repo_id,
+                                      root_path=("/" + root) if root else "/",
                                       recursive=False, page_number=page,
-                                      page_size=200)
-        out.extend(files)
-        if len(files) < 200:
+                                      page_size=_PAGE_SIZE)
+        if not files:
             return out
+        out.extend(files)
         page += 1
 
 
@@ -139,11 +164,17 @@ def expand_ms(spec: str) -> list[MsFile]:
     - 无通配符 → 返回单文件，**不列目录**（worker 内零额外请求）；
       分片抽样只发生在主进程的 glob 展开处。
     - 带通配符 → 列最后一层目录 + fnmatch 过滤文件名。
+      **只支持单层**（pattern 不含 `/`、不支持 `**` 跨目录）——与
+      ``tools/fetch_ms.py::walk_parquets`` 的手工递归不同，这里显式拒绝而非
+      静默失效（审计 A4）。
     """
     repo_id, tail = _parse(spec)
     if not any(ch in tail for ch in "*?["):
         return [MsFile(repo_id, tail)]
     root, _, pat = tail.rpartition("/")
+    if any(ch in root for ch in "*?[]"):
+        raise NotImplementedError(
+            f"ms:// 仅支持单层 glob（目录部分不能含通配符）: {spec}")
     files = _list_tree(repo_id, root)
     hits = sorted(f["Path"] for f in files
                   if f.get("Type") == "blob"
@@ -151,7 +182,9 @@ def expand_ms(spec: str) -> list[MsFile]:
     if not hits:
         raise FileNotFoundError(
             f"ms:// glob 无匹配: {spec}（root={root or '<仓库根>'}, "
-            f"{len(files)} 个对象；私有数据集需设置 MS_TOKEN）")
+            f"目录内共 {len(files)} 个对象）。常见原因：① 路径/模式写错；"
+            f"② 仓库非公开——设置环境变量 MS_TOKEN；③ ModelScope WAF 拦截"
+            f"（HTTP 400/403，非认证问题）")
     hits = _take_prefix(hits)
     sizes = {f["Path"]: f.get("Size") for f in files if f.get("Type") == "blob"}
     return [MsFile(repo_id, h, sizes.get(h)) for h in hits]
@@ -161,7 +194,8 @@ def open_ms_file(spec: str, block_mb: int = _BLOCK_MB):
     """``ms://`` spec → 可 seek 的 HTTP 文件流（Range 随机读，零落盘）。
 
     依赖 fsspec + aiohttp（fetched from tools/fetch_l3.py 同款，项目已实测）。
-    私有数据集经 MS_TOKEN 认证。
+    私有数据集经 MS_TOKEN 认证。**不重试**：重试需重建文件流（fsspec 句柄
+    不可复用），由调用方 ``phdnet.corpus.open_parquet_source`` 统一重试。
     """
     try:
         import fsspec
@@ -171,8 +205,14 @@ def open_ms_file(spec: str, block_mb: int = _BLOCK_MB):
     url = (f"https://www.modelscope.cn/api/v1/datasets/{repo_id}/repo"
            f"?Revision=master&FilePath={urllib.parse.quote(fp)}")
     h = _auth_headers()
-    fs = fsspec.filesystem("http", client_kwargs={"trust_env": True,
-                                                  "headers": h})
+    kw = {"trust_env": True, "headers": h}
+    try:                                              # 显式超时（审计 C1：
+        import aiohttp                                # aiohttp 默认 5min 总超时
+        kw["timeout"] = aiohttp.ClientTimeout(total=_HTTP_TIMEOUT_S,
+                                              connect=15, sock_read=_HTTP_TIMEOUT_S)
+    except ImportError:                               # pragma: no cover
+        pass
+    fs = fsspec.filesystem("http", client_kwargs=kw)
     return fs.open(url, "rb", block_size=int(block_mb) << 20)
 
 

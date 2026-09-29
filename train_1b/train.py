@@ -106,26 +106,11 @@ DATA_FILES = {
     "sft": _ROOT / "datasets" / "sft" / "sft_000.*.parquet",
     # P43（fhz「数据要中英文全部都拿来训练」）：`pretrain` = **全量**（中文 3708 万
     # 块 + 英文 Magpie-R1 201 万块，无过滤）；`pretrain_zh` = 仅中文（lang 过滤，
-    # 保留作对照/消融）。两者指向同一目录，过滤逻辑在 stream_factory 区分。
+    # 保留作对照/消融）。两者指向同一目录，过滤逻辑在 PrefetchChars(lang=) 区分。
     "pretrain": _ROOT / "datasets" / "pretrain" / "pretrain_*.parquet",
     "pretrain_zh": _ROOT / "datasets" / "pretrain" / "pretrain_*.parquet",
     "eval": _ROOT / "eval_corpus" / "internal_corpus.txt",
 }
-
-
-def stream_factory(data: str):
-    """返回 () -> 新的独立样本字符块流。
-
-    P42（fhz「去除 mix 参数，直接预训练和 SFT，数据全量」）：删除 mix 混合流。
-    两阶段各自全量：预训练 `--data pretrain_zh`（**带 lang="zh" 过滤**——pretrain
-    52 分片含 201 万英文块，不过滤会混入 5% 英文），SFT `--data sft`。
-    """
-    if data == "pretrain_zh":                      # 仅中文口径（对照/消融）
-        return lambda: PrefetchChars(DATA_FILES["pretrain_zh"], SEP, lang="zh",
-                                     depth=PREFETCH_DEPTH,
-                                     batch_samples=PREFETCH_BATCH or 64,
-                                     workers=PREFETCH_W)
-    return lambda: char_chunks(DATA_FILES[data])  # pretrain = 全量（中+英）
 
 
 _STOP = {"flag": False}
@@ -363,7 +348,8 @@ def main() -> None:
     _tel = Telemetry()                                 # P41：系统/设备遥测
 
     data_path = DATA_FILES[args.data]
-    if args.remote_data and args.data != "eval":
+    remote_active = bool(args.remote_data and args.data != "eval")
+    if remote_active:
         # fhz 2026-09-29（服务器「glob 无匹配」）：数据集托管 ModelScope，
         # --remote-data 切换为 HTTP Range 流式直读（零落盘，仅支持 ModelScope）；
         # 分片级抽样取前 remote_fraction 比例（前缀子集，顺序语义不变）。
@@ -371,6 +357,9 @@ def main() -> None:
         _pat = DATA_FILES[args.data].name
         data_path = f"ms://{MS_DATA_REPO}/{args.data if args.data != 'pretrain_zh' else 'pretrain'}/{_pat}"
         os.environ["PHDNET_REMOTE_FRACTION"] = str(args.remote_fraction)
+        if args.vocab_scan == "full":
+            print("[data] WARN: --vocab-scan full 会把远程分片整读两遍"
+                  "（建词表 + 训练）；建议 --vocab-file 复用词表快照")
         print(f"[data] remote source: {data_path} "
               f"(fraction={args.remote_fraction:g})")
     try:
@@ -378,11 +367,21 @@ def main() -> None:
     except FileNotFoundError as e:
         print(f"data file not found: {e}")
         sys.exit(1)
-    if data_files and hasattr(data_files[0], "stat"):
+    if not remote_active:
         total_mb = sum(p.stat().st_size for p in data_files) / 1e6
     else:                                   # 远程：MsFile 自带 API Size
         from phdnet.ms_stream import ms_total_size
         total_mb = ms_total_size(data_files) / 1e6
+
+    # 数据口径随检查点落盘（审计 D2：--remote-fraction 变化 + --resume 会静默
+    # 改变数据分布 → 恢复训练时须能看出这次续训用的是哪份数据）
+    _data_provenance = {
+        "data": args.data,
+        "remote": bool(remote_active),
+        "remote_fraction": (float(args.remote_fraction) if remote_active else None),
+        "data_shards": len(data_files),
+        "data_spec": str(data_path),
+    }
         print(f"[data] {len(data_files)} remote shards, ~{total_mb:.0f} MB "
               f"(ModelScope HTTP Range streaming, zero local copy)")
     dl_w = max(1, min(vw, len(data_files)))    # 数据加载进程数（≤文件数）
@@ -585,11 +584,17 @@ def main() -> None:
         if _STOP["flag"] or (args.tokens and i - done >= args.tokens):
             break
         # 多核数据加载：生产者进程预取（与 char_chunks 产出逐位一致）
+        # 远程审计 B2：每进程持有独立 aiohttp 连接池 + 8 MB block 缓存，
+        # 8 进程并发 Range 请求可能触发服务端限流 → 远程上限 REMOTE_MAX_PROCS
+        _pw = PREFETCH_W
+        if remote_active:
+            from phdnet.ms_stream import REMOTE_MAX_PROCS
+            _pw = min(PREFETCH_W or REMOTE_MAX_PROCS, REMOTE_MAX_PROCS)
         src = PrefetchChars(data_path, SEP,
                             lang=("zh" if args.data == "pretrain_zh" else None),
                             depth=PREFETCH_DEPTH,
                             batch_samples=PREFETCH_BATCH or 64,
-                            workers=PREFETCH_W)
+                            workers=_pw)
         stream = StreamingTokenizer(lm.tok.seg, src,
                                    assistant_marker=(args.assistant_marker
                                                      or None))
@@ -670,16 +675,17 @@ def main() -> None:
                 except Exception:                       # noqa: BLE001
                     pass
             if args.ckpt_every and (i - done) and (i - done) % args.ckpt_every == 0:
-                save_model(ckpt, lm, cfg, i, ckpt_dtype=args.ckpt_dtype)
+                save_model(ckpt, lm, cfg, i, ckpt_dtype=args.ckpt_dtype,
+                           extra=_data_provenance)
                 print(f"  [checkpoint] saved {i:,} tokens → {ckpt}", flush=True)
                 _print_table_stats(lm)
         if _STOP["flag"] or (args.tokens and i - done >= args.tokens):
             break
 
     # ── 收尾：滚动检查点 + final 模型 ──
-    save_model(ckpt, lm, cfg, i, ckpt_dtype=args.ckpt_dtype)
+    save_model(ckpt, lm, cfg, i, ckpt_dtype=args.ckpt_dtype, extra=_data_provenance)
     final = args.save_dir / f"phdnet1b_{args.preset}_{args.data}_final.npz"
-    save_model(final, lm, cfg, i, extra={"final": True})
+    save_model(final, lm, cfg, i, extra={**_data_provenance, "final": True})
 
     spent = time.perf_counter() - t_start
     oov_rate = oov_skipped / max(1, i - done)

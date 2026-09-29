@@ -45,13 +45,25 @@ def open_parquet_source(p):
     """Path 或 MsFile → pyarrow ParquetFile。
 
     本地：``ParquetFile(str(p))``（与旧行为**完全一致**，逐位不变）；
-    远程：``ms://`` spec → HTTP Range 可 seek 流（phdnet/ms_stream.py）。
+    远程：``ms://`` spec → HTTP Range 可 seek 流（phdnet/ms_stream.py），
+    网络抖动按指数退避重试（审计 C1：长跑训练不该被单次 5xx 打断；
+    重试只重建流，不改变任何数值 → 逐位等价）。
     """
     pq = _require_pyarrow()
-    if is_remote_path(p):
-        from phdnet.ms_stream import open_ms_file
-        return pq.ParquetFile(open_ms_file(str(p)))
-    return pq.ParquetFile(str(p))
+    if not is_remote_path(p):
+        return pq.ParquetFile(str(p))
+    import time as _time
+    from phdnet.ms_stream import open_ms_file, _READ_RETRIES, _RETRY_BACKOFF_S
+    last: Exception | None = None
+    for k in range(_READ_RETRIES):
+        try:
+            return pq.ParquetFile(open_ms_file(str(p)))
+        except Exception as e:                      # noqa: BLE001
+            last = e
+            if k + 1 < _READ_RETRIES:
+                _time.sleep(_RETRY_BACKOFF_S ** (k + 1))
+    raise RuntimeError(
+        f"ms:// 打开失败（重试 {_READ_RETRIES} 次）: {p}") from last
 
 
 def _require_pyarrow():
@@ -96,6 +108,9 @@ def _iter_one(p, column: str, batch_size: int):
                 if v:
                     yield v
     elif suffix in (".jsonl", ".json"):
+        if is_remote_path(p):
+            raise NotImplementedError(
+                f"ms:// 远程源仅支持 .parquet（收到 {p.name}）")
         with open(p, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -142,7 +157,9 @@ def load_text(path: str | Path, limit_chars: int | None = None,
     parts: list[str] = []
     n = 0
     any_txt = False
-    for p in expand_paths(path):
+    paths = expand_paths(path)          # 展开一次复用（远程 glob 原本会二次
+                                        # 列目录发网络请求，审计 B4）
+    for p in paths:
         if p.suffix.lower() in (".parquet", ".jsonl", ".json"):
             for t in _iter_one(p, "text", 2000):
                 parts.append(t)
@@ -150,6 +167,9 @@ def load_text(path: str | Path, limit_chars: int | None = None,
                 if limit_chars and n >= limit_chars:
                     return (sep.join(parts)[:limit_chars])
         else:
+            if is_remote_path(p):
+                raise NotImplementedError(
+                    f"ms:// 远程源仅支持 .parquet（收到 {p.name}）")
             any_txt = True
             with open(p, encoding="utf-8") as f:
                 s = f.read(limit_chars - n) if limit_chars else f.read()
@@ -160,7 +180,7 @@ def load_text(path: str | Path, limit_chars: int | None = None,
     if any_txt:
         return "".join(parts) if not any(
             p.suffix.lower() in (".parquet", ".jsonl", ".json")
-            for p in expand_paths(path)) else sep.join(parts)[:limit_chars] if limit_chars else sep.join(parts)
+            for p in paths) else sep.join(parts)[:limit_chars] if limit_chars else sep.join(parts)
     return sep.join(parts)[:limit_chars] if limit_chars else sep.join(parts)
 
 
@@ -211,7 +231,13 @@ def write_parquet(texts, dst: str | Path, lang: str | None = None,
 
 def corpus_stats(path: str | Path, max_items: int = 50_000) -> dict:
     """轻量统计：条数、字符数、平均长度、中文占比。"""
-    p = Path(path)
+    if is_remote_path(path):                       # 审计 B4：Path(ms://) 会
+        from phdnet.ms_stream import ms_total_size  # 摧毁远程语义并误报 glob 无匹配
+        size_mb: float | None = ms_total_size(expand_paths(path)) / 1e6
+        p = str(path)
+    else:
+        p = Path(path)
+        size_mb = None
     n = chars = cjk = 0
     lens = []
     for t in iter_texts(p):
@@ -224,4 +250,4 @@ def corpus_stats(path: str | Path, max_items: int = 50_000) -> dict:
     return {"path": str(p), "items": n, "chars": chars,
             "mean_len": (sum(lens) / n) if n else 0.0,
             "cjk_ratio": (cjk / max(1, min(chars, 2000 * n))) if n else 0.0,
-            "size_mb": os.path.getsize(p) / 1e6}
+            "size_mb": (os.path.getsize(p) / 1e6) if size_mb is None else size_mb}
