@@ -288,6 +288,82 @@ else:                                                   # numba 缺失回退
         return r1, r2, e0, e1
 
 
+# ── P59：M2 学习融合核（`learn` 8 次核调用 → 1 次；`learn_predictive` 12 → 1）
+# 与 P52 推理融合核对称：收益来自 ①Python 层 kernel 启动次数骤减（每步 8~12
+# 次 → 1 次）、②中间向量（predictive 侧 e0p/e1p）核内一次分配、③消除跨核
+# 的 val 写回/读回。
+# **逐位一致的关键**：每个子操作的**表达式与遍历顺序逐行照抄**原核
+# （含 `if ai == 0.0: continue` 短路），同一 val 被多次更新时保持原次序
+# （predictive 侧 dn0 先 (1−mix) 后 mix）。行级 prange 沿用原口径——行内顺序
+# 不变、行间写集不相交 ⇒ 与串行版逐位一致。
+# ⚠ homeostasis=True **不走本核**：e0p/e1p 需在 matvec 之后归一化，留在
+# Python 侧按原路径执行（罕见路径，性能不敏感）。
+if NUMBA_OK:
+    @njit(cache=True, nogil=True, parallel=True, fastmath=True)
+    def _pc_learn_fused(dn0, dn1, up0, up1, e0, e1, r1, r2, s0,
+                        eta_pc, eta_oja, w_max):
+        n = dn0[0].shape[0] - 1                   # 下行生成：val += η·e0[i]·r1[j]
+        for i in prange(n):
+            ai = e0[i]
+            if ai == 0.0:
+                continue
+            for p in range(dn0[0][i], dn0[0][i + 1]):
+                dn0[2][p] += eta_pc * ai * r1[dn0[1][p]]
+        n = dn1[0].shape[0] - 1
+        for i in prange(n):
+            ai = e1[i]
+            if ai == 0.0:
+                continue
+            for p in range(dn1[0][i], dn1[0][i + 1]):
+                dn1[2][p] += eta_pc * ai * r2[dn1[1][p]]
+        n = up0[0].shape[0] - 1                   # 上行识别：Oja
+        for i in prange(n):
+            pi = r1[i]
+            if pi == 0.0:
+                continue
+            for p in range(up0[0][i], up0[0][i + 1]):
+                up0[2][p] += eta_oja * pi * (s0[up0[1][p]] - pi * up0[2][p])
+        n = up1[0].shape[0] - 1
+        for i in prange(n):
+            pi = r2[i]
+            if pi == 0.0:
+                continue
+            for p in range(up1[0][i], up1[0][i + 1]):
+                up1[2][p] += eta_oja * pi * (r1[up1[1][p]] - pi * up1[2][p])
+        for p in prange(up0[2].shape[0]):        # clip（合并 4 次为 4 段循环）
+            v = up0[2][p]
+            if v > w_max:
+                up0[2][p] = w_max
+            elif v < -w_max:
+                up0[2][p] = -w_max
+        for p in prange(up1[2].shape[0]):
+            v = up1[2][p]
+            if v > w_max:
+                up1[2][p] = w_max
+            elif v < -w_max:
+                up1[2][p] = -w_max
+        for p in prange(dn0[2].shape[0]):
+            v = dn0[2][p]
+            if v > w_max:
+                dn0[2][p] = w_max
+            elif v < -w_max:
+                dn0[2][p] = -w_max
+        for p in prange(dn1[2].shape[0]):
+            v = dn1[2][p]
+            if v > w_max:
+                dn1[2][p] = w_max
+            elif v < -w_max:
+                dn1[2][p] = -w_max
+
+else:                                                   # numba 缺失回退
+    def _pc_learn_fused(dn0, dn1, up0, up1, e0, e1, r1, r2, s0,
+                        eta_pc, eta_oja, w_max):
+        _csr_add_outer(*dn0, e0, r1, eta_pc)
+        _csr_add_outer(*dn1, e1, r2, eta_pc)
+        _csr_oja_up(*up0, r1, s0, eta_oja)
+        _csr_oja_up(*up1, r2, r1, eta_oja)
+        for t in (up0, up1, dn0, dn1):
+            _csr_clip(t[2], w_max)
 
 class SparsePCStack:
     """结构性稀疏预测编码栈（接口与 `PredictiveCodingStack` 对齐，可 drop-in）。
@@ -405,6 +481,13 @@ class SparsePCStack:
             e0 = e0 / max(float(np.linalg.norm(e0)), 1e-9)
             e1 = e1 / max(float(np.linalg.norm(e1)), 1e-9)
         eta = self.eta_pc * eta_scale
+        # P59：homeostasis=False 走融合核（8 次 → 1 次，逐位一致）；
+        # homeostasis=True 保持原路径（e0/e1 归一化在核外，见融合核注释）。
+        if not homeostasis:
+            _pc_learn_fused(self.dn0, self.dn1, self.up0, self.up1,
+                            e0, e1, r1, r2, s0, eta, self.eta_oja * eta_scale,
+                            self.w_max)
+            return
         # 下行生成权重：误差 × 上层表示（稀疏外积）
         _csr_add_outer(*self.dn0, e0, r1, eta)
         _csr_add_outer(*self.dn1, e1, r2, eta)
@@ -437,6 +520,9 @@ class SparsePCStack:
             e1p = e1p / max(float(np.linalg.norm(e1p)), 1e-9)
         eta = self.eta_pc * eta_scale
         one_minus = 1.0 - mix
+        # ⚠ P59 实测：`learn_predictive` 的融合版**负收益**（12 个 prange 段
+        # 的线程调度 > 省下的 11 次核启动；26 万边 1.36×、105 万边 0.96×、
+        # 419 万边 0.91×，服务器 191 核只会更差）→ 保持多核调用原路径。
         _csr_add_outer(*self.dn0, e0, r1, eta * one_minus)
         _csr_add_outer(*self.dn0, e0p, p_r1, eta * mix)
         _csr_add_outer(*self.dn1, e1, r2, eta * one_minus)
