@@ -59,6 +59,11 @@ _DEFAULT_THREADS = str(max(1, min(8, os.cpu_count() or 1)))
 for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
            "NUMEXPR_NUM_THREADS"):
     os.environ.setdefault(_v, _DEFAULT_THREADS)
+# P97：线程**自旋等待**是开关而非默认——本机实测（x86 8 核、M2 plain 1 ms 级任务）
+# `OMP_WAIT_POLICY=PASSIVE` 让进程 CPU 时间 −21%（11.52 s → 9.08 s，自旋确实少
+# 了），但**墙钟 +90%**（1073 µs → 2044 µs）：小任务上休眠/唤醒成本远高于自旋。
+# 因此**默认保持 ACTIVE（原行为）**，改为 `--omp-wait passive` 按需开启——
+# 191 核 + 每步数毫秒的大规模环境里结论可能相反，应由实测决定而非想当然。
 
 import numpy as np
 
@@ -227,6 +232,10 @@ def main() -> None:
                          "cudagraphs due to mutated inputs' and lose that benefit")
     ap.add_argument("--step-profiling", action="store_true",
                     help="P35：step 分段计时（诊断 CPU 侧耗时分布；日志按段打印）")
+    ap.add_argument("--omp-wait", default="active", choices=["active", "passive"],
+                    help="P97: OpenMP 线程池空闲等待策略。active=自旋（默认，"
+                         "小任务更快）；passive=让出 CPU（省 CPU 空转与 CS/s，"
+                         "但本机实测墙钟 +90%%）。191 核大规模下请 A/B 后再定。")
     ap.add_argument("--omp-proc-bind", dest="omp_proc_bind",
                     action="store_true", default=True,
                     help="P71/P74：设 OMP_PROC_BIND=close 把 OpenMP 线程绑到"
@@ -412,6 +421,10 @@ def main() -> None:
     # 191 个核建 place 表，OpenMP/numba 每次线程池同步都要遍历它 → 撤掉。
     # 服务器实测（12:50 日志）：带 OMP_PLACES 时 M2_infer 2.4 → 19-32 ms/tok
     # （涨 8-13×）、CS/s 反而升到 600 万。只保留 PROC_BIND。
+    if args.omp_wait == "passive":
+        # P97：必须**在 numba 初始化之前**设置才生效
+        os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+        os.environ.setdefault("KMP_BLOCKTIME", "0")
     if args.omp_proc_bind:
         os.environ.setdefault("OMP_PROC_BIND", "close")
     # P88：加速器**启动期健康检查**。服务器 2026-09-30 18:59 报
