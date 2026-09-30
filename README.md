@@ -72,7 +72,13 @@ train/
 ├── datasets/                   语料（**自身是独立仓库** → atomgit.com/fhz1206/Mixture-General-Mini，
 │   │                           限额 1 GiB < 交付 4.64 GiB 推不全；权威副本在 ModelScope
 │   │                           fhzfhz/Mixture-General-Mini，`--remote-data` 可直读；
-│   │                           本机 29 GB 已删，清单 `docs/DATASETS_DELETED_MANIFEST.json`）
+│   │                           本机副本已于 2026-09-29 按指令删除：307 文件 / 32.28 GiB
+│   │                           （其中 parquet 64 个 / 9.62 GiB），未被 git 追踪 →
+│   │                           只能从 ModelScope 重新下载/重建。删除时的数据源构成：
+│   │                           sft = UltraInteract(288k) + Magpie-R1 CoT(40,619)；
+│   │                           pretrain = M7_Core 中文 3,697 万 + Magpie-R1 英文 201 万
+│   │                           + Ultra-FineWeb-L3 中文 8 万。逐文件明细见 git 历史
+│   │                           `170ce0c^:docs/DATASETS_DELETED_MANIFEST.json`）
 │   ├── sft/                    SFT 分片 parquet（≤100 MiB；331.9 万条）
 │   ├── pretrain/               预训练分片 parquet（≤100 MiB；3,906 万条 = 中文 3708 万 + 英文 Magpie-R1 201 万）
 │   └── raw/                    原始件归档（不入库；读取统一走 phdnet/corpus.py）

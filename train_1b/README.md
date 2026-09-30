@@ -83,7 +83,7 @@ GPU 也能在小预算内真实训练与续训（每步成本只正比于活跃�
 - **三源统一采样器** `tools/fetch_ms.py`：web/code/math 三源按计划采样
   （`--plan web=3,code=2,math=1`），产出进 `datasets/pretrain/`（P48/P49）。
 - **本机数据集已删除**（fhz 指令，29 GB；清单
-  `docs/DATASETS_DELETED_MANIFEST.json`）——重训前先用 fetch_ms.py 重新采样。
+  ——重训前先用 fetch_ms.py 重新采样。
 
 ## 精度与数值格式（P46/P47，2026-09-29）
 
