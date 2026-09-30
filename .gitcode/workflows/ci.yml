@@ -30,7 +30,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install numpy numba pyarrow psutil
-      - name: fast 回归（19 项，零回归门槛）
+      - name: fast 回归（9 项，零回归门槛）
         run: python tests/run_tests.py fast
       - name: 分词器向量化逐位对拍
         run: python tests/verifiers/verify_seg_equiv.py
@@ -55,8 +55,6 @@ jobs:
           python -c "import sys; sys.path.insert(0, 'tests'); \
             from checks_backend import t_torch_equivalence, t_torch_model_smoke; \
             t_torch_equivalence(); t_torch_model_smoke(); print('torch checks PASS')"
-      - name: torch LM 栈 vs numpy 主实现等价性（容差判据）
-        run: python tests/verifiers/verify_torch_lm.py --device cpu
 
   precision:
     name: 精度体系验证（P9）

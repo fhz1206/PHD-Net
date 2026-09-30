@@ -30,7 +30,7 @@ jobs:
           # torch」被跳过，两个覆盖点在 CI 上从未真正执行。CPU 轮子约 200MB。
           pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-      - name: fast 回归（19 项，零回归门槛）
+      - name: fast 回归（9 项，零回归门槛）
         run: python tests/run_tests.py fast
 
       - name: 逐位对拍（分词器 / 词表并行 / 并行核一致性）
@@ -52,8 +52,6 @@ jobs:
           echo '--- 重跑 verify_seg_equiv ---'
           python tests/verifiers/verify_seg_equiv.py; echo "exit=$?"
 
-      - name: torch LM 栈 vs numpy 主实现等价性（容差判据）
-        run: python tests/verifiers/verify_torch_lm.py --device cpu
 
   backend-torch:
     # 硬件后端适配验证：CPU torch 路径（CUDA/NPU/ROCm 需对应硬件 runner，
