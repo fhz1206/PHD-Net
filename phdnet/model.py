@@ -516,8 +516,12 @@ def to_numpy(x, dtype=None):
     """
     if hasattr(x, "detach"):
         x = x.detach().to("cpu")
-        if x.dtype == torch.bfloat16:
-            x = x.view(torch.uint16)            # 位模式透传（加载侧 view 回）
+        if str(x.dtype) == "torch.bfloat16":
+            # 本模块**不 import torch**（torch 是可选依赖：只有读出 accel 路径
+            # 才有张量）。P81 直接写 torch.bfloat16 → 纯 numpy 训练时 NameError。
+            # 这里惰性导入：bf16 张量存在 ⇒ torch 必然已装。
+            import torch as _t                 # noqa: PLC0415
+            x = x.view(_t.uint16)              # 位模式透传（加载侧 view 回）
         x = x.numpy()
     else:
         x = np.asarray(x)

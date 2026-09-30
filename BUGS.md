@@ -40,7 +40,8 @@
 | 28 | BLAS 线程未限（191 线程跑小 sgemv） | 既有遗留 | 待提交 |
 | 29 | 每步 `argmax` 扫全词表 + 重复 `stdp.predict` | 既有遗留 | `11c9a6e` |
 | 30 | bf16 读出的检查点保存崩（numpy 无 bf16） | 我引入（bf16 默认） | `9f69282` |
-| 31 | P80 补丁静默 no-op → `_correct_pinned` 未定义 | 我引入（当场修） | `待提交` |
+| 31 | P80 补丁静默 no-op → `_correct_pinned` 未定义 | 我引入（当场修） | `90b7b63` |
+| 32 | `to_numpy` 用了 `torch` 但 model.py 不 import torch | 我引入（当场修） | `待提交` |
 
 ---
 
@@ -236,6 +237,18 @@
   `getattr` 防御兜底。
 - **门禁/流程缺口**：replace 类补丁**必须 grep 断言改后文本存在**，否则静默失败。
   与 #25（Edit 截断 except）同属「补丁未落盘」家族。
+
+### #32 `to_numpy` 引用 torch 但模块不 import（当场修）
+- **症状**（服务器 16:06）：检查点保存崩 `NameError: name 'torch' is not defined`
+  @ `phdnet/model.py:519`。
+- **根因**：P81 的 bf16 修复写了 `x.dtype == torch.bfloat16`，但
+  `phdnet/model.py` **从不 import torch**（torch 是可选依赖，只有读出 accel
+  路径才有张量）→ 纯 numpy 训练路径上必然 NameError。**本机 fast 门禁不 import
+  该分支**（没有 bf16 张量），所以没被拦下。
+- **修复**：惰性 `import torch as _t`（bf16 张量存在 ⇒ torch 必然已装）。
+  中途试过 `x.view("uint16")` 字符串 dtype——本机 torch 版本不接受字符串。
+- **门禁缺口**：`verify_ms_stream.py` 的 bf16 round-trip 用例**有** torch，
+  但 fast 门禁（9/9）没有 → 建议把「bf16 round-trip」并入 fast 集合。
 
 ### #15 fp32 权重 @ fp64 输入 → 脱离 BLAS 慢 5.9×（`0f203d5`）
 - **症状**：M1 编码器改 fp32 后反而从 857 µs 变 5047 µs。
