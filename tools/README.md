@@ -84,6 +84,20 @@ M5 公平评测（PHD-Net vs nanoGPT 级 Transformer）入口不在本目录：
 - `archive/`：`bench.py`、`bench_1b_migrate.py`、`audit_prof_1b.py`、`hunt_bugs.py`、
   `rerun_task6.py` —— 保留可追溯，不再维护。
 
+## 能力探测（P86，2026-09-30）
+
+| 工具 | 用途 |
+|---|---|
+| `tools/probe_fp8.py` | 探测当前设备/框架**实际暴露的 fp8 能力**：标准 `float8_e4m3fn` 的建张量/cast/matmul（cpu/npu）、`torch.ops` 里的 fp8 专用算子、`torch_npu` 的量化 API、设备型号与 CANN 版本。秒级出结果，不需要训练数据 |
+
+```bash
+python tools/probe_fp8.py            # 报告
+python tools/probe_fp8.py --json     # 机器可读
+```
+背景：P85 实测昇腾 `.to(float8_e4m3fn)` 抛 ERR01007（框架这条路不通），但
+**芯片（910B/910C）本身有 fp8**。本脚本用来确认是否有别的入口（专用算子/量化
+API），结论决定 P86 的禁用是否保留。
+
 ## 云端性能重测（P86，2026-09-30）
 
 | 工具 | 用途 |
