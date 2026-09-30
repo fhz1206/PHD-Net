@@ -7,11 +7,13 @@ import numpy as np
 
 from checks_common import DOC, ENV, PY, ROOT, TESTS, _check
 
+# 与 phdnet.__version__ 同步；升级版本时只改这一处（2026-09-30 起 v0.1.0-alpha）
+_EXPECTED_VERSION = "v0.1.0-alpha"
+
 
 def t_version() -> None:
     import phdnet
 
-_EXPECTED_VERSION = "v0.1.0-alpha"
     # 版本一致性：__init__.__version__ 必须与本文件下方的 _EXPECTED_VERSION 一致
     # （v0.1.0-alpha 分支起版本号带前缀，2026-09-30 之前是裸 "0.0.0"——把期望值
     # 抽成常量，升级版本时只需改这一处）
