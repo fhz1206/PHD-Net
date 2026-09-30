@@ -205,6 +205,8 @@ class OnlineCSRTable(SparseSynapseTable):
         self.vals: dict[int, np.ndarray] = {}     # 行 i → 权重（或量化码）数组
         self.size: dict[int, int] = {}            # 行 i → 有效槽数
         self._cap0 = cap0
+        # P103：批量 learn 的组合数阈值（可被 verifier 注入以强制走某条路径）
+        self.BATCH_MIN_COMBOS = 4096
 
     # ---------- 行级操作 ----------
     def _new_row(self, i: int) -> np.ndarray:
@@ -312,7 +314,10 @@ class OnlineCSRTable(SparseSynapseTable):
             grow_order = sorted(cur, key=lambda k: self.in_deg.get(k, 0))
         # P78：批量多核路径（aarch64 上一次 imprint 的 Python learn 要 ~20 s，
         # 只占 1 个核）。逐位对拍见 tests/verifiers/verify_ltm_learn_batch.py。
-        if NUMBA_LTM and len(prev) * len(grow_order) >= 4096:
+        # P103：阈值走属性而非硬编码——否则 verify_ltm_learn_batch 的
+        # `BATCH_MIN_COMBOS = 10**18 / 1` 切换**完全无效**，对拍脚本在拿批量
+        # 路径和自己比（审查实测：baseline 臂也走了 _learn_batch）。
+        if NUMBA_LTM and len(prev) * len(grow_order) >= self.BATCH_MIN_COMBOS:
             self._learn_batch(prev, grow_order, eta, w_max, int8, q)
             return
         for i in prev:
@@ -347,7 +352,15 @@ class OnlineCSRTable(SparseSynapseTable):
         侧补；`in_deg` 按新增槽位补计（growth_guidance 时）。
         """
         rows: list[int] = []
+        seen_rows: set[int] = set()
         for i in prev:
+            if i in seen_rows:
+                # P103：prev 含重复 id 时，Python 路径会按出现次数**多次累加**
+                # 同一行；批量路径 gather 两次 → scatter 覆盖 → 只剩最后一次。
+                # 当前 prev 来自 encode() 的 dict.fromkeys（已去重）故不可达，
+                # 但一旦来源变化就是静默数值分歧 → 显式去重并写进前提。
+                continue
+            seen_rows.add(i)
             if self.t_pre.get(i, 0.0) > 0.0:
                 if i not in self.keys:
                     self._new_row(i)

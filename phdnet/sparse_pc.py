@@ -378,7 +378,10 @@ class SparsePCStack:
                  conn_k: int = 0, lognormal_init: bool = False,
                  exc_ratio: float = 0.8, fused: bool = True):
         self.eta_pc, self.eta_oja, self.w_max = eta_pc, eta_oja, w_max
-        self.fused = bool(fused)            # P75：融合核 / 原始多核调用（A/B）
+        # P103：**不能 bool()**——那会把 "serial" 变成 True，让 P99 的单核核
+        # 永不可达（审查实测：`--m2-kernel serial` 实际走的是 parallel 核，
+        # 整条 P99 链净效果为零）。三态原样保留：True / "fused" / "serial" / False。
+        self.fused = fused
         self.n0, self.n1, self.n2 = n0, n1, n2
         k0 = conn_k if conn_k > 0 else max(1, n0 // 8)
         k1 = conn_k if conn_k > 0 else max(1, n1 // 8)
@@ -648,7 +651,7 @@ def _make_serial_kernel():
             for p in range(up1[0][i], up1[0][i + 1]):
                 s += up1[2][p] * r1[up1[1][p]]
             r2[i] = np.tanh(s)
-        e0 = np.zeros(n1)
+        e0 = np.empty(n1)
         e1 = np.empty(n1)
         for _ in range(n_steps):
             for i in range(n1):                   # e1 = r1 - dn1 @ r2
@@ -660,19 +663,29 @@ def _make_serial_kernel():
                 s = 0.0
                 for p in range(up1[0][i], up1[0][i + 1]):
                     s += up1[2][p] * e1[up1[1][p]]
-                d2 = np.clip(s, -0.5, 0.5)
+                d2 = min(0.5, max(-0.5, s))       # P103: 标量 np.clip 在 numba
+                                                    # nopython 下 TypingError
+                _ = d2
                 r2[i] = np.tanh(r2[i] + 0.15 * d2)
             for i in range(n1):                   # e0 += s0 - dn0 @ r1
                 s = 0.0
                 for p in range(dn0[0][i], dn0[0][i + 1]):
                     s += dn0[2][p] * r1[dn0[1][p]]
-                e0[i] += s0[i] - s
+                e0[i] = s0[i] - s
             for i in range(n1):                   # d1 = clip(up0 @ e0)
                 s = 0.0
                 for p in range(up0[0][i], up0[0][i + 1]):
                     s += up0[2][p] * e0[up0[1][p]]
-                r1[i] = np.tanh(r1[i] + 0.15 * np.clip(s, -0.5, 0.5))
-        for i in range(n1):                       # 收尾 e1 = r1 - dn1 @ r2
+                r1[i] = np.tanh(r1[i] + 0.15 * min(0.5, max(-0.5, s)))
+        # P103：**步外再重算一次 e0/e1**——与 parallel 核（:261-273）语义一致：
+        # 步内每步重算 e0，但返回前用**已更新的 r1/r2** 再算一遍。缺这段会让
+        # serial 与 parallel 差一次 dn0@r1 的重算（实测 max|Δ| ≈ 0.19）。
+        for i in range(n1):                       # e0 = s0 - dn0 @ r1（末步）
+            s = 0.0
+            for p in range(dn0[0][i], dn0[0][i + 1]):
+                s += dn0[2][p] * r1[dn0[1][p]]
+            e0[i] = s0[i] - s
+        for i in range(n1):                       # e1 = r1 - dn1 @ r2
             s = 0.0
             for p in range(dn1[0][i], dn1[0][i + 1]):
                 s += dn1[2][p] * r2[dn1[1][p]]

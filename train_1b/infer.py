@@ -220,6 +220,8 @@ def main() -> None:
                     help="设备探测（P14）：打印加速器清单与多卡计划。"
                          "注意本入口为 numba CPU 生产路径（单路），"
                          "多卡加速见 torch 栈 tools/train_torch_lm.py")
+    ap.add_argument("--lang", choices=["zh", "en"], default="zh",
+                    help="终端输出语言（zh=默认全中文 / en=all English）")
     args = ap.parse_args()
     # P94：终端语言随 --lang 切换（zh=全中文默认 / en=全英文）
     from phdnet.i18n import set_lang, install_stream_filter

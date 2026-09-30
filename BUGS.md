@@ -315,6 +315,40 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 
 ---
 
+### #34 子代理交叉审查：P99 整条链净效果为零 + 三个阻断缺陷（已修）
+**背景**：fhz 要求「用子代理多审查几遍」。一个审查代理审另一个代理（和我）当天写的代码，
+结论是**不能合并**，实测证据充分：
+
+1. **【阻断·总开关】`self.fused = bool(fused)` 抹掉三态** —— `"serial"` 被转成 `True`，
+   于是 `--m2-kernel serial` 实际走 parallel 核，**P99 整条链净效果为零**。
+   spy 计数确认三种取值全部落到 parallel 核。
+2. **【阻断】serial 核里 `np.clip(标量)`** —— numba nopython 不支持标量重载，
+   首次调用 `TypingError`；**旁证：`__pycache__` 里唯独没有
+   `_pc_infer_fused_serial-*.nbi`**——该核从未成功编译过（作者本地也没跑通）。
+3. **【阻断】`e0` 语义不等价** —— serial 用 `+=` 累加、parallel 每步重算，
+   且 parallel 在步外还有一次重算。实测 serial 与 parallel 差 **40 倍**
+   （|S−L|=3.58 vs |P−L|=0.089），并污染 n_steps≥2 时的 r1 轨迹。
+4. **【阻断】`infer.py` 读 `args.lang` 但从未定义 `--lang`** → 推理入口 100% 崩
+   （i18n 接线只做了一半）。
+5. **【高】`BATCH_MIN_COMBOS` 全仓库无人读取**（阈值硬编码 4096）→
+   `verify_ltm_learn_batch.py` 的「禁用/强制批量」切换**完全无效**，对拍脚本
+   在拿批量路径和自己比 → P78 的门禁是空转的。
+6. **【高·当前不可达】`prev` 含重复 id 时批量路径静默算错**（gather 两次、
+   scatter 覆盖，Python 路径则累加多次）。当前 prev 来自 `dict.fromkeys`（已去重）
+   故不可达，但属于无声陷阱 → 已加显式去重。
+7. **【中】i18n 单字条目误伤**：`re` alternation 左最先匹配，短条目抢在长条目前 →
+   `'检查点已保存完成'` → `'checkpoint saveddone'`（残留「完成」）。
+8. **【低】`translate()` 每个匹配点重建 142 项 dict**（81 µs/call）；
+   `T()` 是零调用的死代码；`__getattr__` 在 `_w` 缺失时无限递归。
+
+**已修**：1–6（serial 核现与 parallel **逐位一致**，n_steps=1/2/3 全部 max|Δ|=0；
+`BATCH_MIN_COMBOS` 真正生效后 `verify_ltm_learn_batch` 5/5 才是真对拍）。
+7–8 待处理。**门禁全绿**：fast 9/9、ms_stream 41/41、pc_learn_fused 12/12、
+ltm_learn_batch 5/5、ltm_kernels 10/10、`infer.py --help` 正常。
+
+**同一个审查员对 `_ltm_learn_rows` 的评价是正面的**：量化/裁剪/乘法结合顺序/prange 写集
+全部实测逐位无误（`eta*a*b` 与 `eta*(a*b)` 在 35% 的随机三元组上不同，核内左结合**正确**）。
+
 ## 9. 结构性教训汇总
 
 1. **补丁未落盘家族（本台账最高频）**：A1（孤立缩进块 + 删定义）、A4（截断 `except`）、A5×2（`str.replace` 无匹配静默成功）、A6（`_correct_pinned`）、C1③（import 块漏 `prange`）、C6（第一次改法段序错位）、F4（文档口径没跟上删除）。→ 已落地：`py_compile` 门禁 + **`grep` 断言改后文本存在** + 「不确定就从 git 历史逐字取回」（D5）。
