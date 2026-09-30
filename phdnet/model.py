@@ -287,7 +287,9 @@ class PHDNet:
                 p = np.sign(rate); p[p == 0] = 1.0
                 # 大容量表按**稀疏率**印迹：±1 稠密码会激活全部维度，破坏事件驱动稀疏性
                 _p = self._prof_t('M4b_ltm')
+                _pi = self._prof_t('M4b_imprint')   # P77：imprint 与 recall 分开计时
                 self.ltm.imprint(rate if cfg.big_ltm else p)     # 预测失败/极新颖 → 快速印迹
+                self._prof_end('M4b_imprint', _pi)
                 self._prof_end('M4b_ltm', _p)
             elif retrieve_now:
                 cue = np.sign(rate); cue[cue == 0] = 1.0
