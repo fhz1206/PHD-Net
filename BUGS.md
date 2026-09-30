@@ -40,6 +40,7 @@
 | 28 | BLAS 线程未限（191 线程跑小 sgemv） | 既有遗留 | 待提交 |
 | 29 | 每步 `argmax` 扫全词表 + 重复 `stdp.predict` | 既有遗留 | `11c9a6e` |
 | 30 | bf16 读出的检查点保存崩（numpy 无 bf16） | 我引入（bf16 默认） | `9f69282` |
+| 31 | P80 补丁静默 no-op → `_correct_pinned` 未定义 | 我引入（当场修） | `待提交` |
 
 ---
 
@@ -224,6 +225,17 @@
   与加载侧 P46 的解码（`ckpt_dtype=bf16` + `dtype.kind in "ui"` →
   `view(bfloat16)`）正好闭环——无损，且检查点保持 bf16 体积（不膨胀成 fp32）。
 - **门禁**：`verify_ms_stream.py` 增加 bf16 round-trip 用例（41/41）。
+
+### #31 P80 补丁静默 no-op → `_correct_pinned` 未定义（当场修）
+- **症状**（服务器 15:31）：`AttributeError: 'AccelReadout' object has no
+  attribute '_correct_pinned'`。
+- **根因**：P80 用字符串 replace 加 `self._correct_pinned = None`，匹配串带了
+  一段**注释后缀**（`# P34：nll 设备侧累积`），实际文件里没有 → **replace 无匹配
+  静默成功**，`print('patched')` 照常打印 → 我以为生效了。
+- **修复**：初始化放进 `__init__`（精确匹配实际文本）+ `_eager_step` 用
+  `getattr` 防御兜底。
+- **门禁/流程缺口**：replace 类补丁**必须 grep 断言改后文本存在**，否则静默失败。
+  与 #25（Edit 截断 except）同属「补丁未落盘」家族。
 
 ### #15 fp32 权重 @ fp64 输入 → 脱离 BLAS 慢 5.9×（`0f203d5`）
 - **症状**：M1 编码器改 fp32 后反而从 857 µs 变 5047 µs。

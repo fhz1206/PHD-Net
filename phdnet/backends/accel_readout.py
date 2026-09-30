@@ -71,6 +71,8 @@ class AccelReadout:
         self._nll_sum = None
         self._nll_n = 0
         self._last_nll = 0.0
+        # P80/P82：correct 索引的 pinned 上传缓冲（避免 pageable 小拷贝的隐式同步）
+        self._correct_pinned = None
         # P38/P44：`torch.compile` 融合读出热路径的 4 个小 kernel
         # （softmax / log / sub / addmm_；CANN 上每个 launch 开销 ~50-200 μs）。
         #
@@ -264,11 +266,13 @@ class AccelReadout:
         """
         p = torch.softmax(y32, dim=0)
         # nll 先取（必须在改 p 之前）
-        if self._correct_pinned is None:
-            self._correct_pinned = torch.zeros(
-                1, dtype=torch.long, pin_memory=(ht.device.type == "npu"))
-        self._correct_pinned.fill_(correct)
-        _ct = self._correct_pinned.to(y32.device, non_blocking=True)
+        cp = getattr(self, "_correct_pinned", None)
+        if cp is None:
+            cp = torch.zeros(1, dtype=torch.long,
+                             pin_memory=(ht.device.type == "npu"))
+            self._correct_pinned = cp
+        cp.fill_(correct)
+        _ct = cp.to(y32.device, non_blocking=True)
         nll_dev = torch.nn.functional.cross_entropy(
             y32.reshape(1, -1), _ct).reshape(())
         if t is None:                     # P45：p 就地变成 dp（p − t）
