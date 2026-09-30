@@ -248,7 +248,8 @@ def main() -> None:
                     help="P84：读出 fp8 forward 副本的重建间隔（步）。"
                          "量化 1.6 亿元素是一次设备算子，摊到 N 步；N 越大越省，"
                          "但 forward 用的 fp8 副本越旧")
-    ap.add_argument("--m2-kernel", default="plain", choices=["fused", "plain"],
+    ap.add_argument("--m2-kernel", default="serial",
+                    choices=["serial", "fused", "plain"],
                     help="P76：M2 推理核。**默认 plain**（原始 5 次核调用）——"
                          "服务器 A/B 实测：fused 20-27 ms/tok vs plain 6.7-11.9"
                          "（plain 快 3-4×，prange+fastmath 在昇腾退化）；x86 上 "
@@ -488,7 +489,9 @@ def main() -> None:
                     args.csr_online, args.readout_conn_k, args.seed)
     cfg.readout_dtype = args.readout_dtype            # P9 精度（默认 fp32）
     cfg.encoder_dtype = args.encoder_dtype            # P75：M1 权重精度（平台相关）
-    cfg.pc_fused_kernel = (args.m2_kernel == "fused")  # P75：M2 核选择（A/B）
+    # P99：三态（serial=单核融合 / fused=并行融合 / plain=原始多核调用）
+    cfg.pc_fused_kernel = (False if args.m2_kernel == "plain"
+                           else args.m2_kernel)        # P75/P99：M2 核选择
     cfg.fp8_refresh = max(1, int(args.fp8_refresh))   # P84：fp8 副本刷新间隔
     cfg.accel_readout = args.accel                     # P19 读出设备（默认 auto）
     cfg.nll_sync_every = args.nll_sync_every           # P34 nll 同步周期（默认 1）

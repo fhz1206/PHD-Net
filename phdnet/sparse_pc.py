@@ -467,6 +467,12 @@ class SparsePCStack:
         循环内复用。**返回独立数组**（与原版语义相同，`cache` 可安全跨步持有）。
         行级并行沿用 `_csr_matvec` 的 prange 口径。
         """
+        if self.fused == "serial":
+            # P99：单核融合核（无 prange 屏障）——昇腾上并行融合慢 3-4×，
+            # 屏障成本（10 个 prange 区的 fork/join）远超计算本身。
+            r1, r2, e0, e1 = _pc_infer_fused_serial(
+                self.up0, self.up1, self.dn0, self.dn1, s0, n_steps)
+            return {"s0": s0, "r1": r1, "r2": r2, "e0": e0, "e1": e1}
         if self.fused:
             r1, r2, e0, e1 = _pc_infer_fused(self.up0, self.up1, self.dn0,
                                             self.dn1, s0, n_steps)
@@ -598,3 +604,82 @@ class SparsePCStack:
         return {"synapses": syn, "dense_equivalent": dense_total,
                 "connectivity": syn / dense_total if dense_total else 0.0,
                 "k0": self.k0, "k1": self.k1}
+
+
+# ---------------------------------------------------------------- P99
+def _make_serial_kernel():
+    """P99：M2 单核融合核 = P52 融合核去掉并行（`parallel=True` → 无）。
+
+    动机（服务器实测）：`_pc_infer_fused` 在 x86 快 1.15–2.16×，但在**昇腾
+    aarch64 上慢 3–4×**（M2_infer 2.4 → 20–27 ms/tok）。根因不是计算量，而是
+    **10 个 prange 区的 fork/join 屏障**在「很多核 + 小矩阵」（1024 行 ×
+    128 边）上远比计算贵——核内 prange 1→6 线程本身只有 1.16×（访存饱和）。
+
+    本核保留「一次调用 + 核内复用中间数组」的收益，去掉并行屏障；逐位口径与
+    融合核一致（行内按 indptr 顺序累加、fastmath=True → 1-2 ulp 容差）。
+    """
+    if not NUMBA_OK:
+        def _serial(up0, up1, dn0, dn1, s0, n_steps):
+            r1 = np.tanh(_csr_matvec(*up0, s0))
+            r2 = np.tanh(_csr_matvec(*up1, r1))
+            e0 = e1 = None
+            for _ in range(n_steps):
+                e1 = r1 - _csr_matvec(*dn1, r2)
+                d2 = np.clip(_csr_matvec(*up1, e1), -0.5, 0.5)
+                r2 = np.tanh(r2 + 0.15 * d2)
+                e0 = s0 - _csr_matvec(*dn0, r1) if e0 is None else e0 + (s0 - _csr_matvec(*dn0, r1))
+                d1 = np.clip(_csr_matvec(*up0, e0), -0.5, 0.5)
+                r1 = np.tanh(r1 + 0.15 * d1)
+            return r1, r2, (s0 - _csr_matvec(*dn0, r1)), (r1 - _csr_matvec(*dn1, r2))
+        return _serial
+
+    def _serial(up0, up1, dn0, dn1, s0, n_steps):
+        n1 = up0[0].shape[0] - 1
+        n2 = up1[0].shape[0] - 1
+        r1 = np.empty(n1)
+        r2 = np.empty(n2)
+        for i in range(n1):                       # up0 @ s0 → tanh
+            s = 0.0
+            for p in range(up0[0][i], up0[0][i + 1]):
+                s += up0[2][p] * s0[up0[1][p]]
+            r1[i] = np.tanh(s)
+        for i in range(n2):                       # up1 @ r1 → tanh
+            s = 0.0
+            for p in range(up1[0][i], up1[0][i + 1]):
+                s += up1[2][p] * r1[up1[1][p]]
+            r2[i] = np.tanh(s)
+        e0 = np.zeros(n1)
+        e1 = np.empty(n1)
+        for _ in range(n_steps):
+            for i in range(n1):                   # e1 = r1 - dn1 @ r2
+                s = 0.0
+                for p in range(dn1[0][i], dn1[0][i + 1]):
+                    s += dn1[2][p] * r2[dn1[1][p]]
+                e1[i] = r1[i] - s
+            for i in range(n2):                   # d2 = clip(up1 @ e1)
+                s = 0.0
+                for p in range(up1[0][i], up1[0][i + 1]):
+                    s += up1[2][p] * e1[up1[1][p]]
+                d2 = np.clip(s, -0.5, 0.5)
+                r2[i] = np.tanh(r2[i] + 0.15 * d2)
+            for i in range(n1):                   # e0 += s0 - dn0 @ r1
+                s = 0.0
+                for p in range(dn0[0][i], dn0[0][i + 1]):
+                    s += dn0[2][p] * r1[dn0[1][p]]
+                e0[i] += s0[i] - s
+            for i in range(n1):                   # d1 = clip(up0 @ e0)
+                s = 0.0
+                for p in range(up0[0][i], up0[0][i + 1]):
+                    s += up0[2][p] * e0[up0[1][p]]
+                r1[i] = np.tanh(r1[i] + 0.15 * np.clip(s, -0.5, 0.5))
+        for i in range(n1):                       # 收尾 e1 = r1 - dn1 @ r2
+            s = 0.0
+            for p in range(dn1[0][i], dn1[0][i + 1]):
+                s += dn1[2][p] * r2[dn1[1][p]]
+            e1[i] = r1[i] - s
+        return r1, r2, e0, e1
+
+    return njit(cache=True, nogil=True, fastmath=True)(_serial)
+
+
+_pc_infer_fused_serial = _make_serial_kernel()
