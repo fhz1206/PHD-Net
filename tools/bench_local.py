@@ -128,6 +128,13 @@ def bench_mechanisms(threads: int | None) -> dict:
             for k in r2.choice(1 << 16, size=72, replace=False):
                 tbl._append(int(i), int(k), float(r2.random()))
         out["M4b_predict_arr_us"] = _time_us(lambda: tbl.predict_arr(act))
+        # LTM encode（每步经 imprint/recall 调用；P95 优化后 1.44-1.53x）
+        from phdnet.bigltm import SparseLTM
+        ltm = SparseLTM(n_dim=1024, n_neurons=1 << 20, m_out=72, k_hash=4,
+                        seed=0)
+        rt = np.zeros(1024)
+        rt[:256] = 1.0
+        out["LTM_encode_us"] = _time_us(lambda: ltm.encode(rt))
     except Exception as e:                                    # noqa: BLE001
         out["M4b_predict_arr_us"] = f"失败: {type(e).__name__}: {e}"[:60]
     return out

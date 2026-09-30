@@ -124,6 +124,11 @@ class SparseLTM:
         # P95b：去重才是瓶颈（1024 次 `in` + append 的 Python 循环），
         # `dict.fromkeys` 在 C 层完成「保序去重」——顺序与逐个 `if i not in seen`
         # 完全一致（dict 保序），故**逐位相同**。
+        # P98 实测分解（256 活跃维，约 58 µs 合计）：`rate>0`+`nonzero` 仅 2.3 µs
+        # （**不是瓶颈**）、`dims.tolist()` 1.3、list-of-lists 5.7、chain 13.8、
+        # **dict.fromkeys 38.2（最大头，且是必要语义）**。已试并**否决**的替代：
+        # np.unique(return_index) 保序版 94.3 µs（更慢，因需 argsort + gather）、
+        # 手写 set 循环（回到 Python 层）。**结论：这里已是最优，不要再"优化"。**
         from itertools import chain
         idx_lists = self._idx_lists
         return list(dict.fromkeys(
