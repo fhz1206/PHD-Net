@@ -8,7 +8,7 @@
 
 后端：
   - word（默认）：`phdnet.word_lm.PHDWordLM`，pickle 模型（chat_r1sft.py 同款加载）
-  - 1b：`train_1b/infer.py` 的自包含 npz 检查点（词表内嵌，无需语料）
+  - 1b：`train/infer.py` 的自包含 npz 检查点（词表内嵌，无需语料）
 
 降级：终端不支持 ANSI（无 tty / 环境探测失败 / TERM=dumb）时自动退化为
 普通逐行打印；`--force-tui` 可强制走 TUI 渲染路径（管道/重定向调试用）。
@@ -22,7 +22,7 @@
 
 斜杠命令：/help /quit /clear /save <path>
 
-诚实边界：模型是词级联想续写器（见 train_1b/infer.py 的说明），生成的是
+诚实边界：模型是词级联想续写器（见 train/infer.py 的说明），生成的是
 格式上连贯的文本，不保证事实正确或真正的语义问答。
 """
 
@@ -40,7 +40,7 @@ import numpy as np
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
-for _p in (str(_ROOT), str(_ROOT / "train_1b")):
+for _p in (str(_ROOT), str(_ROOT / "train")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -226,7 +226,7 @@ def load_backend(args) -> tuple[PHDWordLM, str]:
                  f"  或 --selftest 用随机小模型走通 UI。")
 
     if backend == "1b":
-        import infer as infer_1b                    # train_1b/infer.py
+        import infer as infer_1b                    # train/infer.py
         lm = infer_1b.load_from_ckpt(path)
     else:
         with open(path, "rb") as f:
@@ -258,7 +258,7 @@ def warmup(lm: PHDWordLM, tokens, oov: list) -> tuple[str | None, str]:
 
 def sample_next(lm: PHDWordLM, prev: str | None, cur: str, tau: float,
                 topk: int, rng: np.random.Generator) -> str:
-    """自回归一步：读出分布 → 温度 τ → top-k 截断 → 采样（train_1b/infer.py 同式）。"""
+    """自回归一步：读出分布 → 温度 τ → top-k 截断 → 采样（train/infer.py 同式）。"""
     y = lm.net.step(lm.tok.encode_composite(cur, prev),
                     learn=False)["y"].astype(np.float64) / max(tau, 1e-6)
     y -= y.max()

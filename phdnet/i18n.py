@@ -19,7 +19,7 @@ from .i18n import set_lang, install_stream_filter
 set_lang(args.lang)            # 早于任何 print
 install_stream_filter()        # 包装 stdout/stderr（重复安装安全）
 ```
-`phdnet/` 内部用 `from .i18n import T`；`train_1b/` 用
+`phdnet/` 内部用 `from .i18n import T`；`train/` 用
 `from phdnet.i18n import T, set_lang, install_stream_filter`。
 """
 from __future__ import annotations

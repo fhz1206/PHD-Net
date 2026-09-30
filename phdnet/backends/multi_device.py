@@ -320,7 +320,7 @@ class MultiDeviceReadout:
 # 易误判为「NPU 没被识别」。本函数给出显式矩阵与行动建议。
 
 BACKEND_MATRIX = {
-    "numba（生产：train_1b/train.py、train_1b/infer.py）": {
+    "numba（生产：train/train.py、train/infer.py）": {
         "cpu": "yes",
         "npu": "no", "cuda": "no", "rocm": "no", "dml": "no",
         "note": "numba njit 只能编译到 CPU 机器码；分词核/读出融合核/稀疏主循环"

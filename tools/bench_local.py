@@ -31,7 +31,7 @@ python tools/bench_local.py --threads 1,2,4,8
 1. **CPU 侧热点**：`SparseEncoder.encode`（M1）、`SparsePCStack.infer`（M2）、
    `OnlineCSRTable.predict_arr` / `_ltm_learn_rows`（M4b）、主循环 glue。
 2. **numba 线程缩放**：同一工作负载在 1/2/4/8 线程下的耗时（验证线程上限设置）。
-3. **端到端 smoke**：`train_1b/train.py --preset 4m` 跑几百 token，取分段耗时
+3. **端到端 smoke**：`train/train.py --preset 4m` 跑几百 token，取分段耗时
    （**仅作趋势**，不是 1B 档数字）。
 """
 from __future__ import annotations
@@ -142,7 +142,7 @@ def bench_mechanisms(threads: int | None) -> dict:
 
 def bench_smoke(tokens: int) -> dict:
     """4M 档端到端 smoke——只作趋势，不是 1B 数字。"""
-    cmd = [sys.executable, str(_ROOT / "train_1b" / "train.py"),
+    cmd = [sys.executable, str(_ROOT / "train" / "train.py"),
            "--preset", "4m", "--data", "pretrain", "--tokens", str(tokens),
            "--log-every", str(max(50, tokens // 4)), "--step-profiling"]
     print(f"  smoke: {' '.join(cmd[1:])}", flush=True)

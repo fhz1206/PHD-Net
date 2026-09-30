@@ -1,6 +1,6 @@
-# train_1b —— 1B 档生产训练目录使用说明
+# train —— 1B 档生产训练目录使用说明
 
-> **适用范围**：本目录是 PHD-Net 的**唯一生产训练入口**（`train_1b/train.py`）。
+> **适用范围**：本目录是 PHD-Net 的**唯一生产训练入口**（`train/train.py`）。
 > **数据截止**：2026-09-30。开关默认值以 `train.py --help` 与源码为准。
 > **相关文档**：六机制与容量账 → `../docs/PHD-Net_架构设计.md`；
 > 性能数字 → `../docs/PHD-Net_性能评估与迭代方案.md`（唯一出处）；
@@ -15,7 +15,7 @@
 ```bash
 pip install -r requirements.txt
 
-python train_1b/train.py --preset smoke --data sft --tokens 2000
+python train/train.py --preset smoke --data sft --tokens 2000
 ```
 
 `smoke` 档 width=256 / conn_k=32 / big_n=2²⁰，只验证管线通不通，**不验证容量**。
@@ -25,27 +25,27 @@ python train_1b/train.py --preset smoke --data sft --tokens 2000
 
 ```bash
 # 本地 datasets/
-python train_1b/train.py --preset 1b --data pretrain --tokens 1000000
+python train/train.py --preset 1b --data pretrain --tokens 1000000
 
 # ModelScope 远程流式（HTTP Range，零落盘）
-python train_1b/train.py --preset 1b --data pretrain --remote-data
+python train/train.py --preset 1b --data pretrain --remote-data
 
 # 零 OOV 词表 + 1M context 里程碑 + 断点续训
-python train_1b/train.py --preset 1b --data pretrain \
+python train/train.py --preset 1b --data pretrain \
     --vocab-scan full --context-milestone 1000000 --resume
 ```
 
 ### 推理 / 对话
 
 ```bash
-python train_1b/infer.py --model outputs/models/phdnet1b_1b_pretrain_final.npz --prompt "…"
-python train_1b/infer.py --model outputs/models/phdnet1b_1b_pretrain_final.npz --chat
+python train/infer.py --model outputs/models/phdnet1b_1b_pretrain_final.npz --prompt "…"
+python train/infer.py --model outputs/models/phdnet1b_1b_pretrain_final.npz --chat
 ```
 
 ### 只看检查点的大空间表统计
 
 ```bash
-python train_1b/train.py --preset 1b --data pretrain --report
+python train/train.py --preset 1b --data pretrain --report
 ```
 
 ### 门禁（改动后必跑）
@@ -59,7 +59,7 @@ python tests/run_tests.py fast
 ## 2. 完整命令行开关表
 
 `--preset` 选档，其余开关默认值与「为什么是这个值」如下。
-**默认值全部来自源码**（`train_1b/train.py` 的 `main()`、`config_1b.py`、`phdnet/config.py`）。
+**默认值全部来自源码**（`train/train.py` 的 `main()`、`config_1b.py`、`phdnet/config.py`）。
 
 ### 2.1 档位与数据
 

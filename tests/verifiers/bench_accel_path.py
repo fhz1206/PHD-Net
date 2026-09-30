@@ -20,7 +20,7 @@ _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parents[1]
 os.chdir(_ROOT)
 sys.path.insert(0, str(_ROOT))
-sys.path.insert(0, str(_ROOT / "train_1b"))
+sys.path.insert(0, str(_ROOT / "train"))
 
 import numpy as np                                          # noqa: E402
 import torch                                                # noqa: E402

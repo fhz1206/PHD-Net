@@ -20,7 +20,7 @@ configs:
 
 适用范围：本目录的结构约定、数据入口与语种实测。**评测冻结基准不在这里**（见下）。
 **数据截止：2026-09-30。**
-相关文档：`UPLOAD_README.md`（上传/发布流程）、`../train_1b/README.md`（训练侧消费）、
+相关文档：`UPLOAD_README.md`（上传/发布流程）、`../train/README.md`（训练侧消费）、
 `../tools/README.md`（制备脚本索引）。
 
 > ⚠ 本目录同时是 **ModelScope 数据集卡片**（上方 YAML 头）与 gitcode 数据集仓库的说明。
@@ -62,10 +62,10 @@ datasets/                    ← 本目录，自身是独立 git 仓库（见 §
 
 ```bash
 # ① 本地 datasets/（逐片 parquet 直读，默认路径，逐位不变）
-python train_1b/train.py --data pretrain
+python train/train.py --data pretrain
 
 # ② ModelScope 直读：HTTP Range 流式，零本地落盘（仅支持 ModelScope）
-python train_1b/train.py --data pretrain --remote-data --remote-fraction 0.3
+python train/train.py --data pretrain --remote-data --remote-fraction 0.3
 ```
 
 本地读取统一走 `phdnet/corpus.py`（同认 `.txt` 与 `.parquet`；给 parquet 路径即走列式读取，

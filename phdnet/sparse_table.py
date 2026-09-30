@@ -12,7 +12,7 @@ from .tokenizer import U64
 class SparseSynapseTable:
     """大空间事件驱动联想表（容量 = n_neurons × m_out）。
 
-    关键工程点（沿用 train_1b.py 已验证的实现）：
+    关键工程点（沿用 train.py 已验证的实现）：
       1. 惰性迹衰减：触碰时才按 λ^Δt 补偿，避免每步扫描全网；
       2. pre/post 迹各自独立时间戳（共用会导致 Δt=0，迹无衰减累加爆炸）；
       3. 相邻对约定下新突触生长只由 LTP 驱动，LTD 仅作用于已存在突触。

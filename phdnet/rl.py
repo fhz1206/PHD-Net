@@ -204,10 +204,10 @@ def restore_into(obj, value) -> None:
 # ─────────────────────────── token 流工具 ───────────────────────────
 
 def _corpus_stream_mod():
-    """按路径导入 train_1b/corpus_stream（它不是包，故不能用相对导入）。"""
+    """按路径导入 train/corpus_stream（它不是包，故不能用相对导入）。"""
     import importlib
     import sys
-    root = Path(__file__).resolve().parents[1] / "train_1b"
+    root = Path(__file__).resolve().parents[1] / "train"
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
     return importlib.import_module("corpus_stream")

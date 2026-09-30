@@ -243,7 +243,7 @@ GB/s** —— 读出是 GEMV，带宽是唯一可跨平台比较的指标。P29 
 | 其他 | `verify_repro_process` / `bench_accel_path` |
 
 **零回归门槛**：`python tests/run_tests.py fast` = **9/9**。
-⚠ **fast 门禁只跑 `tests/` 下的检查，从不 import `train_1b/train.py`** —— 改训练入口后必须单独
+⚠ **fast 门禁只跑 `tests/` 下的检查，从不 import `train/train.py`** —— 改训练入口后必须单独
 `py_compile` + 跑一次 `--help`。
 
 ### 10.3 CI 两套的真实状态

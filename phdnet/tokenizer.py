@@ -21,7 +21,7 @@ def mix64(z: np.ndarray) -> np.ndarray:
     return z ^ (z >> U64(31))
 
 
-_mix64 = mix64          # 兼容别名（C5 重构 2026-09-22：去重 tools/train_1b.py 的副本）
+_mix64 = mix64          # 兼容别名（C5 重构 2026-09-22：去重 tools/train.py 的副本）
 
 
 class CharTokenizer:

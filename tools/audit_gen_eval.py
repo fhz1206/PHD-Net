@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 
 _ROOT = Path(__file__).resolve().parents[1]
-for p in (str(_ROOT / "train_1b"), str(_ROOT)):
+for p in (str(_ROOT / "train"), str(_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
 

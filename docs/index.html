@@ -225,7 +225,7 @@ footer{padding:32px 0;color:var(--dim2);font-size:13px}
       </tbody>
     </table>
     <p class="note">
-      口径：<code>train_1b/config_1b.py::capacity_report()</code>，<code>--preset 1b</code>（width=1024）。
+      口径：<code>train/config_1b.py::capacity_report()</code>，<code>--preset 1b</code>（width=1024）。
       三点提醒：① 稀疏侧占绝对多数（≈88%）；② 稠密读出的 11.6% 就是 M6 欠账在容量账上的直接体现；
       ③ <b>1.208e9 是容量上限不是已用量</b>——突触随经验生长，统计口径是已生长突触数，不做虚标。
       每步计算量只正比于活跃神经元数，与总容量无关。

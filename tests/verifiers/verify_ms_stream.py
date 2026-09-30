@@ -12,7 +12,7 @@ from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
-sys.path.insert(0, str(_ROOT / "train_1b"))
+sys.path.insert(0, str(_ROOT / "train"))
 
 import phdnet.ms_stream as ms          # noqa: E402
 from phdnet.corpus import expand_paths, is_remote_path   # noqa: E402
@@ -107,14 +107,14 @@ def _main() -> int:
     check("_list_tree 空页终止（不按 len<page_size 判末页）",
           "if not files:" in inspect.getsource(ms._list_tree))
     check("train.py 已删 stream_factory 死代码（不再绕过 data_path）",
-          "stream_factory" not in (_ROOT / "train_1b" / "train.py").read_text(
+          "stream_factory" not in (_ROOT / "train" / "train.py").read_text(
               encoding="utf-8"))
 
     # ── 语法门禁：改动过的文件必须能编译（审计 P54 教训：fast 门禁不 import
-    #    train_1b/train.py，缩进错误曾直接漏到服务器才炸）──────────────────
+    #    train/train.py，缩进错误曾直接漏到服务器才炸）──────────────────
     import py_compile
     import tempfile
-    for rel in ("train_1b/train.py", "train_1b/corpus_stream.py",
+    for rel in ("train/train.py", "train/corpus_stream.py",
                 "phdnet/ms_stream.py", "phdnet/corpus.py", "phdnet/readout.py",
                 "tests/verifiers/verify_ms_stream.py"):
         ok = True
@@ -128,7 +128,7 @@ def _main() -> int:
         check(f"编译通过: {rel}", ok)
     # train.py 必须真的能被 import（argparse 层不出错）——不跑训练
     import subprocess
-    r = subprocess.run([sys.executable, str(_ROOT / "train_1b" / "train.py"),
+    r = subprocess.run([sys.executable, str(_ROOT / "train" / "train.py"),
                         "--help"], capture_output=True, text=True,
                        cwd=str(_ROOT), timeout=180)
     check("train.py --help 可执行（导入 + argparse 正常）",

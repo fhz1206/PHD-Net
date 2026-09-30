@@ -1,6 +1,6 @@
 # PHD-Net 性能评估与迭代方案
 
-> **适用范围**：`phdnet/` 包（v0.0.0）+ `train_1b/`（1B 档流式训练管线）的**性能数字**。
+> **适用范围**：`phdnet/` 包（v0.0.0）+ `train/`（1B 档流式训练管线）的**性能数字**。
 > 本文是**所有性能数字的唯一权威出处**——其他文档一律链接引用，不复制数字。
 >
 > **数据截止**：2026-09-30。凡标「本机」的数字只在本机成立；凡标「昇腾」的只在那台机器成立。
@@ -323,7 +323,7 @@ fp4 当前逐张量缩放不足（块缩放 MX 已立项，未启用）。
 python tests/run_tests.py fast
 
 # 性能：1B 生产配置模块级剖析（务必带--step-profiling）
-python train_1b/train.py --data pretrain --lang zh --remote-data \
+python train/train.py --data pretrain --lang zh --remote-data \
     --remote-fraction 0.3 --step-profiling
 
 # 精度体系（L1 逐位 / L2 带宽 / L3 PPL）

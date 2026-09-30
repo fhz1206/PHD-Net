@@ -17,7 +17,7 @@ import numpy as np
 
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT))
-sys.path.insert(0, str(_ROOT / "train_1b"))
+sys.path.insert(0, str(_ROOT / "train"))
 
 import torch                                                     # noqa: E402
 from phdnet.backends.accel_readout import AccelReadout           # noqa: E402

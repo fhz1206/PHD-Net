@@ -1,12 +1,12 @@
 # chat/ —— 对话与推理用法
 
-适用范围：本目录的聊天 / 演示脚本。**1B 生产模型的推理入口在 `train_1b/infer.py`**
+适用范围：本目录的聊天 / 演示脚本。**1B 生产模型的推理入口在 `train/infer.py`**
 （不在本目录）。数据截止：2026-09-30。
-相关文档：`train_1b/README.md`、`phdnet/backends/README.md`（设备归属与回落纪律）。
+相关文档：`train/README.md`、`phdnet/backends/README.md`（设备归属与回落纪律）。
 
 入口选择：终端交互对话 → `tui.py`；OpenAI Chat Completions 风格 + web_search
 工具调用 → `chat_openai.py`；与 R1 蒸馏 SFT 模型对话（无 TUI）→ `chat_r1sft.py`；
-1B 生产检查点 → `train_1b/infer.py`；本地 CPU「训练 + 对话」演示 → `run_demo.py` /
+1B 生产检查点 → `train/infer.py`；本地 CPU「训练 + 对话」演示 → `run_demo.py` /
 `run_demo_external.py`。
 
 ## 一、入口：`chat/tui.py`
@@ -33,7 +33,7 @@ python chat/tui.py --selftest --prompt "你好"                          # 单�
 
 ## 二、模型加载：检查点 + 词表快照 + `--init-from`
 
-**1b 后端（npz，自包含）** —— `train_1b/infer.py::load_from_ckpt`：
+**1b 后端（npz，自包含）** —— `train/infer.py::load_from_ckpt`：
 词表（`seg.vocab` / `tok.tokens` / SDR 哈希）**完整序列化在检查点内**，
 推理**不需要语料、不需要外部词表文件**；`cfg` 由检查点 `meta` 重建，
 训练与推理词表逐位一致。加载大矩阵时按 `meta["ckpt_dtype"]` 把位模式
@@ -47,23 +47,23 @@ python chat/tui.py --selftest --prompt "你好"                          # 单�
 **不是**分词器候选集（`tok_vocab`），两者语义不同。要改词表只能重训。
 
 ```bash
-python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz \
+python train/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz \
     --vocab-file outputs/models/vocab_1b_pretrain.json --prompt "用户：你好\n助手："
 ```
 
 **word 后端（pickle）** —— 由 `chat/tui.py` / `chat_r1sft.py` 直接 `pickle.load`，
 模型与词表在同一个 pkl 里，**没有独立的词表校验环节**：加载到哪个模型就认哪个词表。
 
-**关于 `--init-from`** —— 它是**训练侧**参数（`train_1b/train.py`），**推理入口不提供**。
+**关于 `--init-from`** —— 它是**训练侧**参数（`train/train.py`），**推理入口不提供**。
 它与 `--resume` 的区别就是「步数是否归零」：续训用 `--resume`（步数接着走），
 两阶段微调（在预训练权重上做 SFT）用 `--init-from`（步数**归零**）。
-推理侧要换模型只有一条路：给 `--ckpt` 指向另一个检查点。详见 `train_1b/README.md`。
+推理侧要换模型只有一条路：给 `--ckpt` 指向另一个检查点。详见 `train/README.md`。
 
 ---
 
 ## 三、生成参数
 
-| 参数 | `tui.py` | `train_1b/infer.py` | 说明 |
+| 参数 | `tui.py` | `train/infer.py` | 说明 |
 |---|---|---|---|
 | 温度 | `--tau` 0.8 | `--tau` 0.7 | 越高越多样 |
 | top-k | `--topk` 8 | `--topk` 8 | `0` = 全分布不截断 |
@@ -78,7 +78,7 @@ python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz \
 
 ## 四、推理侧低精度：只影响质量，不影响「学习能不能发生」
 
-**核心事实：推理侧没有学习更新。** 本目录与 `train_1b/infer.py` 的所有
+**核心事实：推理侧没有学习更新。** 本目录与 `train/infer.py` 的所有
 `lm.net.step(..., learn=False)` 只做前向，权重在推理过程中**不被改写**。因此：
 
 - 训练侧那个「低精度把微小更新舍掉 → 退化为纯 Hebbian」的机制问题
@@ -98,7 +98,7 @@ python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz \
 create / cast / matmul 全部 ERR01007，fp4 的 MX 块缩放同样没有算子。
 
 想用 fp8/fp4 的量化码本，只能走 numba CPU 路径
-（`python train_1b/train.py --accel cpu --readout-dtype fp8`）—— 那是 P9/P12 的
+（`python train/train.py --accel cpu --readout-dtype fp8`）—— 那是 P9/P12 的
 **位算法量化核**（CPU 上可用），**不代表加速器具备 fp8 能力**。
 根因与实测证据见 `docs/PHD-Net_硬件后端适配报告.md` 与 `BUGS.md`。
 
@@ -109,14 +109,14 @@ create / cast / matmul 全部 ERR01007，fp4 的 MX 块缩放同样没有算子�
 
 ---
 
-## 五、生产推理（`train_1b/infer.py`）
+## 五、生产推理（`train/infer.py`）
 
 ```bash
 # 单次续写
-python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz \
+python train/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz \
     --prompt "用户：什么是机器学习？\n助手：" --n 200
 # 交互式对话（多轮共享网络状态 —— 对话历史就是 context）
-python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
+python train/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 ```
 
 参数：`--model`（必填）、`--prompt`、`--chat`、`--n 200`、`--tau 0.7`、`--topk 8`、

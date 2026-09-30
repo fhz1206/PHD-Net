@@ -4,7 +4,7 @@
 Python + numba + PyTorch/昇腾 NPU。
 
 学习规则全部局部化（无反向传播），计算事件驱动稀疏（只触碰活跃通路）。
-**唯一生产训练入口是 `train_1b/train.py`。**
+**唯一生产训练入口是 `train/train.py`。**
 
 适用范围：仓库根入口文档。数据截止 **2026-09-30**。
 文档分工见 `docs/文档写作规范.md`；本文件不写详细性能数字与历史。
@@ -44,7 +44,7 @@ Python + numba + PyTorch/昇腾 NPU。
 ### 容量账（1B 档，`--preset 1b`，width=1024）
 
 「1B」= **总突触参数容量 ≥ 1.0×10⁹**（容量上限口径，非已用量）。启动时由
-`train_1b/config_1b.py::capacity_report()` 打印验算表。
+`train/config_1b.py::capacity_report()` 打印验算表。
 
 | 组成 | 规模 | 占比 |
 |---|---|---|
@@ -65,7 +65,7 @@ Python + numba + PyTorch/昇腾 NPU。
 
 | 我要做的事 | 看这份 | 别看 |
 |---|---|---|
-| **跑一次训练** | `train_1b/README.md`（快速开始 + 开关表） | — |
+| **跑一次训练** | `train/README.md`（快速开始 + 开关表） | — |
 | 搞懂六机制为什么这么设计、脑同构论证 | `docs/PHD-Net_架构设计.md` | 本文档 |
 | **看性能数字 / 为什么吃不满多核** | `docs/PHD-Net_性能评估与迭代方案.md`（性能唯一出处）<br>`docs/PHD-Net_并行与加速架构分析.md`（吃不满的论证） | 本文档 |
 | 加新机制 / 扩硬件后端 | `docs/PHD-Net_扩展指南.md`<br>`docs/PHD-Net_硬件后端适配报告.md` | — |
@@ -130,7 +130,7 @@ M4b 复测归因 / fp16 下 PPL 是否下降 / 数据集语种（远程分片实
 ```bash
 pip install -r requirements.txt
 
-python train_1b/train.py --preset smoke --data sft --tokens 2000
+python train/train.py --preset smoke --data sft --tokens 2000
 ```
 
 ### 门禁
@@ -143,19 +143,19 @@ python tests/run_tests.py fast
 
 ```bash
 # 本地 datasets/ 入口
-python train_1b/train.py --preset 1b --data pretrain --tokens 1000000
+python train/train.py --preset 1b --data pretrain --tokens 1000000
 
 # ModelScope 远程流式入口（HTTP Range，零落盘）
-python train_1b/train.py --preset 1b --data pretrain --remote-data
+python train/train.py --preset 1b --data pretrain --remote-data
 ```
 
 ### 推理 / 对话
 
 ```bash
-python train_1b/infer.py --model outputs/models/phdnet1b_1b_pretrain_final.npz --chat
+python train/infer.py --model outputs/models/phdnet1b_1b_pretrain_final.npz --chat
 ```
 
-**全部开关、默认值与「为什么是这个值」见 `train_1b/README.md`。**
+**全部开关、默认值与「为什么是这个值」见 `train/README.md`。**
 
 ### 训练数据两入口
 
@@ -170,7 +170,7 @@ python train_1b/infer.py --model outputs/models/phdnet1b_1b_pretrain_final.npz -
 
 ```
 train/
-├── train_1b/                   1B 生产训练子项目（唯一训练入口）
+├── train/                   1B 生产训练子项目（唯一训练入口）
 │   ├── train.py                生产训练主入口（流式 / SFT / 续训 / 远程数据）
 │   ├── config_1b.py            1B 档预设与容量验算
 │   ├── corpus_stream.py        字符流 → token 流、SFT 掩码状态机
@@ -219,4 +219,4 @@ train/
 - **ms/tok**：单 token 毫秒数，必带平台与档位。x86 与昇腾的加速方向常常相反，不可混用。
 - **终端语言**：`--lang zh`（默认）终端全中文、`--lang en` 全英文，只影响文案不影响数据。
 
-写作规则见 `docs/文档写作规范.md`；新增训练脚本不进 `tools/`，一律进 `train_1b/`。
+写作规则见 `docs/文档写作规范.md`；新增训练脚本不进 `tools/`，一律进 `train/`。

@@ -13,7 +13,7 @@
 | 加一个新设备后端 | `phdnet/backends/` + `resolve_accel_device()` | `verify_accel_readout.py` + `verify_accel_readout_p55.py`（2×2 矩阵） |
 | 加一种 dtype | **三处**：`accel_readout.py::_DT` + `sparse_encoder.py::resolve_model_dtype` + `model.py::to_numpy` | 对拍 + `verify_ms_stream.py`（检查点往返） |
 | 加一个数据源 | `phdnet/corpus.py`（统一接口）+ `corpus_stream.py` | `verify_stream_tokenize.py`、`verify_ms_stream.py` |
-| 加一个训练阶段 | `train_1b/train.py`（复用 `lm.net.step`） | fast 9/9 + 阶段语义对拍 |
+| 加一个训练阶段 | `train/train.py`（复用 `lm.net.step`） | fast 9/9 + 阶段语义对拍 |
 | 改一个 numba 核 | `phdnet/ltm_kernel.py` 等 | 对拍（**逐位优先**）+ `verify_ltm_kernels.py` |
 | 动读出 / 精度 | `phdnet/backends/accel_readout.py` | ⚠ **必须同步 `_unsupported_reason()` 能力表**（§3.3） |
 | 调一个已有开关 | 见 §6 速查表 | 对应 verifier |
@@ -37,7 +37,7 @@ phdnet/
   ltm_kernel.py      M4b 的 numba 核（learn 批量 / recall 投影）
   telemetry.py       设备/GC 遥测；i18n.py 终端语言
   backends/          加速后端（torch / 多设备 / 读出 accel）+ README 有踩坑表
-train_1b/
+train/
   train.py           唯一生产训练入口（argparse 全部开关都在这里）
   tokenizer_core.py  分词器热路径（CSR-trie + numba nogil）
   corpus_stream.py   流式数据（PrefetchChars 多进程 + StreamingTokenizer）
@@ -190,7 +190,7 @@ Hebbian**（PPL 震荡不降的根因）。fp8 forward + fp16 更新买到的是
 ## 7. 提交前检查单（⚠ 全是实战踩出来的）
 
 - [ ] `python tests/run_tests.py fast` = 9/9
-- [ ] 改动文件 `py_compile`；改 `train_1b/*.py` 另跑 `python train_1b/train.py --help`
+- [ ] 改动文件 `py_compile`；改 `train/*.py` 另跑 `python train/train.py --help`
       （⚠ fast 门禁**从不 import** 训练入口；argparse help 里的裸 `%` 会让 `--help` 崩）
 - [ ] **断言补丁真的落盘**：`Edit`/字符串 replace 后 `grep` 断言新文本存在
       —— ⚠ `str.replace` **无匹配是静默成功**，`print('patched')` 照常打印（本组已连踩 4 次）
@@ -211,7 +211,7 @@ Hebbian**（PPL 震荡不降的根因）。fp8 forward + fp16 更新买到的是
 ## 8. 性能定位速查（先测再改）
 
 ```bash
-python train_1b/train.py … --step-profiling      # 九段 + loop: 三段
+python train/train.py … --step-profiling      # 九段 + loop: 三段
 python tools/bench_local.py --compare             # 本机回归基准（不产出文档数字）
 python tools/accel_doctor.py                      # 设备探针 + 试分配 + 一次前向
 ```

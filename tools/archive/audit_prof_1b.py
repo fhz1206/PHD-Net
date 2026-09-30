@@ -1,6 +1,6 @@
 """第四轮审计 · 1B 生产配置性能剖析（模块级计时，2026-09-25）。
 
-配置 = train_1b 的 `1b` 预设（width=1024 / conn_k=128 / big_ltm 2^24），
+配置 = train 的 `1b` 预设（width=1024 / conn_k=128 / big_ltm 2^24），
 词表取 sft 采样文本涌现词表（与生产管线同一路径）。
 方法：对 net.step 管线各模块方法做 perf_counter 包装（累计挂钟），
 热身后测 N 步；另报端到端 ms/token 与 readout 读出更新内存流量推算。

@@ -19,7 +19,7 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 ## A. 训练入口与可选依赖边界
 
 ### A1 训练启动 `IndentationError`，同一次编辑还删掉了被引用的定义（`afdd5a2`）
-- **症状**：服务器 `File "train_1b/train.py", line 385, IndentationError: unexpected indent`。
+- **症状**：服务器 `File "train/train.py", line 385, IndentationError: unexpected indent`。
 - **根因**：把 `else:` 分支改写成 `if not remote_active` 时，原 else 里那行 `print` 变成孤立缩进块；**同一次编辑**把 `_data_provenance` 整段删掉（`save_model` 仍引用 → 缩进修好也会 NameError）。两处同源：**改结构不动引用**。
 - **修复**：恢复正确缩进 + 补回 `_data_provenance` 定义。**门禁缺口**：fast 门禁 9/9 全绿仍未拦住 → 见 A3。
 
@@ -30,9 +30,9 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 
 ### A3 fast 门禁 9/9 但训练入口是坏的（**流程漏洞**，`afdd5a2`）
 - **症状**：A1/A2 都没被 `python tests/run_tests.py fast` 拦住。
-- **根因**：fast 门禁只跑 `tests/` 下的检查，**从不 import `train_1b/train.py`**。
+- **根因**：fast 门禁只跑 `tests/` 下的检查，**从不 import `train/train.py`**。
 - **修复**：`tests/verifiers/verify_ms_stream.py` 加两道真门禁 —— ① 对全部改动文件 `py_compile`；② subprocess 真跑 `train.py --help`，断言 `returncode == 0` 且新参数出现在 stdout。
-- **门禁缺口（仍存在）**：⚠ fast 门禁**本身**仍不 import 训练入口，靠 verifier 兜。**改 `train_1b/*.py` 后必须单独 `py_compile` + 跑一次 `--help`**，否则等于没测。
+- **门禁缺口（仍存在）**：⚠ fast 门禁**本身**仍不 import 训练入口，靠 verifier 兜。**改 `train/*.py` 后必须单独 `py_compile` + 跑一次 `--help`**，否则等于没测。
 
 ### A4 编辑时截断 `try` 的配对 `except` → SyntaxError（`87cdcbf`）
 - **症状**：加主循环计时时报 `SyntaxError: expected 'except' or 'finally'`。
@@ -371,13 +371,13 @@ ltm_learn_batch 5/5、ltm_kernels 10/10、`infer.py --help` 正常。
 | `phdnet/bigltm.py` | `[ltm-diag] recalls=… active/scores/bindings` | 召回侧遍历量（每 10 次） |
 | `phdnet/telemetry.py` | `GC <对象数>M/gen2 <次数>`（遥测行内） | 验证 / 排除 GC 假设 |
 | `phdnet/telemetry.py` | `[telemetry] npu-smi = <path>` / `⚠ 未找到` / `npu-smi parse FAILED; raw head://…` | 设备遥测可用性与解析失败取证（B7/B8） |
-| `train_1b/train.py` | `[gc] freeze() + threshold(50000, 200, 200); tracked objects = …` | GC 调优生效确认 |
-| `train_1b/train.py` | `[sample lang=…] CJK=…% \| '…'` | 语种过滤是否真生效（G2 的观测入口） |
-| `train_1b/train.py` | `[numba] cache dir = … \| size = … MB \| 预期启动 ~2.6 s` | numba 持久缓存是否真被命中（`cache=True` 有没有被漏掉） |
-| `train_1b/train.py` | `[log] start: … argv: …` | 完整命令行 —— 「行为没生效」先查这里（E6） |
-| `train_1b/train.py`（`--step-profiling`） | `segments: M1_encode … M4b_ltm …` | 九段耗时分解（按耗时降序取前 6） |
-| `train_1b/train.py`（`--step-profiling`） | `loop: tokenize … encode_onehot … step …` | **主循环三段** —— `net.step` 之外的开销（P72） |
-| `train_1b/train.py` | `[读出] …` / `fallback reason: …` | **以后台行为准，不以「探测到设备」为准**（B3/B4/G1） |
+| `train/train.py` | `[gc] freeze() + threshold(50000, 200, 200); tracked objects = …` | GC 调优生效确认 |
+| `train/train.py` | `[sample lang=…] CJK=…% \| '…'` | 语种过滤是否真生效（G2 的观测入口） |
+| `train/train.py` | `[numba] cache dir = … \| size = … MB \| 预期启动 ~2.6 s` | numba 持久缓存是否真被命中（`cache=True` 有没有被漏掉） |
+| `train/train.py` | `[log] start: … argv: …` | 完整命令行 —— 「行为没生效」先查这里（E6） |
+| `train/train.py`（`--step-profiling`） | `segments: M1_encode … M4b_ltm …` | 九段耗时分解（按耗时降序取前 6） |
+| `train/train.py`（`--step-profiling`） | `loop: tokenize … encode_onehot … step …` | **主循环三段** —— `net.step` 之外的开销（P72） |
+| `train/train.py` | `[读出] …` / `fallback reason: …` | **以后台行为准，不以「探测到设备」为准**（B3/B4/G1） |
 | `phdnet/i18n.py` | `install_stream_filter()` 覆盖 11 个文件 47 处中文输出 | `--lang en` 全英文；未登记的短语保持中文并在日志里露出来 |
 
-日志字段的完整速查表见 `train_1b/README.md` §7.1。
+日志字段的完整速查表见 `train/README.md` §7.1。

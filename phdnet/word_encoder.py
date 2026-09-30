@@ -14,7 +14,7 @@ def _induce_length(codes, inv_codes, n: int, L: int, min_count: int,
 
     输入为**全文级**统计量（字符表 codes、位置编码 inv_codes、全文长度 n），
     输出该 L 接受的词集合。与串行版逐位一致：同一 numpy 运算序列，
-    只是执行位置不同——各 L 相互独立，因此可安全并行（train_1b/vocab_parallel.py）。
+    只是执行位置不同——各 L 相互独立，因此可安全并行（train/vocab_parallel.py）。
     """
     out: set[str] = set()
     B = int(codes.shape[0])
@@ -174,7 +174,7 @@ class WordTokenizer:
         """T2.3 上下文绑定：[当前词库 ; 前词库] 双库拼接（各 n_sdr 维）。
 
         OOV 安全（2026-09-28 修复）：prev 不在词表时按 None 退化（无前词上下文），
-        与 train_1b/train.py 的 p2 OOV 修复同语义；tok 自身的 OOV 由调用方守卫
+        与 train/train.py 的 p2 OOV 修复同语义；tok 自身的 OOV 由调用方守卫
         （word_lm._pass / evaluate 均为「任一端 OOV 整步跳过」）。
         """
         # P51（fhz「CPU 需要更多预计算」）：**预分配复用缓冲**，消除每步

@@ -46,10 +46,10 @@ PHD-Net（`torch_lm.TorchPHDNet` 等，约 800 行）。删除理由：① 权�
 训练 / 推理入口：
 
 ```bash
-python train_1b/train.py --accel auto     # auto = 有加速器就用，否则回落 numba CPU
-python train_1b/infer.py  --accel auto
-python train_1b/train.py --accel npu       # 显式指定；不可用则回落并记原因
-python train_1b/train.py --devices auto    # 多卡：读出列并行（与 --accel 正交）
+python train/train.py --accel auto     # auto = 有加速器就用，否则回落 numba CPU
+python train/infer.py  --accel auto
+python train/train.py --accel npu       # 显式指定；不可用则回落并记原因
+python train/train.py --devices auto    # 多卡：读出列并行（与 --accel 正交）
 ```
 
 **确认加速是否真生效**：看启动日志的 `[读出] 后端=accel:<设备>` / `numba-cpu`；

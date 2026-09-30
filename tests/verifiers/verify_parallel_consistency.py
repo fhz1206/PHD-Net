@@ -6,7 +6,7 @@ import sys
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(_ROOT)
 sys.path.insert(0, _ROOT)
-sys.path.insert(0, os.path.join(_ROOT, "train_1b"))
+sys.path.insert(0, os.path.join(_ROOT, "train"))
 
 import numpy as np
 

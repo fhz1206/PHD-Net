@@ -19,9 +19,9 @@ WM 锚定 + LTM 印迹 + 情景缓冲），生成的是格式上连贯的文本�
 
 用法
 ----
-python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz \
+python train/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz \
     --prompt "用户：什么是机器学习？\n助手：" --n 200
-python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
+python train/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 """
 
 from __future__ import annotations

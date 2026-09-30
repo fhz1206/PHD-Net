@@ -18,7 +18,7 @@
   密集 1B 模型（权重+梯度+优化器状态 ≈ 16GB，每步 ≥10^9 级 FLOPs）在无独显
   机器上物理不可行；事件驱动的稀疏类脑架构使其在 CPU 上毫秒级单步、真实训练。
 
-运行：python tools/train_1b.py
+运行：python tools/train.py
 """
 
 import sys

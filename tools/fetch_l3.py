@@ -266,7 +266,7 @@ def main() -> int:
     print(f"输出目录：{out_dir}")
     print("下一步：")
     print("  1) 重建词表（流式，~500s 量级按数据量）：")
-    print(f"     python train_1b/train.py --data pretrain --vocab-scan full ...")
+    print(f"     python train/train.py --data pretrain --vocab-scan full ...")
     print("  2) 或先复用旧快照：--vocab-file outputs/models/vocab_*.json")
     return 0
 

@@ -31,13 +31,13 @@
 用法
 ----
 # 冒烟（分钟级，验证管线）
-python train_1b/train.py --preset smoke --data sft --tokens 2000
+python train/train.py --preset smoke --data sft --tokens 2000
 
 # 标准 1B 档，全量流式训练 pretrain 分片（任意长度不截断）
-python train_1b/train.py --preset 1b --data pretrain_zh --tokens 1000000
+python train/train.py --preset 1b --data pretrain_zh --tokens 1000000
 
 # 生产长跑（零 OOV 词表 + 1M context 里程碑；断点续训）
-python train_1b/train.py --preset 1b --data pretrain_zh \
+python train/train.py --preset 1b --data pretrain_zh \
     --vocab-scan full --context-milestone 1000000 --resume
 """
 

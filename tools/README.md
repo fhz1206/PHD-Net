@@ -2,10 +2,10 @@
 
 适用范围：本目录下**工具型脚本**的用途分组与典型命令。**参数一律以源码为准**
 （`python tools/<名>.py --help`）；未列出的参数表示该脚本没有该开关。
-**数据截止：2026-09-30。** 相关文档：`README.md`、`train_1b/README.md`、
+**数据截止：2026-09-30。** 相关文档：`README.md`、`train/README.md`、
 `datasets/README.md`、`datasets/UPLOAD_README.md`。
 
-> **生产入口单轨**：训练只有 `train_1b/train.py`，推理只有 `train_1b/infer.py`。
+> **生产入口单轨**：训练只有 `train/train.py`，推理只有 `train/infer.py`。
 > 本目录**不放**新的训练入口（见文末「非生产轨」）。
 
 ---

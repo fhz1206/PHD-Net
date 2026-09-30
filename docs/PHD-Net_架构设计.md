@@ -229,7 +229,7 @@ M1/M2 的 12.5% 口径说明：`k_sparse` 与 `conn_k` 均为 `n//8`，因此**�
 ### 3.3 1B 档容量账
 
 「1B 模型」= **总突触参数容量 ≥ 1.0×10^9**。按
-`train_1b/config_1b.py::capacity_report()` 的算术口径（1B 预设，词表 51,962）实算：
+`train/config_1b.py::capacity_report()` 的算术口径（1B 预设，词表 51,962）实算：
 
 | 部件 | 口径 | 突触数 | 占比 |
 |---|---|---|---|
@@ -572,7 +572,7 @@ PHD-Net 的定位是「提供 LLM 功能所需的**信息原理**」，而非「
 
 | 层级 | 默认 | 出处 |
 |---|---|---|
-| CLI `--readout-dtype`（**生产实际**） | **fp16** | `train_1b/train.py:206`，:476 覆盖到 cfg |
+| CLI `--readout-dtype`（**生产实际**） | **fp16** | `train/train.py:206`，:476 覆盖到 cfg |
 | `PHDNetConfig.readout_dtype`（库默认） | `bf16` | `config.py:293`；仅不经 CLI 直接用库时采用 |
 | fp8 forward 副本重建间隔 `--fp8-refresh` | 8 步 | `config.py:201`，摊销量化成本 |
 
@@ -656,9 +656,9 @@ bf16/fp8 张量**不能直接 `.numpy()`**（numpy 无原生 bf16/fp8）：
 | M5 神经调制 | `phdnet/modulator.py` | `Neuromodulator` / `MultiModulator` |
 | M6 读出 | `phdnet/readout.py` | `Readout` / `_ro_dense_update` |
 | 词级编码 | `phdnet/word_encoder.py` | `encode_composite` / `onehot` |
-| 分词热路径（nogil） | `train_1b/tokenizer_core.py` | `scan_group_numba` |
-| 1B 档配置 / 容量验算 | `train_1b/config_1b.py` | `build_cfg` / `capacity_report` |
-| 训练主循环（+ 主循环三段计时 :800） | `train_1b/train.py` | — |
+| 分词热路径（nogil） | `train/tokenizer_core.py` | `scan_group_numba` |
+| 1B 档配置 / 容量验算 | `train/config_1b.py` | `build_cfg` / `capacity_report` |
+| 训练主循环（+ 主循环三段计时 :800） | `train/train.py` | — |
 | 语料读取 | `phdnet/corpus.py` | `load_text` / `iter_texts` |
 | 脑同构审计 | `tools/audit_brain_parity.py` | A1 主干连接率 / A2 记忆表 |
 

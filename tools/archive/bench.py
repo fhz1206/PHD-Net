@@ -94,7 +94,7 @@ def bench_cpu_flops(n=1024, reps=20):
 
 
 def bench_1b(steps=1500):
-    import train_1b as T
+    import train as T
     net = T.BillionSynapseNet()
     sdr = [T.sdr_of(s) for s in range(3)]
     prev = None

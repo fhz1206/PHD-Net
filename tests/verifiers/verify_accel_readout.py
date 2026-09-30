@@ -133,7 +133,7 @@ def main() -> None:
     import os
     os.chdir(root)
     used = set()
-    for pat in ("phdnet/**/*.py", "train_1b/*.py", "tools/*.py", "tests/**/*.py"):
+    for pat in ("phdnet/**/*.py", "train/*.py", "tools/*.py", "tests/**/*.py"):
         for f in root.glob(pat):
             try:
                 txt = f.read_text(encoding="utf-8", errors="ignore")
