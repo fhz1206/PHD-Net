@@ -5,6 +5,7 @@
 
 import numpy as np
 
+from .ltm_kernel import NUMBA_LTM, _ltm_learn_rows, _recall_project
 from .tokenizer import U64
 
 
@@ -309,6 +310,11 @@ class OnlineCSRTable(SparseSynapseTable):
         grow_order = cur
         if self.growth_guidance and len(cur) > 1:
             grow_order = sorted(cur, key=lambda k: self.in_deg.get(k, 0))
+        # P78：批量多核路径（aarch64 上一次 imprint 的 Python learn 要 ~20 s，
+        # 只占 1 个核）。逐位对拍见 tests/verifiers/verify_ltm_learn_batch.py。
+        if NUMBA_LTM and len(prev) * len(grow_order) >= 4096:
+            self._learn_batch(prev, grow_order, eta, w_max, int8, q)
+            return
         for i in prev:
             tpi = self.t_pre.get(i, 0.0)
             if tpi <= 0.0:
@@ -330,6 +336,62 @@ class OnlineCSRTable(SparseSynapseTable):
                     self._append(i, k, min(ltp, w_max))
                     if self.growth_guidance:
                         self.in_deg[k] = self.in_deg.get(k, 0) + 1
+
+    def _learn_batch(self, prev: list[int], grow_order: list[int],
+                     eta: float, w_max: float, int8: bool, q: float) -> None:
+        """P78：gather 活跃行 → `_ltm_learn_rows`（prange）→ scatter。
+
+        与原 Python 路径逐位一致：`tpi<=0` 的行剔除（原版循环开头 continue）；
+        无 `tpi` 记录的行 `_new_row`（原版也是首次需要时建行）；核内生长不受
+        预留容量限制（原路径写满会 `_grow_row` 扩容到 m_out），扩容在 scatter
+        侧补；`in_deg` 按新增槽位补计（growth_guidance 时）。
+        """
+        rows: list[int] = []
+        for i in prev:
+            if self.t_pre.get(i, 0.0) > 0.0:
+                if i not in self.keys:
+                    self._new_row(i)
+                rows.append(i)
+        if not rows:
+            return
+        cap = max(self.m_out, max(len(self.keys[i]) for i in rows))
+        R, C = len(rows), len(grow_order)
+        dt = np.int16 if int8 else np.float64
+        K = np.zeros((R, cap), dtype=np.int64)
+        V = np.zeros((R, cap), dtype=dt)
+        S = np.zeros(R, dtype=np.int64)
+        tpi = np.empty(R, dtype=np.float64)
+        tpi_post = np.empty(R, dtype=np.float64)
+        for r, i in enumerate(rows):
+            sz = self.size[i]
+            K[r, :sz] = self.keys[i][:sz]
+            V[r, :sz] = self.vals[i][:sz]
+            S[r] = sz
+            tpi[r] = float(self.t_pre.get(i, 0.0))
+            tpi_post[r] = float(self.t_post.get(i, 0.0))
+        ks = np.asarray(grow_order, dtype=np.int64)
+        g_tpost = np.asarray([self.t_post.get(k, 0.0) for k in grow_order],
+                             dtype=np.float64)
+        g_tpre = np.asarray([self.t_pre.get(k, 0.0) for k in grow_order],
+                            dtype=np.float64)
+        before = S.copy()
+        _ltm_learn_rows(K, V, S, tpi, tpi_post, ks, g_tpost, g_tpre,
+                        float(eta), float(w_max), float(q), bool(int8),
+                        int(self.m_out))
+        # ── scatter：扩容 + 写回 + in_deg ──
+        for r, i in enumerate(rows):
+            sz_new = int(S[r])
+            ks_i, vs_i = self.keys[i], self.vals[i]
+            while len(ks_i) < sz_new:                   # 等价原路径的 _grow_row
+                self._grow_row(i)
+                ks_i, vs_i = self.keys[i], self.vals[i]
+            if self.growth_guidance and sz_new > int(before[r]):
+                for s in range(int(before[r]), sz_new):
+                    k_new = int(K[r, s])
+                    self.in_deg[k_new] = self.in_deg.get(k_new, 0) + 1
+            ks_i[:sz_new] = K[r, :sz_new]
+            vs_i[:sz_new] = V[r, :sz_new]
+            self.size[i] = sz_new
 
     # ---------- CSR 快照（与本类内部表示同构，直接导出） ----------
     def compact_csr(self) -> dict:

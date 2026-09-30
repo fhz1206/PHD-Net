@@ -29,15 +29,11 @@ from __future__ import annotations
 import numpy as np
 
 try:
-    from numba import njit
+    from numba import njit, prange
     NUMBA_LTM = True
 except ImportError:                                     # pragma: no cover
-    NUMBA_LTM = False
-
-    def njit(*a, **kw):
-        def wrap(fn):
-            return fn
-        return wrap if not a or not callable(a[0]) else a[0]
+    from numba import njit, prange                      # numba 缺失时这里会抛
+    NUMBA_LTM = True
 
 
 @njit(cache=True, nogil=True, fastmath=False)
@@ -83,3 +79,64 @@ def _recall_project(big_ids, weights, out, rev_indptr, rev_indices):
         w = weights[t]
         for p in range(rev_indptr[b], rev_indptr[b + 1]):
             out[rev_indices[p]] += w
+
+
+@njit(cache=True, nogil=True, parallel=True, fastmath=False)
+def _ltm_learn_rows(K, V, S, tpi, tpi_post, ks, g_tpost, g_tpre,
+                    eta, w_max, q, int8, m_out):
+    """P78：imprint 的 `learn` 批量多核化（行间 prange，行内与原版同序）。
+
+    K, V   : (R, cap) 活跃行缓冲（cap >= m_out；原路径写满会 `_grow_row` 扩容
+             到 m_out，故按 m_out 分配即可，扩容在 scatter 侧补）
+    S      : (R,) 有效槽数（就地更新）
+    tpi    : (R,) 行前端迹（<=0 的行整行跳过，与原版一致）
+    tpi_post: (R,) 行后端迹（LTD 用）
+    ks / g_tpost / g_tpre : (C,) grow_order 与两条迹
+
+    逐位要点：`ltp = eta*tpi*tpk`；`ltp <= 0` 跳过；`found` 取**首个**匹配槽；
+    有槽 → `w + ltp - ltd`（ltd = eta*tpi_post*g_tpre[c]）；无槽且 `sz < m_out`
+    → `min(ltp, w_max)` 生长（**与 growth_guidance 无关**，它只管 in_deg）；
+    int8 写回 `int(round(clip(w)*q))`（banker's rounding 与 Python `round` 一致）。
+    """
+    R = K.shape[0]
+    C = ks.shape[0]
+    for r in prange(R):
+        tp = tpi[r]
+        if tp <= 0.0:
+            continue
+        tp_post = tpi_post[r]
+        sz = S[r]
+        for c in range(C):
+            ltp = eta * tp * g_tpost[c]
+            if ltp <= 0.0:
+                continue
+            k = ks[c]
+            found = -1
+            for s in range(sz):
+                if K[r, s] == k:
+                    found = s
+                    break
+            if found >= 0:
+                if int8:
+                    w = np.float64(np.int32(V[r, found])) / np.float64(q)
+                else:
+                    w = np.float64(V[r, found])
+                ltd = eta * tp_post * g_tpre[c]
+                w2 = w + ltp - ltd
+                if w2 < 0.0:
+                    w2 = 0.0
+                elif w2 > w_max:
+                    w2 = w_max
+                if int8:
+                    V[r, found] = np.int16(int(np.round(w2 * q)))
+                else:
+                    V[r, found] = np.float64(w2)
+            elif sz < m_out:
+                w2 = ltp if ltp < w_max else w_max
+                K[r, sz] = k
+                if int8:
+                    V[r, sz] = np.int16(int(np.round(w2 * q)))
+                else:
+                    V[r, sz] = np.float64(w2)
+                sz += 1
+                S[r] = sz
