@@ -223,12 +223,19 @@ def main() -> None:
                     help="P35：step 分段计时（诊断 CPU 侧耗时分布；日志按段打印）")
     ap.add_argument("--omp-proc-bind", dest="omp_proc_bind",
                     action="store_true", default=True,
-                    help="P71：设 OMP_PROC_BIND=close / OMP_PLACES=cores，"
-                         "把 numba/OpenMP 线程绑到物理核（减少核间漂移导致的"
-                         "缓存失效与上下文切换）；--no-omp-proc-bind 关闭")
+                    help="P71/P74：设 OMP_PROC_BIND=close 把 OpenMP 线程绑到"
+                         "物理核；⚠ 不再设 OMP_PLACES=cores（191 核 place 表会让"
+                         "线程池每次同步遍历，实测 M2 慢 8-13×）；--no-omp-proc-bind 关闭")
     ap.add_argument("--no-omp-proc-bind", dest="omp_proc_bind",
                     action="store_false",
                     help="关闭 OpenMP 核心绑定")
+    ap.add_argument("--encoder-dtype", default="fp32",
+                    choices=["fp32", "fp64", "fp16", "bf16"],
+                    help="P74：M1 编码器权重存储精度（迭代恒 fp32）。⚠ 服务器"
+                         " 2026-09-30 实测：昇腾 aarch64 上 fp32 sgemv 比 fp64 "
+                         "慢约 70 倍（58 vs 0.85 ms/tok），疑为该平台 sgemv 内核"
+                         "未针对此尺寸调优 → 建议 --encoder-dtype fp64（x86 上 "
+                         "fp32 快 1.80×，故按平台选择）")
     ap.add_argument("--numba-threads", type=int, default=8,
                     help="P62：numba prange 线程上限（0=用 numba 默认=全部核）。"
                          "服务器实测 191 核上主循环只用 1.3 核、CS/s 250 万+"
@@ -380,12 +387,14 @@ def main() -> None:
     # 服务器 191 核实测：主循环只用 1.3–3.2 核、CS/s 250 万–600 万——大量
     # 上下文切换来自「用 191 线程跑千行级 prange」的线程空转。P22 实测核内
     # 1→6 线程仅 1.16×（访存带宽饱和），8 线程足够。
-    # P71（fhz「核心绑定用了吗」）：`OMP_PROC_BIND` / `OMP_PLACES` 让 OpenMP
-    # 把线程**绑到物理核**而非到处迁移——百万级上下文切换里很大一部分来自线程
-    # 在核间漂移导致的缓存失效。必须在 numba 初始化（首次调用核）之前设进环境。
+    # P71（fhz「核心绑定用了吗」）：`OMP_PROC_BIND` 让 OpenMP 把线程绑到物理核
+    # 而非到处迁移。必须在 numba 初始化（首次调用核）之前设进环境。
+    # ⚠ P74（2026-09-30 回滚一半）：`OMP_PLACES=cores` 在 191 核机器上要为
+    # 191 个核建 place 表，OpenMP/numba 每次线程池同步都要遍历它 → 撤掉。
+    # 服务器实测（12:50 日志）：带 OMP_PLACES 时 M2_infer 2.4 → 19-32 ms/tok
+    # （涨 8-13×）、CS/s 反而升到 600 万。只保留 PROC_BIND。
     if args.omp_proc_bind:
         os.environ.setdefault("OMP_PROC_BIND", "close")
-        os.environ.setdefault("OMP_PLACES", "cores")
     if args.numba_threads > 0:
         try:
             import numba
@@ -393,7 +402,7 @@ def main() -> None:
             print(f"[parallel] numba prange threads = {numba.get_num_threads()}"
                   f" (cap {args.numba_threads}; P22: 1→6 threads only 1.16x)"
                   f" | OMP_PROC_BIND={os.environ.get('OMP_PROC_BIND', '-')}"
-                  f" OMP_PLACES={os.environ.get('OMP_PLACES', '-')}",
+                  f" BLAS/OpenMP threads={_DEFAULT_THREADS}",
                   flush=True)
         except Exception as e:                          # noqa: BLE001
             print(f"[parallel] numba thread cap not applied: {e}")
@@ -401,6 +410,7 @@ def main() -> None:
     cfg = build_cfg(args.preset, args.width, args.big_n,
                     args.csr_online, args.readout_conn_k, args.seed)
     cfg.readout_dtype = args.readout_dtype            # P9 精度（默认 fp32）
+    cfg.encoder_dtype = args.encoder_dtype            # P74：M1 权重精度（平台相关）
     cfg.accel_readout = args.accel                     # P19 读出设备（默认 auto）
     cfg.nll_sync_every = args.nll_sync_every           # P34 nll 同步周期（默认 1）
     cfg.step_profiling = args.step_profiling           # P35 step 分段计时（默认关）
