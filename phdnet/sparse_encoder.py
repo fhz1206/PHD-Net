@@ -14,7 +14,22 @@ P61（fhz 2026-09-29「迭代默认 fp32，模型默认 bf16」）：**迭代量
 仅在 torch/NPU 路径上才有意义——读出侧 bf16 已由 `--readout-dtype` 默认启用）。
 """
 
+import platform as _platform
+
 import numpy as np
+
+try:
+    from numba import njit, prange
+    _NUMBA_ENC = True
+except ImportError:                                     # pragma: no cover
+    _NUMBA_ENC = False
+
+    def njit(*a, **kw):
+        def wrap(fn):
+            return fn
+        return wrap if not a or not callable(a[0]) else a[0]
+
+    prange = range
 
 try:                                        # bf16 支持（numpy 扩展）
     import ml_dtypes
@@ -38,6 +53,24 @@ def resolve_model_dtype(name: str) -> np.dtype:
             return _MODEL_DTYPES["fp32"]
         raise ValueError(f"未知模型 dtype: {name!r}；可用 {sorted(_MODEL_DTYPES)}")
     return dt
+
+
+@njit(cache=True, nogil=True, parallel=True, fastmath=False)
+def _gemv_rows(W, x, b, out):
+    """out[r] = W[r,:]·x + b[r] —— 自写 GEMV 替代 BLAS。
+
+    动机（P77）：服务器 12:50/13:40 日志 M1_encode = 57-58 ms/tok（本机 x86
+    同规模 0.5-1 ms）——**aarch64 上 numpy 对该形状的 GEMV 走了病态路径**
+    （fp32/fp64 都慢，与 dtype 无关）。自写核行间 prange、行内顺序累加，
+    跨平台性能可控。**逐位说明**：行内按列序累加，与 BLAS 的归约顺序在
+    数学上同为 Σ，但浮点结合顺序可能差 1-2 ulp（与 P52 融合核同级）。
+    """
+    n = W.shape[0]
+    for r in prange(n):
+        acc = 0.0
+        for c in range(x.shape[0]):
+            acc += W[r, c] * x[c]
+        out[r] = acc + b[r]
 
 
 class SparseEncoder:
@@ -69,8 +102,23 @@ class SparseEncoder:
         # fp64 权重 @ fp32 输入——P75 把默认改回 fp64 后踩中）会让 numpy 脱离
         # BLAS 走逐元素慢路径：本机 x86 慢 5.9×，昇腾 aarch64 上 M1_encode
         # 0.85 → 62-67 ms/tok（约 70×）。输入只有 n_in 个元素，转换代价可忽略。
-        x_cast = np.asarray(x, dtype=self.W.dtype)
-        u = self._w_fp32() @ x_cast + self.b                # 迭代按权重精度
+        W32 = self._w_fp32()
+        x_cast = np.asarray(x, dtype=W32.dtype)
+        # P77：**平台自适应**——aarch64（昇腾服务器）上 numpy 对该形状 GEMV
+        # 病态慢（57-58 ms/tok，fp32/fp64 都慢）→ 走自写 numba 核；
+        # x86 上 BLAS 更快（953 vs 1532 µs）→ 走 BLAS。
+        use_numba = (_NUMBA_ENC and _platform.machine().startswith("aarch64")
+                     and W32.dtype in (np.float64, np.float32))
+        if use_numba:
+            # P77：aarch64 上 numpy 对该形状 GEMV 病态慢（57-58 ms/tok），
+            # 自写 numba 核跨平台一致（行内顺序累加，容差 1-2 ulp）
+            u = np.empty(self.n_sdr, dtype=np.float64)
+            _gemv_rows(W32, x_cast.astype(np.float64), self.b.astype(np.float64), u)
+        elif _NUMBA_ENC and W32.dtype == np.float32:
+            u = np.empty(self.n_sdr, dtype=np.float32)
+            _gemv_rows(W32, x_cast, self.b.astype(np.float32), u)
+        else:
+            u = W32 @ x_cast + self.b
         idx = np.argpartition(-u, self.k - 1)[: self.k]      # k-WTA 竞争（侧抑制的抽象）
         s = np.zeros_like(u)
         win = u[idx]
