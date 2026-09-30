@@ -57,7 +57,6 @@ M5 公平评测（PHD-Net vs nanoGPT 级 Transformer）入口不在本目录：
 | `fetch_modelscope.py` | 从 ModelScope 下载单个数据文件（国内直连） | `python tools/fetch_modelscope.py --ns AI-ModelScope --name wikipedia-cn-20230720-filtered --file wikipedia-cn-20230720-filtered.jsonl --out data/_raw/wikipedia-cn-filtered.jsonl` |
 | `prepare_wikicn.py` | 中文维基 → 训练段/评估段纯文本，**确定性划分**（尾部为评估段，中间留 `--gap` 隔离带） | `python tools/prepare_wikicn.py --train-chars 2000000 --eval-chars 200000` |
 | `fetch_l3.py` / `fetch_ultrafineweb.py` | 早期单源采样器（`fetch_ms.py` 的前身，保留可复现） | `python tools/fetch_ultrafineweb.py --list` |
-| `prepare_mimo.py` / `prepare_mix.py` / `prepare_r1sft.py` / `prepare_toolcall.py` | SFT 子集制备（外部语料 → 训练/评估切分） | `python tools/prepare_r1sft.py --max-samples 1000` |
 
 ## 发布
 
@@ -80,7 +79,10 @@ M5 公平评测（PHD-Net vs nanoGPT 级 Transformer）入口不在本目录：
 
 ## 一次性实验与归档
 
-- `experiment_*.py`、`ablation_modules.py`：一次性机制实验，结论已固化进 `docs/`。
+- `ablation_modules.py`、`profile_lm.py`：机制消融与 profiling（结论已固化进 `docs/`）。
+- **历史**：一次性实验脚本（`experiment_*.py`）与已产出数据的语料制备脚本
+  （`prepare_{mimo,mix,r1sft,toolcall}.py`）已于 2026-09-30 删除；
+  `convert_*.py` / `fetch_*.py` 保留以保证语料可重现。
 - `archive/`：`bench.py`、`bench_1b_migrate.py`、`audit_prof_1b.py`、`hunt_bugs.py`、
   `rerun_task6.py` —— 保留可追溯，不再维护。
 
