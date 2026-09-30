@@ -13,7 +13,7 @@
     M7–M12 认知层   -> cognition.py / generate.py
 """
 
-__version__ = "0.0.0"
+__version__ = "v0.1.0-alpha"
 
 from .config import PHDNetConfig
 from .model import PHDNet
