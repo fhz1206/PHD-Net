@@ -229,11 +229,11 @@ def main() -> None:
     ap.add_argument("--no-omp-proc-bind", dest="omp_proc_bind",
                     action="store_false",
                     help="关闭 OpenMP 核心绑定")
-    ap.add_argument("--m2-kernel", default="fused", choices=["fused", "plain"],
-                    help="P75：M2 推理核。fused=P52 融合核（x86 快 1.15-2.16×）；"
-                         "plain=原始 5 次核调用。⚠ 昇腾 aarch64 实测 fused 段 "
-                         "2.4 → 20-27 ms/tok，疑 prange+fastmath 在该平台退化 "
-                         "→ 若 --m2-kernel plain 让 M2_infer 回落，A/B 后再定默认")
+    ap.add_argument("--m2-kernel", default="plain", choices=["fused", "plain"],
+                    help="P76：M2 推理核。**默认 plain**（原始 5 次核调用）——"
+                         "服务器 A/B 实测：fused 20-27 ms/tok vs plain 6.7-11.9"
+                         "（plain 快 3-4×，prange+fastmath 在昇腾退化）；x86 上 "
+                         "fused 快 2.1×，跨平台训练请按机器选择")
     ap.add_argument("--encoder-dtype", default="fp64",
                     choices=["fp32", "fp64", "fp16", "bf16"],
                     help="P74/P75：M1 编码器权重存储精度（迭代恒 fp32）。"

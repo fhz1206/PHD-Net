@@ -65,11 +65,12 @@ class SparseEncoder:
 
     def encode(self, x: np.ndarray):
         """输入 x -> (s, idx)。s: SDR 稀疏向量；idx: 胜者索引（供稀疏快速通路）。"""
-        # P61：权重与输入**同为 fp32** 才能走 BLAS sgemv——混合 dtype（fp32 权重
-        # @ fp64 输入）会让 numpy 脱离 BLAS 走逐元素慢路径（实测慢 5.9×：
-        # 857 µs → 5047 µs）。输入只有 n_in 个元素，上采样代价可忽略。
-        x32 = np.asarray(x, dtype=np.float32)
-        u = self._w_fp32() @ x32 + self.b                   # 迭代 fp32
+        # P61/P76：**输入 dtype 必须跟随权重 dtype**，否则混合 dtype（如
+        # fp64 权重 @ fp32 输入——P75 把默认改回 fp64 后踩中）会让 numpy 脱离
+        # BLAS 走逐元素慢路径：本机 x86 慢 5.9×，昇腾 aarch64 上 M1_encode
+        # 0.85 → 62-67 ms/tok（约 70×）。输入只有 n_in 个元素，转换代价可忽略。
+        x_cast = np.asarray(x, dtype=self.W.dtype)
+        u = self._w_fp32() @ x_cast + self.b                # 迭代按权重精度
         idx = np.argpartition(-u, self.k - 1)[: self.k]      # k-WTA 竞争（侧抑制的抽象）
         s = np.zeros_like(u)
         win = u[idx]
