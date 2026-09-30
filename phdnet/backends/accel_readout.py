@@ -463,9 +463,11 @@ def _unsupported_reason(cfg) -> str | None:
     # P9/P12 的 fp8/fp4 位算法量化核是可用的（**不是能力缺失，只是没有加速
     # 算子**）。CPU 上想要量化码本可以直接 `--accel cpu --readout-dtype fp8`。
     _rd = str(getattr(cfg, "readout_dtype", "fp32"))
-    if _rd in ("fp8", "fp4"):
-        return (f"readout_dtype={_rd}（加速后端禁用量化码本：昇腾 ERR01007 "
-                f"/fp4 无算子 → 回落 numba CPU 路径，其量化核可用）")
+    if _rd in ("int4", "fp4"):
+        return ("readout_dtype=int4（910B 无 INT4 矩阵乘单元，只能反量化→FP16 "
+                "再算，省存储不省算力；int4 请用 --accel cpu 的 4-bit 打包核）")
+    if _rd in ("fp8",):          # 旧名 → int8 的兼容路径
+        return None
     if bool(getattr(cfg, "lognormal_init", False)):
         return None                            # 初始化分布不同但结构兼容，不阻断
     return None

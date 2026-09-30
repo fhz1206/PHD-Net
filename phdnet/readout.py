@@ -377,7 +377,13 @@ _RO_STATE = {"ok": None}      # None=未探测 / True=可用 / False=回退 nump
 #   梯度更新走低精度——这是低精度训练的标准「高精度主回路」结构。
 # ---------------------------------------------------------------------------
 
-RO_DTYPES = ("fp32", "fp16", "bf16", "fp8", "fp4")
+# P100：**int8/int4 正名**（fhz 2026-09-30：「fp8 改为 int8，fp4 改为 int4」）。
+# 关键事实：这里的 "fp8" **本来就是 uint8 码本**（`_ro_q_matvec_u8` / 1 字节存），
+# "fp4" 是 4-bit 打包（两元素一字节）——即**它们一直是整数量化**，只是名字
+# 误导。更重要的是：**P92 把它们当 fp8 在加速器上禁用了，等于误禁了昇腾
+# 真正支持的 INT8 Cube 路径**。现在正名并按设备能力重新裁决。
+_RO_DTYPE_ALIASES = {"fp8": "int8", "fp4": "int4"}      # 旧名 → 新名（兼容）
+RO_DTYPES = ("fp32", "fp16", "bf16", "int8", "int4")
 
 
 def _build_lut(fmt: str) -> np.ndarray:
@@ -395,7 +401,7 @@ def _build_lut(fmt: str) -> np.ndarray:
         u32 = np.arange(65536, dtype=np.uint16).astype(np.uint32) << 16
         lut = np.frombuffer(u32.tobytes(), dtype=np.float32).copy()
         b, sb = 0x7F80, 15
-    elif fmt == "fp8":                              # e4m3fn：无 Inf，0x7F=NaN
+    elif fmt == "int8":                             # P100 原 "fp8"：uint8 码本（e4m3fn 定点化）
         codes = np.arange(256, dtype=np.uint8)
         s = np.where(codes & 0x80, -1.0, 1.0)
         e = ((codes >> 3) & 0xF).astype(np.int32)
@@ -405,7 +411,7 @@ def _build_lut(fmt: str) -> np.ndarray:
         val = np.where((e == 15) & (m == 7), np.float32(np.nan), val) * s
         lut = val.astype(np.float32)
         b, sb = 0x7F, 7
-    elif fmt == "fp4":                              # e2m1：±{0,.5,1,1.5,2,3,4,6}
+    elif fmt == "int4":                             # P100 原 "fp4"：4-bit 打包（16 码）
         pos = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
         lut = np.concatenate([pos, -pos]).astype(np.float32)       # 全 16 码（15 = -0）
         b, sb = 8, 3
@@ -420,11 +426,12 @@ _Q_TABLES: dict = {}
 # 全局 LUT 单例（numba 内核按全局名冻结引用；构建为一次性 ~ms 级开销）
 lut_fp16, lat_fp16, sb_fp16 = _build_lut("fp16")
 lut_bf16, lat_bf16, sb_bf16 = _build_lut("bf16")
-lut_fp8, lat_fp8, sb_fp8 = _build_lut("fp8")
-lut_fp4, lat_fp4, sb_fp4 = _build_lut("fp4")
+lut_fp8, lat_fp8, sb_fp8 = _build_lut("int8")
+lut_fp4, lat_fp4, sb_fp4 = _build_lut("int4")
 
 
 def _q_tables(fmt: str):
+    fmt = _RO_DTYPE_ALIASES.get(fmt, fmt)          # P100
     if fmt not in _Q_TABLES:
         lut, lat, sb = _build_lut(fmt)
         _Q_TABLES[fmt] = (lut, lat, sb)
@@ -445,7 +452,7 @@ def quantize_to(fmt: str, x: np.ndarray) -> np.ndarray:
     idx = np.where(pick_left, left, idx).astype(np.uint32)
     sign = np.where(x < 0, np.uint32(1 << sb), np.uint32(0)).astype(np.uint32)
     codes = idx | sign
-    if fmt == "fp4":
+    if fmt == "int4":
         codes = codes.astype(np.uint8).reshape(-1, 2)
         return (codes[:, 0] | (codes[:, 1] << 4)).astype(np.uint8)
     return codes.astype(np.uint16 if fmt in ("fp16", "bf16") else np.uint8)
@@ -456,7 +463,7 @@ def dequantize_from(fmt: str, codes: np.ndarray, n_elem: int | None = None) -> n
     lut, lat, sb = _q_tables(fmt)
     if fmt == "fp32":
         return codes
-    if fmt == "fp4":
+    if fmt == "int4":
         lo = (codes & 0xF).astype(np.int32)
         hi = (codes >> 4).astype(np.int32)
         vals = np.empty(codes.size * 2, dtype=np.float32)
@@ -588,11 +595,14 @@ class Readout:
         self.hid_k = int(hid_k)
         self.eta_hid = float(eta_hid)
         # P9 精度体系（2026-09-26，fhz 指令）：**停止 fp64 支持**；可选
-        # fp32（默认）/ fp16 / bf16 / fp8 / fp4。低精度 = 原生位型码本存储 +
+        # fp32（默认）/ fp16 / bf16 / int8 / int4（旧名 fp8/fp4 为别名）。低精度 = 原生位型码本存储 +
         # 查表反量化计算 + 重新量化写回（P9 融合核），softmax/NLL 保持 fp64。
         # 注：结构性稀疏模式暂用 fp32 CSR（与量化码本不叠加——组合另行立项）。
+        dtype = _RO_DTYPE_ALIASES.get(str(dtype).lower(), str(dtype).lower())
         if dtype not in RO_DTYPES:
-            raise ValueError(f"readout dtype 须为 {RO_DTYPES} 之一，实际: {dtype!r}"
+            raise ValueError(
+                f"readout dtype 须为 {RO_DTYPES} 之一"
+                f"（兼容旧名 fp8→int8 / fp4→int4），实际: {dtype!r}"
                              "（fp64 已按 fhz 指令停止支持）")
         self.dtype_name = dtype if self.conn_k == 0 else "fp32"
         self.qfmt = self.dtype_name if self.dtype_name != "fp32" else None
@@ -661,7 +671,7 @@ class Readout:
         else:
             W = np.ascontiguousarray(W, dtype=np.float32)
             self._lut, self._lat, self._sbit = _q_tables(self.qfmt)
-            if self.qfmt == "fp4":
+            if self.qfmt == "int4":
                 self._wscale = 1.0
                 self._codes, self._wscales = quantize_fp4_mx(W)
             else:
@@ -672,7 +682,7 @@ class Readout:
     def _deq_w(self) -> np.ndarray:
         """码本 → fp32 稠密权重（兼容视图；统计/保存用）。"""
         n = self._n_out * self._n_in
-        if self.qfmt == "fp4":
+        if self.qfmt == "int4":
             return dequantize_fp4_mx(self._codes, self._wscales,
                                      n).reshape(self._n_out, self._n_in)
         return (dequantize_from(self.qfmt, self._codes, n)
@@ -777,8 +787,8 @@ class Readout:
             return _csr_matvec(*self._csr, h)
         if self.qfmt is not None:               # P9：量化码本内联反量化 matvec
             K = {"fp16": _ro_q_matvec_u16, "bf16": _ro_q_matvec_u16,
-                 "fp8": _ro_q_matvec_u8, "fp4": _ro_q_matvec_fp4}[self.qfmt]
-            scale = self._wscales if self.qfmt == "fp4" else self._wscale
+                 "int8": _ro_q_matvec_u8, "int4": _ro_q_matvec_fp4}[self.qfmt]
+            scale = self._wscales if self.qfmt == "int4" else self._wscale
             return K(self._codes, self._lut, h.astype(np.float32, copy=False),
                      self._n_in, scale)
         if self._W.dtype == np.float32:         # fp32：BLAS sgemv（升精度返回）
@@ -806,7 +816,7 @@ class Readout:
             _ro_q_update_fp16(self._codes, scr, dp32, h32, e32, n)
         elif self.qfmt == "bf16":
             _ro_q_update_bf16(self._codes, scr, dp32, h32, e32, n)
-        elif self.qfmt == "fp8":
+        elif self.qfmt == "int8":
             _ro_q_update_fp8(self._codes, scr, dp32, h32, e32, n)
         else:                                   # fp4 MX：额外需要行缓冲与块 max 缓冲
             import numba as _nb
