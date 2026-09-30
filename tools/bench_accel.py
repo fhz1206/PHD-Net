@@ -77,7 +77,9 @@ def main() -> None:
     print("  · fp8/fp4 在加速后端未实现（会回落 numba CPU），故本基准不测。")
     print("  · ⚠ 半精度的机制性代价：非目标行的更新量 ≈1e-6，比 fp16 半 ULP 还小")
     print("    15 倍 → 被舍入丢弃，学习规则退化为「只提升目标行」。见硬件后端报告。")
-    with open(os.path.join(_ROOT, "outputs", "bench_accel.json"), "w",
+    _out_dir = os.path.join(_ROOT, "outputs", "experiments")
+    os.makedirs(_out_dir, exist_ok=True)   # CI 上 outputs/ 不存在
+    with open(os.path.join(_out_dir, "bench_accel.json"), "w",
               encoding="utf-8") as f:
         json.dump({"probes": probes, "results": results}, f,
                   ensure_ascii=False, indent=2, default=str)

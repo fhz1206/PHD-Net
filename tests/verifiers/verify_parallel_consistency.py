@@ -127,6 +127,25 @@ def part_b(n_chunks: int = 64) -> None:
     from corpus_stream import PrefetchChars, SEP, zh_char_chunks
 
     glob = os.path.join(_ROOT, "datasets", "pretrain", "pretrain_*.parquet")
+    import glob as _glob
+    if not _glob.glob(glob):
+        # CI（GitHub Actions）没有本地数据集：生成**合成中文语料 parquet**
+        # （验证目标是「并行核一致性/分词等价」，数据本身只需稳定、含中文）。
+        import tempfile
+        import pyarrow as pa
+        import pyarrow.parquet as _pq
+        _tmpd = tempfile.mkdtemp(prefix="phd_ci_corpus_")
+        rng_texts = []
+        _zh = ("机器学习模型的训练需要大量语料与稳定的评测基准。"
+               "并行一致性验证的目标是保证多核与单核路径逐位相同。")
+        for k in range(8):
+            rng_texts.append((_zh * 200) + f" 样本编号 {k}。")
+        tbl = pa.table({"text": pa.array(rng_texts),
+                        "lang": pa.array(["zh"] * len(rng_texts)),
+                        "src": pa.array(["ci_synth"] * len(rng_texts))})
+        _pq.write_table(tbl, os.path.join(_tmpd, "pretrain_000.000.parquet"))
+        glob = os.path.join(_tmpd, "pretrain_*.parquet")
+        print(f"[ci-fallback] 本地数据集缺失，使用合成语料: {glob}")
     ser = []
     for i, c in enumerate(zh_char_chunks(glob)):
         ser.append(c)
