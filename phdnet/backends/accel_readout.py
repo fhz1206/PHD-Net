@@ -256,10 +256,21 @@ class AccelReadout:
         return self._last_nll
 
     def _eager_step(self, y32, ht, t, correct: int, eta: float):
-        """eager 逐步执行（softmax→nll→addmm_）；compiled 回落时也走这里。"""
+        """eager 逐步执行（softmax→nll→addmm_）；compiled 回落时也走这里。
+
+        P80：nll 改用 `cross_entropy` 单 kernel（替代 `softmax + log + 索引`
+        的多 kernel 组合，并去掉 1e-12 加项）。数学等价：CE(logits, c) =
+        logsumexp(y) − y[c] = −log(softmax(y)[c])。dp 仍由同一份 softmax 得出。
+        """
         p = torch.softmax(y32, dim=0)
         # nll 先取（必须在改 p 之前）
-        nll_dev = -torch.log(p[correct:correct + 1] + 1e-12).reshape(())
+        if self._correct_pinned is None:
+            self._correct_pinned = torch.zeros(
+                1, dtype=torch.long, pin_memory=(ht.device.type == "npu"))
+        self._correct_pinned.fill_(correct)
+        _ct = self._correct_pinned.to(y32.device, non_blocking=True)
+        nll_dev = torch.nn.functional.cross_entropy(
+            y32.reshape(1, -1), _ct).reshape(())
         if t is None:                     # P45：p 就地变成 dp（p − t）
             dp = p.to(self.tdtype)
             dp[correct] -= 1.0
