@@ -70,7 +70,8 @@ for p in (str(_HERE), str(_ROOT)):
 os.environ.setdefault(  # P39：numba 缓存持久化（不被 __pycache__ 清理波及）
     "NUMBA_CACHE_DIR", str(_ROOT / "outputs" / "numba_cache"))
 
-from ckpt_1b import _rebuild_sdrs, load_model, save_model            # noqa: E402
+from ckpt_1b import (_rebuild_sdrs, load_model, save_model,            # noqa: E402
+                     save_model_async, wait_pending_saves)
 from config_1b import PRESETS, SEG_KWARGS, build_cfg                 # noqa: E402
 from config_1b import capacity_report, print_capacity_report         # noqa: E402
 from corpus_stream import PrefetchChars, SEP, StreamingTokenizer     # noqa: E402
@@ -835,7 +836,7 @@ def main() -> None:
                 except Exception:                       # noqa: BLE001
                     pass
             if args.ckpt_every and (i - done) and (i - done) % args.ckpt_every == 0:
-                save_model(ckpt, lm, cfg, i, ckpt_dtype=args.ckpt_dtype,
+                save_model_async(ckpt, lm, cfg, i, ckpt_dtype=args.ckpt_dtype,
                            extra=_data_provenance)
                 print(f"  [checkpoint] saved {i:,} tokens → {ckpt}", flush=True)
                 _print_table_stats(lm)
@@ -843,9 +844,11 @@ def main() -> None:
             break
 
     # ── 收尾：滚动检查点 + final 模型 ──
+    wait_pending_saves()          # P83：先等后台队列写完（滚动 ckpt 的数据一致性）
     save_model(ckpt, lm, cfg, i, ckpt_dtype=args.ckpt_dtype, extra=_data_provenance)
     final = args.save_dir / f"phdnet1b_{args.preset}_{args.data}_final.npz"
     save_model(final, lm, cfg, i, extra={**_data_provenance, "final": True})
+    wait_pending_saves()          # P83：确保 final 落盘后再打印完成
 
     spent = time.perf_counter() - t_start
     oov_rate = oov_skipped / max(1, i - done)

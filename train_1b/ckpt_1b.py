@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
 import time
 from pathlib import Path
 
@@ -97,6 +99,96 @@ def to_numpy(x, dtype=None):
     """延迟导入的 to_numpy（避免与 phdnet.model 的导入顺序耦合）。"""
     from phdnet.model import to_numpy as _tn
     return _tn(x, dtype)
+
+
+# P83：检查点后台写盘（训练不因 savez 停摆）。主线程做**一致快照**
+# （所有 numpy 数组必须 .copy()——训练会原地改写它们），子线程只做 np.savez +
+# json 写盘（IO 释放 GIL）。单 worker 串行保证不并发覆盖同一文件。
+_SAVE_QUEUE: "queue.Queue[tuple]" = queue.Queue()
+_SAVE_THREAD: threading.Thread | None = None
+_SAVE_ERR: list[str] = []
+
+
+def _save_worker() -> None:
+    """后台写盘线程：从队列取 (path, npz_kwargs, meta_json, meta_path)。"""
+    while True:
+        item = _SAVE_QUEUE.get()
+        if item is None:                       # 关闭哨兵
+            return
+        path, npz_kwargs, meta_txt, meta_path = item
+        try:
+            np.savez(path, **npz_kwargs)
+            if meta_txt is not None:
+                Path(meta_path).write_text(meta_txt, encoding="utf-8")
+        except Exception as e:                 # noqa: BLE001
+            _SAVE_ERR.append(f"{type(e).__name__}: {e}")
+
+
+def wait_pending_saves(timeout: float = 120.0) -> None:
+    """收尾：等所有后台保存完成（防止退出丢检查点）。"""
+    if _SAVE_THREAD is not None:
+        _SAVE_QUEUE.join()
+
+
+def save_model_async(path, lm, cfg, done: int, extra: dict | None = None,
+                     ckpt_dtype: str = "fp32", **kwargs) -> None:
+    """异步版 save_model：主线程做一致快照，写盘在后台线程。
+
+    快照要点：`to_numpy` 对 torch 张量返回**共享内存视图** → 必须 `.copy()`，
+    否则子线程写盘时主线程的 `addmm_`/learn 正在原地改写 → 数据撕裂。
+    `compact_csr` / `sparse_csr` 返回新数组，天然安全。
+    """
+    global _SAVE_THREAD
+    import copy as _copy
+    snap = save_model_snapshot(path, lm, cfg, done, extra, ckpt_dtype, **kwargs)
+    if snap is None:
+        return
+    path, npz_kwargs, meta = snap
+    meta_txt = None
+    meta_path = Path(str(path)).with_suffix(".json")
+    if meta is not None:
+        meta_txt = json.dumps(meta, ensure_ascii=False, indent=2, default=str)
+    if _SAVE_THREAD is None:
+        _SAVE_THREAD = threading.Thread(target=_save_worker, daemon=True,
+                                        name="ckpt-writer")
+        _SAVE_THREAD.start()
+    _SAVE_QUEUE.put((Path(path), npz_kwargs, meta_txt, meta_path))
+    if _SAVE_ERR:                              # 后台失败要可见（fail-fast 精神）
+        err = _SAVE_ERR.pop(0)
+        print(f"[ckpt] 后台保存失败（{err}）", flush=True)
+
+
+def save_model_snapshot(path, lm, cfg, done: int, extra: dict | None = None,
+                        ckpt_dtype: str = "fp32", **kwargs):
+    """save_model 的**快照前半**：构造全部 numpy 数组（含拷贝），不写盘。
+
+    返回 (path, npz_kwargs, meta)；None = 该步不保存（留给调用方判断）。
+    实现方式：临时把 `np.savez` 替换成捕获函数，跑原 save_model 的主体，
+    再恢复——保证与同步版**逐字段一致**，不复制粘贴两份保存逻辑。
+    """
+    captured: dict = {}
+
+    def _capture(fname, *a, **kw):
+        captured.update(kw)
+        captured["_arrs_names"] = list(kw.keys())
+
+    import numpy as _np
+    orig = _np.savez
+    _np.savez = _capture
+    try:
+        meta = save_model(path, lm, cfg, done, extra, ckpt_dtype, **kwargs)
+    finally:
+        _np.savez = orig
+    if not captured:
+        return None
+    # 共享内存视图 → 深拷贝（防训练线程原地改写撕裂）
+    safe = {}
+    for k, v in captured.items():
+        if isinstance(v, np.ndarray):
+            safe[k] = v.copy()
+        else:
+            safe[k] = v
+    return path, safe, meta
 
 
 def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None,

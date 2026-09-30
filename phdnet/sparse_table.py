@@ -398,17 +398,35 @@ class OnlineCSRTable(SparseSynapseTable):
         """与 dict 版逐位一致：每行按目标索引**排序**输出（语义对齐
         `SparseSynapseTable.compact_csr` 的 `for k in sorted(bucket.keys())`）。"""
         rows = sorted(self.keys.keys())
-        indptr = np.zeros(len(rows) + 1, dtype=np.int64)
-        indices: list[int] = []
-        data: list[int] = []
-        for r, i in enumerate(rows):
+        R = len(rows)
+        indptr = np.zeros(R + 1, dtype=np.int64)
+        # P82：原实现每行 Python `sorted()` + 逐突触 append —— 数十万行时
+        # 0.8–37 s（检查点硬停顿）。改为**全量 lexsort**（C 排序）：行内按
+        # 目标索引升序、相同索引按槽位序（与 `sorted((k, s))` 的 tie-break
+        # 完全一致 → 逐位相同）。int8 的量化同样向量化。
+        szs = np.fromiter((self.size[i] for i in rows), dtype=np.int64, count=R)
+        cap = int(szs.max()) if R else 0
+        K = np.empty((R, cap), dtype=np.int64)
+        Vq = np.empty((R, cap), dtype=np.int64)
+        for r, i in enumerate(rows):            # 仅 R 次 Python 循环（行拷贝）
             sz = self.size[i]
-            idx, v = self.keys[i], self.vals[i]
-            for k, s in sorted((int(idx[s]), s) for s in range(sz)):
-                indices.append(k)
-                data.append(int(v[s]) if self.int8_store
-                            else int(round(float(v[s]) * self._q)))
-            indptr[r + 1] = len(indices)
+            K[r, :sz] = self.keys[i][:sz]
+            v = self.vals[i][:sz]
+            if self.int8_store:
+                Vq[r, :sz] = v.astype(np.int64)
+            else:
+                Vq[r, :sz] = np.round(v.astype(np.float64) * self._q).astype(np.int64)
+        flat_k = K.ravel()[: R * cap]
+        flat_q = Vq.ravel()[: R * cap]
+        row_of = np.repeat(np.arange(R, dtype=np.int64), cap)
+        flat_slot = np.tile(np.arange(cap, dtype=np.int64), R)
+        valid = flat_slot < szs[row_of]         # 每行只保留真实槽位
+        sel = np.flatnonzero(valid)
+        # np.lexsort 的**最后一个 key 是主排序键**：行升序为主、键次之、槽位末
+        sel = sel[np.lexsort((flat_slot[sel], flat_k[sel], row_of[sel]))]
+        indices = flat_k[sel]
+        data = (flat_q[sel].astype(np.int8) if self.int8_store else flat_q[sel])
+        indptr[1:] = np.cumsum(szs)
         return {
             "row_ids": np.asarray(rows, dtype=np.int64),
             "indptr": indptr,
