@@ -497,8 +497,15 @@ def _unsupported_reason(cfg) -> str | None:
         return "readout_hidden>0（两级读出未在加速后端实现）"
     if int(getattr(cfg, "readout_conn_k", 0) or 0) > 0:
         return "readout_conn_k>0（稀疏读出未在加速后端实现）"
-    if str(getattr(cfg, "readout_dtype", "fp32")) == "fp4":
-        return "readout_dtype=fp4（MX 块缩放码本未在加速后端实现）"
+    # P86（fhz 2026-09-30：「针对昇腾设备禁用 fp4, fp8」）：加速后端**禁用
+    # 量化码本**——昇腾实测 fp8 抛 "Float8_e4m3fn has not been supported"
+    # （ERR01007），fp4 的 MX 块缩放同样没有算子。回落 numba CPU 路径，那里
+    # P9/P12 的 fp8/fp4 位算法量化核是可用的（**不是能力缺失，只是没有加速
+    # 算子**）。CPU 上想要量化码本可以直接 `--accel cpu --readout-dtype fp8`。
+    _rd = str(getattr(cfg, "readout_dtype", "fp32"))
+    if _rd in ("fp8", "fp4"):
+        return (f"readout_dtype={_rd}（加速后端禁用量化码本：昇腾 ERR01007 "
+                f"/fp4 无算子 → 回落 numba CPU 路径，其量化核可用）")
     if bool(getattr(cfg, "lognormal_init", False)):
         return None                            # 初始化分布不同但结构兼容，不阻断
     return None
