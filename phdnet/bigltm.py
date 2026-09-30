@@ -55,6 +55,12 @@ class SparseLTM:
         # 预 CSR 化，供 numba 核 `_recall_project` 使用。维度序保持与 dict 的
         # list 序一致（j 升序）→ 与 Python 版逐位相同。
         self._rev_indptr, self._rev_indices = self._rev_to_csr()
+        # P95：预构造 `idx` 的 python 列表形式。`encode` 每步对每个活跃维度做
+        # `self.idx[j].tolist()`（numpy 花式索引 + 列表转换）——实测 256 活跃维
+        # 时 183.7 µs/次，而 encode 在 imprint 与 recall 里**每步**都调（审计 M4）。
+        # 构造期一次建好（n_dim 个小 list），循环内变成**零分配**的 list 取用。
+        self._idx_lists: list[list[int]] = [
+            self.idx[j].tolist() for j in range(n_dim)]
         self._prev: list[int] | None = None
 
     def _rev_to_csr(self):
@@ -115,14 +121,13 @@ class SparseLTM:
         dims = np.nonzero(rate > 0.0)[0]
         if dims.size == 0:
             return []
-        out: list[int] = []
-        seen = set()
-        for j in dims.tolist():
-            for i in self.idx[j].tolist():
-                if i not in seen:
-                    seen.add(i)
-                    out.append(i)
-        return out
+        # P95b：去重才是瓶颈（1024 次 `in` + append 的 Python 循环），
+        # `dict.fromkeys` 在 C 层完成「保序去重」——顺序与逐个 `if i not in seen`
+        # 完全一致（dict 保序），故**逐位相同**。
+        from itertools import chain
+        idx_lists = self._idx_lists
+        return list(dict.fromkeys(
+            chain.from_iterable([idx_lists[j] for j in dims.tolist()])))
 
     def imprint(self, rate: np.ndarray) -> None:
         self._check_sparse(rate)                       # A2：契约校验（稠密模式显式报错）
