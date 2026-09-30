@@ -399,6 +399,24 @@ def main() -> None:
     # （涨 8-13×）、CS/s 反而升到 600 万。只保留 PROC_BIND。
     if args.omp_proc_bind:
         os.environ.setdefault("OMP_PROC_BIND", "close")
+    # P79：numba 缓存状态可见化（cache=True 的核是否真的命中持久缓存）
+    try:
+        import numba
+        import numba.core.caching as _nbc
+        _cd = os.environ.get("NUMBA_CACHE_DIR", "")
+        _sz = 0
+        if _cd and os.path.isdir(_cd):
+            for _rt, _, _fs in os.walk(_cd):
+                for _f in _fs:
+                    try:
+                        _sz += os.path.getsize(os.path.join(_rt, _f))
+                    except OSError:
+                        pass
+        print(f"[numba] cache dir = {_cd or '(module-local __pycache__)'}"
+              f" | size = {_sz / 1e6:.1f} MB"
+              f" | 首次运行会全量编译，此后命中缓存（预期启动 ~2.6 s）", flush=True)
+    except Exception:                                   # noqa: BLE001
+        pass
     if args.numba_threads > 0:
         try:
             import numba
