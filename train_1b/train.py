@@ -198,10 +198,13 @@ def main() -> None:
                          "sft 分片同样适用）。词表扫描不受影响（词表是训练流的"
                          "超集，OOV 恒 0）")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
-    ap.add_argument("--readout-dtype", default="bf16",
+    ap.add_argument("--readout-dtype", default="fp8",
                     choices=["fp32", "fp16", "bf16", "fp8", "fp4"],
-                    help="读出精度（P9/P12：默认 fp32；fp64 已停止支持；"
-                         "fp4 = MX 块缩放 e2m1，2026-09-28 解禁")
+                    help="读出精度。**默认 fp8**（fhz 2026-09-30）：forward 用 "
+                         "fp8 副本（读流量 320→80 MB）+ 更新用 fp16 主副本"
+                         "（保住 |dp|≈1e-6 的非目标行更新，bf16 会把它舍掉 → "
+                         "退化为纯 Hebbian）。⚠ fp8 matmul 仅昇腾/CUDA 可用，"
+                         "CPU 自动回落 fp16。fp32 = 精确规则对照")
     ap.add_argument("--torch-compile", dest="torch_compile",
                     action="store_true", default=False,
                     help="P58（fhz 2026-09-29「图优化关了吧」）：默认 OFF——"
@@ -230,6 +233,10 @@ def main() -> None:
     ap.add_argument("--no-omp-proc-bind", dest="omp_proc_bind",
                     action="store_false",
                     help="关闭 OpenMP 核心绑定")
+    ap.add_argument("--fp8-refresh", type=int, default=8,
+                    help="P84：读出 fp8 forward 副本的重建间隔（步）。"
+                         "量化 1.6 亿元素是一次设备算子，摊到 N 步；N 越大越省，"
+                         "但 forward 用的 fp8 副本越旧")
     ap.add_argument("--m2-kernel", default="plain", choices=["fused", "plain"],
                     help="P76：M2 推理核。**默认 plain**（原始 5 次核调用）——"
                          "服务器 A/B 实测：fused 20-27 ms/tok vs plain 6.7-11.9"
@@ -435,6 +442,7 @@ def main() -> None:
     cfg.readout_dtype = args.readout_dtype            # P9 精度（默认 fp32）
     cfg.encoder_dtype = args.encoder_dtype            # P75：M1 权重精度（平台相关）
     cfg.pc_fused_kernel = (args.m2_kernel == "fused")  # P75：M2 核选择（A/B）
+    cfg.fp8_refresh = max(1, int(args.fp8_refresh))   # P84：fp8 副本刷新间隔
     cfg.accel_readout = args.accel                     # P19 读出设备（默认 auto）
     cfg.nll_sync_every = args.nll_sync_every           # P34 nll 同步周期（默认 1）
     cfg.step_profiling = args.step_profiling           # P35 step 分段计时（默认关）
@@ -639,6 +647,12 @@ def main() -> None:
           f" | build time {time.perf_counter() - t0:.1f}s")
     _rb = getattr(lm.net, "_readout_backend", "numba-cpu")
     if cfg.readout_dtype in ("bf16", "fp16", "fp8", "fp4"):
+        if cfg.readout_dtype == "fp8":
+            print("[readout] compute precision = fp8 forward + fp16 update"
+                  " (P84: fp8 matmul needs Ascend/CUDA; CPU falls back to"
+                  " fp16). 目的不是省访存（更新侧 fp16 使总访存 +42%），而是"
+                  " **保住非目标行更新**：bf16 半 ULP≈2e-4 ≫ |dp|≈1e-6 会把"
+                  " 更新舍掉 → 退化为纯 Hebbian。")
         print(f"[readout] compute precision = {cfg.readout_dtype} "
               f"(checkpoint storage = {args.ckpt_dtype or 'fp32'}); "
               f"NOTE: half precision rounds away the perceptron's non-target-row "

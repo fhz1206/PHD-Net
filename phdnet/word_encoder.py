@@ -150,7 +150,9 @@ class WordTokenizer:
         self.n_sdr = n_sdr
         # P51：预分配缓冲（编码 2×n_sdr、onehot len(tokens)）
         self._enc_buf = np.zeros(2 * n_sdr, dtype=np.float32)
-        self._oh_buf = np.zeros(len(self.tokens), dtype=np.float32)
+        # P84「迭代器用 fp16」：onehot 缓冲 fp16（值 0/1，无损），1B 词表下
+        # 每步 208 KB → 104 KB；`_oh_last` 复用逻辑不变。
+        self._oh_buf = np.zeros(len(self.tokens), dtype=np.float16)
         self._oh_last = -1
         self.n_active = n_active
         self.seed = seed
@@ -200,9 +202,12 @@ class WordTokenizer:
     def onehot(self, idx: int) -> np.ndarray:
         # P51：预分配复用缓冲（1B 词表 = 289 KB/步的分配被消除）。每步只写
         # 目标位并清掉上次的位 → 与 np.zeros+置 1 逐位相同。
+        # P84「迭代器用 fp16」：**onehot 缓冲改 fp16**（值只有 0/1，fp16 无损），
+        # 1B 词表下每步的缓冲/传输 208 KB → 104 KB。消费侧（模型侧 target_idx
+        # 路径与 softmax）都按需要转精度，不受影响。
         t = getattr(self, "_oh_buf", None)
         if t is None:             # 兼容 __new__ 构造路径
-            t = self._oh_buf = np.zeros(len(self.tokens), dtype=np.float32)
+            t = self._oh_buf = np.zeros(len(self.tokens), dtype=np.float16)
             self._oh_last = -1
         last = getattr(self, "_oh_last", -1)
         if last >= 0:

@@ -196,6 +196,9 @@ class PHDNetConfig:
     # 5 次独立核调用。**昇腾 aarch64 实测融合核段 2.4 → 20-27 ms/tok**（疑似
     # prange + fastmath 在该平台退化）→ 保留开关做 A/B，不擅自改默认。
     pc_fused_kernel: bool = True
+    # P84：fp8 forward 副本的重建间隔（步）——量化成本摊到 N 步；N 越大越省，
+    # 但 forward 用的副本越旧（默认 8）。
+    fp8_refresh: int = 8
 
     # O1-4：**皮层式权重初始化**（默认关闭）。脑对应：皮层突触强度呈对数正态/重尾
     # （少数强连接 + 大量弱连接，Song et al. 2005），且兴奋/抑制比 ~80/20（E/I 平衡）。

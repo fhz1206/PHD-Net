@@ -516,12 +516,17 @@ def to_numpy(x, dtype=None):
     """
     if hasattr(x, "detach"):
         x = x.detach().to("cpu")
-        if str(x.dtype) == "torch.bfloat16":
+        if str(x.dtype) in ("torch.bfloat16", "torch.float8_e4m3fn",
+                            "torch.float8_e5m2"):
+            # P84：读出改 fp8 后检查点会再崩一次（同 P81 的族）——numpy 同样没有
+            # 原生 fp8。fp8 走 uint8 位模式、bf16 走 uint16，加载侧按
+            # meta["ckpt_dtype"] 统一 view 回来。
             # 本模块**不 import torch**（torch 是可选依赖：只有读出 accel 路径
             # 才有张量）。P81 直接写 torch.bfloat16 → 纯 numpy 训练时 NameError。
             # 这里惰性导入：bf16 张量存在 ⇒ torch 必然已装。
             import torch as _t                 # noqa: PLC0415
-            x = x.view(_t.uint16)              # 位模式透传（加载侧 view 回）
+            _bits = (_t.uint8 if "float8" in str(x.dtype) else _t.uint16)
+            x = x.view(_bits)                  # 位模式透传（加载侧 view 回）
         x = x.numpy()
     else:
         x = np.asarray(x)
