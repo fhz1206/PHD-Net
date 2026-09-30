@@ -42,7 +42,8 @@ class PHDNet:
                                 cfg.eta_pc, cfg.eta_oja, rng, conn_k=cfg.conn_k,
                                 w_max=cfg.pc_w_max,
                                 lognormal_init=cfg.lognormal_init,                # O1-4
-                                exc_ratio=cfg.exc_ratio)
+                                exc_ratio=cfg.exc_ratio,
+                                fused=getattr(cfg, "pc_fused_kernel", True))       # P75
         # M3 关联核：默认 numpy(+numba)；显式指定或检测到加速器时改用 torch 后端
         # （同一算子语义，覆盖 CPU / CUDA / ROCm(HIP) / 昇腾 NPU）
         # M3 关联核：**只走 numpy(+numba) CPU**（P30 定稿）。

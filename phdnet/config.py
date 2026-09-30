@@ -192,6 +192,10 @@ class PHDNetConfig:
     # 而非稠密全连接矩阵。启用后读出权重以 CSR 承载（每输出单元 k 条存在的入边），
     # 学习规则不变（softmax 交叉熵的末端梯度），仅连接存在性结构改变。
     readout_conn_k: int = 0     # 0 = 稠密读出（旧行为）；>0 = 每输出单元 k 条入边
+    # P75：M2 推理核选择。True = 融合核（P52，x86 快 1.15-2.16×）；False = 原始
+    # 5 次独立核调用。**昇腾 aarch64 实测融合核段 2.4 → 20-27 ms/tok**（疑似
+    # prange + fastmath 在该平台退化）→ 保留开关做 A/B，不擅自改默认。
+    pc_fused_kernel: bool = True
 
     # O1-4：**皮层式权重初始化**（默认关闭）。脑对应：皮层突触强度呈对数正态/重尾
     # （少数强连接 + 大量弱连接，Song et al. 2005），且兴奋/抑制比 ~80/20（E/I 平衡）。
@@ -289,7 +293,7 @@ class PHDNetConfig:
     # ——numpy/BLAS 路径下低精度存储每次都要付上采样转换（8.4 MB 读 + 16.8 MB
     # 写 + 16.8 MB 读），实测比 fp32 直接 GEMV 更慢；bf16 语义在读出侧已由
     # `readout_dtype`（默认 bf16，NPU 原生）落地。`bf16`/`fp16` 可显式指定。
-    encoder_dtype: str = "fp32"
+    encoder_dtype: str = "fp64"
     # P19 读出加速器：auto=有加速器就用（昇腾→ROCm→CUDA→DirectML），否则回落
     # numba CPU 原路径（逐位不变）；cpu/off/numba = 强制原路径；
     # npu/cuda/rocm/dml = 显式设备（不可用则回落并如实报告）。

@@ -376,8 +376,9 @@ class SparsePCStack:
     def __init__(self, n0: int, n1: int, n2: int, eta_pc: float, eta_oja: float,
                  rng: np.random.Generator, w_max: float = 2.0,
                  conn_k: int = 0, lognormal_init: bool = False,
-                 exc_ratio: float = 0.8):
+                 exc_ratio: float = 0.8, fused: bool = True):
         self.eta_pc, self.eta_oja, self.w_max = eta_pc, eta_oja, w_max
+        self.fused = bool(fused)            # P75：融合核 / 原始多核调用（A/B）
         self.n0, self.n1, self.n2 = n0, n1, n2
         k0 = conn_k if conn_k > 0 else max(1, n0 // 8)
         k1 = conn_k if conn_k > 0 else max(1, n1 // 8)
@@ -466,8 +467,24 @@ class SparsePCStack:
         循环内复用。**返回独立数组**（与原版语义相同，`cache` 可安全跨步持有）。
         行级并行沿用 `_csr_matvec` 的 prange 口径。
         """
-        r1, r2, e0, e1 = _pc_infer_fused(self.up0, self.up1, self.dn0,
-                                        self.dn1, s0, n_steps)
+        if self.fused:
+            r1, r2, e0, e1 = _pc_infer_fused(self.up0, self.up1, self.dn0,
+                                            self.dn1, s0, n_steps)
+            return {"s0": s0, "r1": r1, "r2": r2, "e0": e0, "e1": e1}
+        # P75：非融合路径 = P52 之前的原始实现（逐行照抄，语义确定），保留作
+        # A/B 对照——服务器（昇腾 aarch64）实测融合核段 2.4 → 20-27 ms/tok，
+        # 疑似 prange + fastmath 在该平台退化；x86 上融合核快 1.15-2.16×。
+        r1 = np.tanh(_csr_matvec(*self.up0, s0))
+        r2 = np.tanh(_csr_matvec(*self.up1, r1))
+        for _ in range(n_steps):
+            e1 = r1 - _csr_matvec(*self.dn1, r2)
+            d2 = np.clip(_csr_matvec(*self.up1, e1), -0.5, 0.5)
+            r2 = np.tanh(r2 + 0.15 * d2)
+            e0 = s0 - _csr_matvec(*self.dn0, r1)
+            d1 = np.clip(_csr_matvec(*self.up0, e0), -0.5, 0.5)
+            r1 = np.tanh(r1 + 0.15 * d1)
+        e0 = s0 - _csr_matvec(*self.dn0, r1)
+        e1 = r1 - _csr_matvec(*self.dn1, r2)
         return {"s0": s0, "r1": r1, "r2": r2, "e0": e0, "e1": e1}
 
     # ---------- 学习（只更新存在的突触） ----------
