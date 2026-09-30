@@ -126,13 +126,29 @@ class AccelReadout:
                                   dtype=torch.float16)
             self._W8: torch.Tensor | None = None      # 每 fp8_refresh 步重建
             self._fp8_age = 0
-            self._fp8_fallback = str(self.device).split(":")[0] not in (
-                "npu", "cuda")
+            # P85：**运行时能力探测**（设备名判断不可靠）。服务器实测 2026-09-30：
+            # 昇腾 `torch_npu` 也不支持 fp8——`buf.to(dev, non_blocking).to(fp8)`
+            # 抛 "Float8_e4m3fn has not been supported" + ERR01007；CPU torch
+            # 则在 addmv 处抛 dtype 不匹配。两边都要回落，所以改为**构造期真的
+            # 试一次**（1 元素张量，µs 级）：能建 fp8 张量才启用。
+            try:
+                # 探「算子支持」而非「能否建张量」：CPU 能建 fp8 张量但 addmv
+                # 不支持（NotImplementedError），昇腾两者都不支持（ERR01007）。
+                _a = torch.zeros(4, dtype=torch.float8_e4m3fn, device=self.device)
+                _ = _a @ _a                                  # noqa: B018
+                self._fp8_fallback = False
+            except Exception:                              # noqa: BLE001
+                self._fp8_fallback = True
             if self._fp8_fallback:
-                # CPU torch 无 fp8 matmul → 计算精度整体回落 fp16，**tdtype 也
-                # 要跟着回落**（`_staged_to_dev` 用它产出 h，否则 ht 是 fp8 而权重
-                # 是 fp16 → addmv dtype 不匹配）。
+                # 回落 fp16：**tdtype 必须一起回落**（`_staged_to_dev` 用它产出 h，
+                # 否则 ht 是 fp8 而权重是 fp16 → dtype 不匹配）。
                 self.tdtype = torch.float16
+                import warnings
+                warnings.warn(
+                    f"fp8 在设备 {self.device} 上不可用（昇腾/CPU 均不支持）"
+                    f"→ 回落 **fp16**（仍保住非目标行更新，forward 读流量退回"
+                    f" 320 MB）。要真正用 fp8 需 CANN 自定义算子/专用 API。",
+                    RuntimeWarning)
         else:
             self.W = torch.tensor(_init, device=self.device, dtype=self.tdtype)
             self._W8 = None

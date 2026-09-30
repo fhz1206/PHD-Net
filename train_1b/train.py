@@ -198,13 +198,15 @@ def main() -> None:
                          "sft 分片同样适用）。词表扫描不受影响（词表是训练流的"
                          "超集，OOV 恒 0）")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
-    ap.add_argument("--readout-dtype", default="fp8",
+    ap.add_argument("--readout-dtype", default="fp16",
                     choices=["fp32", "fp16", "bf16", "fp8", "fp4"],
-                    help="读出精度。**默认 fp8**（fhz 2026-09-30）：forward 用 "
-                         "fp8 副本（读流量 320→80 MB）+ 更新用 fp16 主副本"
-                         "（保住 |dp|≈1e-6 的非目标行更新，bf16 会把它舍掉 → "
-                         "退化为纯 Hebbian）。⚠ fp8 matmul 仅昇腾/CUDA 可用，"
-                         "CPU 自动回落 fp16。fp32 = 精确规则对照")
+                    help="读出精度。**默认 fp16**（P85, 2026-09-30）：fp8 经实测"
+                         "**昇腾与 CPU 都不支持**（ERR01007 / addmv 无实现）→ 已"
+                         "降级为 fp16；而 bf16 半 ULP≈2e-4 ≫ 非目标行更新 "
+                         "|dp|≈1e-6，会把更新舍掉 → 学习退化为纯 Hebbian"
+                         "（PPL 震荡不降的根因）。fp16 在昇腾有原生 GEMV，且能"
+                         "保住微小更新。fp8 选项保留（运行时探测可用才启用，"
+                         "待 CANN 支持）；fp32 = 精确规则对照")
     ap.add_argument("--torch-compile", dest="torch_compile",
                     action="store_true", default=False,
                     help="P58（fhz 2026-09-29「图优化关了吧」）：默认 OFF——"
@@ -647,12 +649,11 @@ def main() -> None:
           f" | build time {time.perf_counter() - t0:.1f}s")
     _rb = getattr(lm.net, "_readout_backend", "numba-cpu")
     if cfg.readout_dtype in ("bf16", "fp16", "fp8", "fp4"):
-        if cfg.readout_dtype == "fp8":
-            print("[readout] compute precision = fp8 forward + fp16 update"
-                  " (P84: fp8 matmul needs Ascend/CUDA; CPU falls back to"
-                  " fp16). 目的不是省访存（更新侧 fp16 使总访存 +42%），而是"
-                  " **保住非目标行更新**：bf16 半 ULP≈2e-4 ≫ |dp|≈1e-6 会把"
-                  " 更新舍掉 → 退化为纯 Hebbian。")
+        if cfg.readout_dtype == "fp16":
+            print("[readout] compute precision = fp16（P85）。**不是省访存**"
+                  "（与 bf16 同量），而是 **保住非目标行更新**：bf16 半 ULP≈2e-4"
+                  " ≫ |dp|≈1e-6 会把更新舍掉 → 退化为纯 Hebbian。fp8 经实测"
+                  " 昇腾/CPU 均不可用（ERR01007），已降级到这里。")
         print(f"[readout] compute precision = {cfg.readout_dtype} "
               f"(checkpoint storage = {args.ckpt_dtype or 'fp32'}); "
               f"NOTE: half precision rounds away the perceptron's non-target-row "
