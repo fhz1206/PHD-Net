@@ -214,6 +214,30 @@ if NUMBA_OK:                                        # pragma: no cover
         return np.uint8(k + sgn)
 
 
+# P101：整数定点码本（int16 / int32）——**最近格点 = 四舍五入到最近整数**，
+# 不需要任何位技巧，只有一个「取整 + 饱和裁剪」。
+#
+# 取整约定：**RNE（并列取偶）**，与 fp16 的 IEEE RNE / bf16 的 RNE 位截断同源，
+# 也与 numpy `np.rint` 逐位一致（故 numpy 参考与本核可对拍到**逐位相同**的码本）。
+# 不用「四舍五入远离零」是因为那会对恰好 .5 的更新量引入 +0.5 的系统偏置。
+@njit(inline="always")
+def _rint_rne(v):
+    """标量 RNE 取整（numba 标量版；与 numpy `np.rint` 逐位一致）。
+
+    不直接用 `np.rint`：numba 对标量 np.rint 的支持随版本变动，这里用
+    floor + 比较显式实现，行为在任何 numba 版本下都是确定的。
+      · v = 2.5 → floor=2（偶）→ 2；v = 3.5 → floor=3（奇）→ 4（并列取偶）
+      · v = −2.5 → floor=−3（奇）→ −2；v = −1.5 → floor=−2（偶）→ −2
+    """
+    f = np.floor(v)
+    d = v - f
+    if d > 0.5:
+        return f + 1.0
+    if d < 0.5:
+        return f
+    return f if (f - np.floor(f / 2.0) * 2.0) == 0.0 else f + 1.0
+
+
 # P9：量化码本的更新核（fp16/bf16/fp8/fp4）——LUT 反量化 + 位算法重量化。
 if NUMBA_OK:                                        # pragma: no cover
     @njit(cache=True, parallel=True, fastmath=False)
@@ -314,6 +338,80 @@ if NUMBA_OK:                                        # pragma: no cover
                     else:
                         codes[o] = (codes[o] & np.uint8(0xF0)) | np.uint8(q)
 
+    # -----------------------------------------------------------------------
+    # P101 整数定点码本更新核（int16 / int32）
+    #
+    # 语义与 int8 路径完全一致：`w = dequant(codes) − (dp⊗h)·eta` 再重量化，
+    # 差别只在码本是**均匀整数**（无 LUT 除法、无 e/m 位域），故重量化就是
+    # 「除以 scale → RNE 取整 → **饱和裁剪**」。
+    #
+    # 为什么不沿用 int8 的「回绕」语义：int8 的 e4m3fn 域外码会被自然 clamp，
+    # 而**整数码本没有隐式 clamp**——`np.int16(40000)` 在 numpy 里已是 UB/回绕，
+    # 在 numba 里则静默变成负数 → 权重**符号翻转**且幅度仍在码本内，看起来
+    # 「合法」但训练已被静默损坏（这正是 fhz 点名要避免的失败模式）。
+    # 故这里**显式** clip 到 [−32767, +32767] / [−2³¹, 2³¹−1]，绝不依赖溢出行为。
+    # 实测（tests/verifiers/verify_readout_intdtypes.py · T3）：一次 η=1e6 的
+    # 极端更新后，int16 全部码落在 ±32767（= 码本端点）、int32 落在
+    # ±iinfo(int32).max/min，**无一元素回绕**（回绕会让符号翻转且幅度仍在
+    # 码本内 → 看起来「合法」但训练已被静默损坏）。
+    # -----------------------------------------------------------------------
+    @njit(cache=True, parallel=True, fastmath=False)
+    def _ro_q_update_int16(codes, dp, h, eta, n_in, wscale):
+        """int16 定点码本（2 B/权重）：LUT 反量化 → 更新 → RNE 取整 →
+        **饱和裁剪**到 ±32767（按行并行）。
+
+        存储/编码沿用既有码本约定：**uint16 码 = 符号位(bit15) | 幅值(bit0-14)**，
+        故可直接索引 65536 项的 `lut_int16`，与 fp16/bf16 的 `lut[codes]` 同形。
+        正域幅值格点 0…32767（**32768 档**）× 符号 = 65536 个可表示数值。
+        动态范围 = per-tensor scale 归一后的 ±32767 格点（≈ ±1 权重域）；
+        饱和策略 = **显式 clip**（见上方注释，绝不依赖 int16 溢出行为）。
+        """
+        n_out = codes.shape[0] // n_in
+        for i in prange(n_out):
+            e = dp[i]
+            if e == 0.0:
+                continue
+            base = i * n_in
+            for j in range(n_in):
+                o = base + j
+                w = lut_int16[codes[o]] * wscale - (e * h[j]) * eta
+                q = _rint_rne(w / wscale)
+                if q > 32767.0:
+                    q = 32767.0                # 饱和（不依赖 int16 溢出行为）
+                elif q < -32767.0:
+                    q = -32767.0
+                if q < 0.0:
+                    codes[o] = np.uint16(np.int64(-q) | 0x8000)
+                else:
+                    codes[o] = np.uint16(np.int64(q))
+
+    @njit(cache=True, parallel=True, fastmath=False)
+    def _ro_q_update_int32(codes, dp, h, eta, n_in, wscale):
+        """int32 定点码本（4 B/权重，无 LUT —— 2³² 格点的 fp32 LUT 是 17 GB，
+        **不可能物化**，故本核完全无查表：反量化 = `code·scale` 一次乘）。
+
+        动态范围用途：int16 在 scale 归一后只覆盖 ±32767 个格点（约 ±1 归一化
+        单位），对权重尺度跨数量级的场景会过早饱和；int32 有 2³¹ 个格点，
+        在同一个 per-tensor scale 下动态范围是 int16 的 65536 倍。
+        饱和策略与 int16 同构，阈值换成 iinfo(int32)（下界 −2³¹ 比上界
+        2³¹−1 多一格，码本**不对称**，故两端都要显式 clip）。
+        """
+        n_out = codes.shape[0] // n_in
+        for i in prange(n_out):
+            e = dp[i]
+            if e == 0.0:
+                continue
+            base = i * n_in
+            for j in range(n_in):
+                o = base + j
+                w = np.float64(codes[o]) * wscale - (e * h[j]) * eta
+                q = _rint_rne(w / wscale)
+                if q > 2147483647.0:
+                    q = 2147483647.0
+                elif q < -2147483648.0:
+                    q = -2147483648.0
+                codes[o] = np.int32(q)
+
     @njit(cache=True, parallel=True, fastmath=False)
     def _ro_q_matvec_u16(codes, lut, h, n_in, wscale):
         n_out = codes.shape[0] // n_in
@@ -355,10 +453,30 @@ if NUMBA_OK:                                        # pragma: no cover
                 s += lut[c] * wsc[j >> 4] * h[j]
             y[i] = s
         return y
+
+    @njit(cache=True, parallel=True, fastmath=False)
+    def _ro_q_matvec_i32(codes, h, n_in, wscale):
+        """int32 前向：**无 LUT**（2³² 格点的表无法物化）——反量化 = `code·scale`。
+
+        累加与 `_ro_q_matvec_u16` 同为 fp64 顺序累加，语义一致；`codes[o]` 是
+        int32，乘 float64 的 wscale 后直接累加，不经过任何中间 fp32 舍入
+        （int16 走 fp32 LUT 故有一层 f32 舍入，这是两者唯一的数值差异来源）。
+        """
+        n_out = codes.shape[0] // n_in
+        y = np.empty(n_out, dtype=np.float64)
+        for i in prange(n_out):
+            s = 0.0
+            base = i * n_in
+            for j in range(n_in):
+                s += (np.float64(codes[base + j]) * wscale) * np.float64(h[j])
+            y[i] = s
+        return y
 else:                                               # pragma: no cover
     (_ro_q_update_fp16, _ro_q_update_bf16, _ro_q_update_fp8,
      _ro_q_update_fp4) = (None, None, None, None)
+    _ro_q_update_int16 = _ro_q_update_int32 = None
     _ro_q_matvec_u16 = _ro_q_matvec_u8 = _ro_q_matvec_fp4 = None
+    _ro_q_matvec_i32 = None
 
 _RO_STATE = {"ok": None}      # None=未探测 / True=可用 / False=回退 numpy
 
@@ -383,13 +501,26 @@ _RO_STATE = {"ok": None}      # None=未探测 / True=可用 / False=回退 nump
 # 误导。更重要的是：**P92 把它们当 fp8 在加速器上禁用了，等于误禁了昇腾
 # 真正支持的 INT8 Cube 路径**。现在正名并按设备能力重新裁决。
 _RO_DTYPE_ALIASES = {"fp8": "int8", "fp4": "int4"}      # 旧名 → 新名（兼容）
-RO_DTYPES = ("fp32", "fp16", "bf16", "int8", "int4")
+RO_DTYPES = ("fp32", "fp16", "bf16", "int8", "int4", "int16", "int32")
+
+# P101 整数定点码本的量化上限（= 格点数）。饱和裁剪与量化都用这两个常量，
+# 保证「核内裁剪阈值」与「numpy 参考的 np.clip 边界」是同一个数。
+INT16_QMAX = 32767.0        # 2^15 − 1
+INT32_QMAX = 2147483647.0   # 2^31 − 1 = iinfo(int32).max
+INT32_QMIN = -2147483648.0  # −2^31 = iinfo(int32).min
 
 
 def _build_lut(fmt: str) -> np.ndarray:
     """格式 → (反量化 LUT[f32], 正格点 lat[f32 升序·含 +0], 符号位)。
 
     lat = lut[0:有限正上界]——码 0 = +0.0，格点下标即存储码（正数域）。
+
+    ⚠ **int32 不建 LUT**（P101）：2³² 个格点的 fp32 表是 4 × 2³² B = **17 GB**，
+    物化它本身就是 OOM，而且查表并不会比一次整数乘更快。故 int32 的
+    `(lut, lat, sb) = (None, None, 0)`——这是**有意的哨兵值**，不是桩：
+    `quantize_to` / `dequantize_from` / `Readout.__call__` / 更新 dispatch
+    全部对 int32 走「直接整数换算」分支（`codes·scale` / `clip(rint(w/scale))`），
+    从不索引 lut。int16 则**建** 65536 项表（256 KB，可接受），与 fp16/bf16 同形。
     """
     if fmt == "fp16":
         # 位型重解释（⚠ 不是数值转换——码 c 的 LUT 值 = 以 c 为 fp16 位型的浮点值）
@@ -415,6 +546,16 @@ def _build_lut(fmt: str) -> np.ndarray:
         pos = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
         lut = np.concatenate([pos, -pos]).astype(np.float32)       # 全 16 码（15 = -0）
         b, sb = 8, 3
+    elif fmt == "int16":
+        # P101：**均匀定点**码本。存储码 = 符号位(bit15) | 幅值(bit0-14)，
+        # 幅值域 0..32767 → 正域 **32768 个格点**（0, s, 2s, …, 32767·s），
+        # 乘 per-tensor scale 后覆盖 ±32767·s（scale 归一后 ≈ ±1 的权重域，
+        # 对应权重 ∈ [−3σ, 3σ] 这类分布）。lut 65536 项 fp32 = 256 KB。
+        mag = np.arange(32768, dtype=np.float32)
+        lut = np.concatenate([mag, -mag]).astype(np.float32)       # 码 0x8000 = −0
+        b, sb = 0x8000, 15
+    elif fmt == "int32":
+        return None, None, 0                        # 见 docstring：17 GB 表，不建
     else:
         raise ValueError(f"未知精度格式: {fmt}")
     lut = np.ascontiguousarray(lut)
@@ -428,6 +569,7 @@ lut_fp16, lat_fp16, sb_fp16 = _build_lut("fp16")
 lut_bf16, lat_bf16, sb_bf16 = _build_lut("bf16")
 lut_fp8, lat_fp8, sb_fp8 = _build_lut("int8")
 lut_fp4, lat_fp4, sb_fp4 = _build_lut("int4")
+lut_int16, lat_int16, sb_int16 = _build_lut("int16")   # P101：int16 建表（int32 不建）
 
 
 def _q_tables(fmt: str):
@@ -444,7 +586,27 @@ def quantize_to(fmt: str, x: np.ndarray) -> np.ndarray:
     x = np.ascontiguousarray(x, dtype=np.float32).ravel()
     if fmt == "fp32":
         return x
+    if fmt == "int32":
+        # P101：无 LUT 路径 —— 直接整数换算。scale = 1.0（per-tensor scale 由
+        # 调用方在 _set_dense 里先除掉），q = clip(rint(w), ±2³¹)。
+        # float64 中转：int32 的格点跨度到 2³¹，fp32 的 24 位尾数不足以在最
+        # 大量级上分辨相邻格点（ulp 在 2³¹ 处是 256），故 rint 前先升到 fp64。
+        q = np.rint(x.astype(np.float64))
+        q = np.nan_to_num(q, nan=0.0, posinf=INT32_QMAX, neginf=INT32_QMIN)
+        return np.clip(q, INT32_QMIN, INT32_QMAX).astype(np.int32)
     ax = np.abs(x)
+    if fmt == "int16":
+        # P101：均匀格点 → 最近邻 = rint（无需 searchsorted；searchsorted 版
+        # 对 32768 点的均匀 lat 反而更慢，且并列时的 tie-break 需额外分支）。
+        # 存储码 = 符号位 | round(|x|)，故先取绝对值 rint 再拼符号。
+        # **零规范化**：幅值 rint 到 0 时符号位强制为 0（−0.0 编码为码 0x8000、
+        # +0.0 编码为码 0x0000，两者反量化数值相同但码本不同 → 会让核与 numpy
+        # 参考在「微小负更新」上不一致）。规则取「幅值为 0 则无符号」，与更新核
+        # `_ro_q_update_int16` 的 `if q < 0.0` 判据（−0.0 < 0.0 为 False）一致。
+        m = np.rint(np.abs(x).astype(np.float64))
+        m = np.minimum(m, INT16_QMAX)
+        return (m.astype(np.uint16)
+                | np.where((x < 0) & (m > 0.0), np.uint16(0x8000), np.uint16(0)))
     idx = np.searchsorted(lat, ax)
     idx = np.clip(idx, 0, len(lat) - 1)
     left = np.maximum(idx - 1, 0)
@@ -455,7 +617,7 @@ def quantize_to(fmt: str, x: np.ndarray) -> np.ndarray:
     if fmt == "int4":
         codes = codes.astype(np.uint8).reshape(-1, 2)
         return (codes[:, 0] | (codes[:, 1] << 4)).astype(np.uint8)
-    return codes.astype(np.uint16 if fmt in ("fp16", "bf16") else np.uint8)
+    return codes.astype(np.uint16 if fmt in ("fp16", "bf16", "int16") else np.uint8)
 
 
 def dequantize_from(fmt: str, codes: np.ndarray, n_elem: int | None = None) -> np.ndarray:
@@ -463,6 +625,11 @@ def dequantize_from(fmt: str, codes: np.ndarray, n_elem: int | None = None) -> n
     lut, lat, sb = _q_tables(fmt)
     if fmt == "fp32":
         return codes
+    if fmt == "int32":
+        # P101：无 LUT —— 反量化就是一次整数→浮点转换。必须 fp64：int32 的全部
+        # 整数在 fp64 的 53 位尾数内**精确**可表示（fp32 只有 24 位，2³¹ 附近的
+        # ulp 是 256，会把相邻码合并 → 精度凭空丢掉 ~8 位）。
+        return codes.astype(np.float64)
     if fmt == "int4":
         lo = (codes & 0xF).astype(np.int32)
         hi = (codes >> 4).astype(np.int32)
@@ -660,6 +827,12 @@ class Readout:
         fp4（P12，2026-09-28）：**MX 块缩放**——每 16 元素一块、块内 max 映射到
         e2m1 格点上限 6（`self._wscales` (n_out, n_blk) fp32），各块小权重也能
         用满格点集（替代已废弃的逐张量缩放，原实现 +5.88% 已按 fhz 指令重写）。
+
+        P101：int16/int32 用 **per-tensor scale = max|W| / QMAX**，即把张量最大
+        幅值精确映到码本端点（格点用满、不浪费动态范围）。这与 int8/int4 的
+        `_wscale = 1.0`（码本自带 fp 语义、动态范围由格式固定）不同——整数码本
+        的格点是「等距无量纲整数」，必须由外部 scale 赋予物理量纲。全零张量取
+        scale = 1.0（避免除零；此时全部重量化到码 0）。
         """
         if self.qfmt is None:
             self._W = np.ascontiguousarray(W, dtype=np.float32)
@@ -674,6 +847,12 @@ class Readout:
             if self.qfmt == "int4":
                 self._wscale = 1.0
                 self._codes, self._wscales = quantize_fp4_mx(W)
+            elif self.qfmt in ("int16", "int32"):
+                qmax = INT16_QMAX if self.qfmt == "int16" else INT32_QMAX
+                amax = float(np.abs(W).max())
+                self._wscale = (amax / qmax) if amax > 0.0 else 1.0
+                self._wscales = None
+                self._codes = quantize_to(self.qfmt, W / self._wscale)
             else:
                 self._wscale = 1.0
                 self._wscales = None
@@ -786,11 +965,17 @@ class Readout:
         if self.conn_k > 0:                     # 稀疏：只遍历存在的边
             return _csr_matvec(*self._csr, h)
         if self.qfmt is not None:               # P9：量化码本内联反量化 matvec
+            # P101：int16 复用 `_ro_q_matvec_u16`（存储码就是 uint16 的
+            # 符号|幅值码，lut 同形，**逐位走同一条已验证的核**）；
+            # int32 无 LUT，走 `_ro_q_matvec_i32`（code·scale 直接换算）。
             K = {"fp16": _ro_q_matvec_u16, "bf16": _ro_q_matvec_u16,
-                 "int8": _ro_q_matvec_u8, "int4": _ro_q_matvec_fp4}[self.qfmt]
+                 "int8": _ro_q_matvec_u8, "int4": _ro_q_matvec_fp4,
+                 "int16": _ro_q_matvec_u16, "int32": _ro_q_matvec_i32}[self.qfmt]
+            hh = h.astype(np.float32, copy=False)
+            if self.qfmt == "int32":
+                return K(self._codes, hh, self._n_in, self._wscale)
             scale = self._wscales if self.qfmt == "int4" else self._wscale
-            return K(self._codes, self._lut, h.astype(np.float32, copy=False),
-                     self._n_in, scale)
+            return K(self._codes, self._lut, hh, self._n_in, scale)
         if self._W.dtype == np.float32:         # fp32：BLAS sgemv（升精度返回）
             return (self._W @ h.astype(np.float32, copy=False)).astype(np.float64,
                                                                        copy=False)
@@ -810,8 +995,18 @@ class Readout:
             return True
         if eta == 0.0:
             return True
-        scr = _q_scratch()
         n = self._n_in
+        # P101：int16/int32 的更新核**不需要位技巧 scratch**（RNE 取整 + 饱和
+        # 裁剪都是纯算术），故在这两条分支前提前返回，不分配 `_q_scratch()`。
+        if self.qfmt == "int16":
+            # P101：int16/int32 的更新核**不需要位技巧 scratch**（RNE 取整 + 饱和
+            # 裁剪都是纯算术），故提前返回，连 `_q_scratch()` 都不分配。
+            _ro_q_update_int16(self._codes, dp32, h32, e32, n, self._wscale)
+            return True
+        if self.qfmt == "int32":
+            _ro_q_update_int32(self._codes, dp32, h32, e32, n, self._wscale)
+            return True
+        scr = _q_scratch()
         if self.qfmt == "fp16":
             _ro_q_update_fp16(self._codes, scr, dp32, h32, e32, n)
         elif self.qfmt == "bf16":
