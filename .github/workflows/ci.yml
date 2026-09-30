@@ -23,7 +23,9 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy numba pyarrow psutil
+          # 版本约束：最新 numpy 2.3+ 与部分 numba 组合会 import 失败（首次 CI 运行的
+          # 诊断证实 import 阶段即崩）→ 锁定 numba 兼容窗口
+          pip install "numpy<2.3" "numba>=0.61" pyarrow psutil
           # CPU 版 torch：否则 t_torch_equivalence / t_torch_model_smoke 会以「未安装
           # torch」被跳过，两个覆盖点在 CI 上从未真正执行。CPU 轮子约 200MB。
           pip install torch --index-url https://download.pytorch.org/whl/cpu
@@ -40,8 +42,11 @@ jobs:
       - name: 诊断（对拍失败时打印环境与重跑 traceback）
         if: failure()
         run: |
-          python -c "import sys; print('python', sys.version)"
-          python -c "import numpy, numba, pyarrow, torch; print('numpy', numpy.__version__, '| numba', numba.__version__, '| pyarrow', pyarrow.__version__, '| torch', torch.__version__)"
+          python -c "import sys; print('python', sys.version)" || true
+          python -c "import numpy; print('numpy', numpy.__version__)" || true
+          python -c "import numba; print('numba', numba.__version__)" || true
+          python -c "import pyarrow; print('pyarrow', pyarrow.__version__)" || true
+          python -c "import torch; print('torch', torch.__version__)" || true
           echo '--- 重跑 verify_parallel_consistency（完整 traceback）---'
           python tests/verifiers/verify_parallel_consistency.py; echo "exit=$?"
           echo '--- 重跑 verify_seg_equiv ---'
@@ -63,16 +68,16 @@ jobs:
       - name: Install torch (CPU) + deps
         run: |
           python -m pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install numpy
+          pip install torch "numpy<2.3" --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
       - name: Device probe + readout bench (CPU 参考)
         run: python tools/bench_accel.py --steps 20
 
       - name: 诊断（bench 失败时打印环境与重跑 traceback）
         if: failure()
         run: |
-          python -c "import sys; print('python', sys.version)"
-          python -c "import torch, numpy; print('torch', torch.__version__, '| numpy', numpy.__version__)"
+          python -c "import sys; print('python', sys.version)" || true
+          python -c "import torch; print('torch', torch.__version__)" || true
+          python -c "import numpy; print('numpy', numpy.__version__)" || true
           echo '--- 重跑 bench_accel（完整 traceback）---'
           python tools/bench_accel.py --steps 20; echo "exit=$?"
       - name: STDP torch 等价性自检
