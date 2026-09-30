@@ -1,105 +1,126 @@
-# phdnet.backends —— 硬件后端子包
+# `phdnet.backends` —— 硬件后端子包
 
-CUDA / ROCm / CANN·昇腾 NPU / DirectML / CPU（P10 目录化，P30 定稿，P40–P52 增补，2026-09-29）。
+> **本目录只放硬件后端。** 子包用法与索引；全局结论见
+> `docs/PHD-Net_硬件后端适配报告.md`（后端矩阵、昇腾踩坑、迁移路径）。
+> 性能数字见 `docs/PHD-Net_性能评估与迭代方案.md`（唯一出处，本文不复制）。
+> **数据截止**：2026-09-30（P84：读出默认 fp8 forward + fp16 更新）。
 
-## 当前文件
-
-| 文件 | 内容 |
-|---|---|
-| `accel_readout.py` | **生产加速读出** `AccelReadout`（P19/P28：auto 选设备、`addmm_` rank-1 AXPY 更新、设备侧 (h,y) 缓存、`W_cpu`/`load_W` 检查点接口）+ `pick_readout_backend`（auto 择优/不兼容回落并记原因）。P40 起训练步走设备直通（见下"AccelReadout 训练直通"）。P44 起 `torch_compile_mode` 默认 `"default"` |
-| `multi_device.py` | 多卡（P14）：`resolve_devices` / `plan_parallel` / `MultiDeviceReadout`（读出列并行）/ `capability_report`（后端×设备能力矩阵） |
-| `torch_lm.py` | 仅存 `resolve_device`（设备解析；auto：昇腾→ROCm→CUDA→DirectML→CPU）。其余（完整 torch 版 PHD-Net）已随 P30 删除 |
-| `torch_backend.py` | 仅存 `probe_devices`（设备探针）+ `bench_readout`（读出基准，P29 修正：设备同步 + dtype 参数 + 等效带宽 GB/s + 默认测生产对象，默认 V=73,958） |
-
-## 关键口径
-
-- **读出加速只有一个实现**（`AccelReadout`）；旧 `TorchReadout`/`TorchSTDPCore`/
-  `selftest_torch` 与整套 torch 版 PHD-Net 已随 P30 删除（权重不通用、缺 7 项机制、
-  从未进生产）。
-- 等价性判据：跨实现/跨设备用**容差**（归约顺序不同，max|Δ| ≈ 4e-06 量级），
-  不宣称逐位；对拍脚本 `tests/verifiers/verify_accel_readout.py`（含 A4 接口
-  完整性扫描）。
-- `bench_accel.py` 报**等效带宽 GB/s**（读出是 GEMV，带宽是唯一可跨平台比较的指标）。
-- 半精度（fp16/bf16）有机制性代价：非目标行更新量 ≈1e-6 < fp16 半 ULP →
-  被舍入丢弃，学习规则退化为纯 Hebbian；切换前须在现行 eta=0.15 下重测 PPL。
-
-## AccelReadout 训练直通（P36/P40，P44/P45/P52 演进）
-
-- **训练步设备直通**：`model.step` 对加速后端走 `forward_dev(h)`（设备张量直通，
-  零 D2H）+ `target_idx`（int，onehot 在**设备上**构造，省 289 KiB H2D/步）。
-  推理/评估路径保持 numpy。
-- **识别标志（接口纪律）**：用类属性 `AccelReadout._is_accel = True` 显式标识，
-  **不要用 `hasattr(readout, 'forward_dev')` 猜**——numba Readout 也有同名旧接口，
-  曾导致误走设备路径崩溃（P40 教训）。
-- **融合步核**：P38 `_train_step_core(y32, ht, t32, correct, eta)` 是融合候选
-  （softmax/nll/addmm_ 一体），**接收前向缓存的 y32，不重复 matvec**。
-- **P6 感知器 dp 复用**（P45）：直接复用 softmax 输出 p（`p[c] -= 1` 就地），
-  不再 `zeros_like` 分配。
-- **torch.compile（P44/P45 定稿）**：`torch_compile_mode` 默认 **"default"**
-  （只融合 kernel，不启用 cudagraphs）。`reduce-overhead` 与本实现**本质冲突**：
-  W 每步原地更新（`W.addmm_`）→ cudagraph 拒绝 mutate 输入 → 每步打印
-  "skipping cudagraphs due to mutated inputs" 并静默回退；W 原地更新是硬约束
-  （改非原地会让流量翻倍），故不修冲突、只锁默认值。
-- **P45 实测**：修掉 P40 引入的 `zeros_like` 分配后，compile **开快 15%**
-  （26.34 vs 30.98 ms/tok，本机 400-token smoke）。修之前测是反向的——
-  教训：**A/B 必须在最终代码上重测**。
-
-## M2 融合核（P52，`phdnet/sparse_pc.py::_pc_infer_fused`）
-
-- `@njit(cache=True, nogil=True, parallel=True, fastmath=True)`：把 5 次
-  `_csr_matvec` + n_steps 循环融进 1 次调用；中间数组核内一次分配 + 复用；
-  返回独立数组（cache 跨步语义不变）。
-- 实测（smoke 档 PC 栈）：n_steps=1 **2.10×**，n_steps=3 **2.16×**。
-- ⚠ **容差一致（1 ulp），非逐位**：融合后编译器 fastmath 重结合决策与逐算子版
-  不同，已如实记录待裁决——符合"容差不宣称逐位"的总体口径。
-
-## fastmath 实验（P39，负结果已记录）
-
-- 生产并行融合核（parallel=True）加 fastmath **无收益**（50.62 vs 40.85 ms——
-  带宽饱和的广播乘加，浮点严格性不是瓶颈）。
-- CPU numba 读出核已带宽饱和（43 GB/s ≈ DDR4 上限），不必再追浮点微优化。
-
-## numba 缓存（P39）
-
-- `NUMBA_CACHE_DIR=outputs/numba_cache` 持久化（train/infer/train_rl 顶部设置）；
-  `readout.py` 7 个 inline-always 核补 `cache=True`（冷启动 3.96→2.60s）。
-
-## 周边配套（子包外，但属同一批变更）
-
-- **telemetry（P41）**：`phdnet/telemetry.py::Telemetry`——CPU/RAM/NPU 利用率/
-  HBM/CS 率（非阻塞）；IPC 需 perf（Python 拿不到，诚实返回 None）。
-- **三源采样器（P49）**：`tools/fetch_ms.py`（web/code/math，
-  `--plan web=3,code=2,math=1`，零原始落盘，断点续跑）。
-- **fast 门禁**：9/9 通过。
+支持的平台：**numba CPU（生产主力）/ CANN·昇腾 NPU / CUDA / ROCm / DirectML**。
 
 ---
 
-## 2026-09-29 昇腾实测增补（P55–P73）
+## 一、文件索引
 
-**踩坑顺序（都是「第一次真机跑才暴露」）**：
+| 文件 | 公共 API | 用途 |
+|---|---|---|
+| `accel_readout.py` | `AccelReadout`、`pick_readout_backend(cfg, n_h, n_out, rng)`、`resolve_accel_device(spec)` | **生产加速读出**。`pick_readout_backend` 是模型侧唯一入口：按 `cfg.accel_readout` 选路，不可用时回落 numba 并记原因 |
+| `multi_device.py` | `resolve_devices`、`probe_multi`、`shard_ranges`、`plan_parallel`、`capability_report`、`configure_host_threads`、`MultiDeviceReadout` | 多卡（读出**列并行**）、分片计划、能力矩阵 |
+| `torch_backend.py` | `probe_devices()`、`bench_readout(device, V, H, dtype, …)` | 设备探针（诚实降级 + 告警）；读出基准（**含设备同步与等效带宽 GB/s**，P29 修正版，默认 V=73,958 = 1B 真实词表） |
+| `torch_lm.py` | `resolve_device(device, allow_fallback)` | 仅存设备解析。auto 择优顺序：**昇腾 → ROCm → CUDA → DirectML → CPU**。其余（整套 torch 版 PHD-Net）已随 P30 删除 |
 
-| # | 现象 | 根因 | 位置 |
-|---|---|---|---|
-| P55 | `FakeTensor - None` 崩 dynamo | P45 的「就地改 p」只写在 **eager 分支**，融合核漏改；旧验证从不传 `target_idx` | `accel_readout.py::_train_step_core` |
-| P57 | NPU/HBM 遥测恒 `--` | `Telemetry()` 无参构造 → `device=""` → 加速器分支永不触发（P41 遗留） | `telemetry.py` |
-| P58 | CPU 忙、NPU 空闲 | 每步 `.item()`（`nll_sync_every` 默认 1）+ pageable H2D 阻塞 | `train.py` / `_staged_to_dev` |
-| P63 | AI Core% 仍 `--` | `npu-smi` 不在非交互 shell 的 PATH；解析又依赖该机没有的 Bus-Id 列 | `telemetry.py` |
-| P71 | CS/s 250 万–600 万 | numba/OpenMP 线程**无核心亲和性**，核间漂移 | `--omp-proc-bind`（新，默认开） |
-| P73 | 同上 + 只用 1.1–3.2 核 | `*_NUM_THREADS` 从未限 → OpenBLAS 拉 **191 线程**跑 1024×2048 sgemv | `train.py`（`import numpy` 之前设） |
-| P74 | 撤 `OMP_PLACES=cores` 后 M2 仍慢 → 撤掉 | 191 核 place 表让线程池每次同步遍历（CS/s 650 万） | 只保留 `OMP_PROC_BIND=close` |
-| P76 | M1 慢 70× 的两次误判 | ①fp32 在 aarch64 病态；②混合 dtype 脱离 BLAS | `--encoder-dtype` 开关 + 输入 dtype 跟随权重 |
-| P77 | **平台自适应 GEMV** | aarch64 numpy 对 1024×2048 单行 GEMV 病态（fp32/fp64 都慢） | `_gemv_rows`（aarch64）/ BLAS（x86） |
-| P81 | bf16 检查点崩 | numpy 无 bf16 | `to_numpy` 存 uint16 位模式（加载侧 P46 解码） |
-| P82/P83b | 两次可选依赖边界事故 | `_correct_pinned` 未定义（补丁静默 no-op）、`to_numpy` 引用未 import 的 torch | 惰性 import + getattr 防御 |
+`__init__.py` 导出：`AccelReadout`、`pick_readout_backend`、`resolve_accel_device`、
+`bench_readout`、`probe_devices`、`resolve_device`。
 
-**已确立的配置口径**：
-- `--nll-sync-every` **默认 8**（设备侧累积 → CPU/NPU 重叠）；
-- `--torch-compile` **默认关**（inductor 惰性编译，首次失败永久回落 eager）；
-- `--numba-threads` 默认 8、**BLAS 线程同为 8**、OMP 绑核默认开；
-- h 的 H2D 走 pinned 暂存 + `non_blocking`（4 槽 + Event 覆写保护）；
-- 遥测的 NPU% 走 `npu-smi`（**不能**用 `torch.npu.utilization()`，它同步设备流）；
-- **bf16 读出有机制代价**：非目标行更新被舍入 → 纯 Hebbian；要精确规则用
-  `--readout-dtype fp32` + `--ckpt-dtype bf16`（存储仍半精度）。
+---
 
-**验证入口**：`tests/verifiers/verify_accel_readout_p55.py`（2×2 矩阵 9/9）、
-`verify_ltm_kernels.py`（recall 全链路 10/10）、`verify_pc_learn_fused.py`（12/12）。
+## 二、怎么用
+
+### 训练 / 推理入口
+
+```bash
+python train_1b/train.py --accel auto     # auto=有加速器就用，否则回落 numba CPU
+python train_1b/infer.py  --accel auto
+python train_1b/train.py --accel npu       # 显式指定设备（不可用则回落并记原因）
+python train_1b/train.py --devices auto    # 多卡：读出列并行（与 --accel 正交）
+```
+
+**确认加速是否真的生效**：看启动日志的 `[读出] 后端=accel:<设备>` / `numba-cpu`；
+回落时同行打印 `fallback reason: <原因>`。**不要**用"探测到设备"判断——见 §四。
+
+### 诊断与基准
+
+```bash
+python tools/backend_probe.py     # 探测层：各平台 ok / count / name
+python tools/accel_doctor.py      # 试分配 + 一次前向 matvec，验证设备真的能算；环境矩阵
+python tools/accel_doctor.py --V 20000 --H 3072    # 显存不足时缩小规模
+python tools/bench_accel.py       # 读出基准，报等效带宽 GB/s（跨平台唯一可比指标）
+```
+
+---
+
+## 三、关键口径
+
+| 口径 | 内容 |
+|---|---|
+| **只迁移读出** | 加速的正确姿势是只迁移 M6 读出，**不维护平行实现**。P30 已删除整套 torch 版 PHD-Net（约 1,400 行）：权重不通用、缺 7 项机制、从未进生产 |
+| **回落 + 记原因**（P19） | 无加速器 / torch 缺失 / 配置不兼容 / 构造异常 → 回落原 `Readout`（**默认路径逐位不变**），原因写在 `_accel_fallback_reason`，启动日志打印。**不静默** |
+| **未实现配置 fail-fast**（P19） | `readout_hidden>0`（两级读出）、`readout_conn_k>0`（稀疏读出）等路径加速后端**未实现** → **显式回落并记原因**，绝不"能跑但语义不同" |
+| **完整调用面对齐**（P23 教训） | `AccelReadout` 必须对齐 `Readout` 的全部访问面：`W` / `learn_softmax` / `learn` / `__call__` / `n_synapses` / `conn_k` / `hidden` / `stats()` / `W_cpu` / `load_W`。缺一项会在**生产保存检查点**时才崩 |
+| **等价性判据** | 跨实现 / 跨设备只宣称**容差一致**（`atol/rtol`，归约顺序不同）；**同设备**分片路径可逐位。`bench_accel.py` 报**等效带宽 GB/s**（GEMV 的唯一跨平台可比指标） |
+| **numba 只能编译到 CPU** | 物理限制。加速器机器上生产主循环仍跑 CPU，日志里的"numba nogil 线程 ×N"指 CPU 线程。上加速器的唯一路径 = `--accel auto` 让读出走 `AccelReadout` |
+
+### 精度（现行默认 fp8，P84）
+
+| 项 | 口径 |
+|---|---|
+| 默认 | `--readout-dtype fp8`：**forward 用 fp8_e4m3fn 副本**（1B 档读 320 → 80 MB，`--fp8-refresh` 默认 8 步重建）+ **更新用 fp16 主副本** |
+| 动机 | **不是省访存**（更新侧 fp16 使总访存 +42%），而是**学习精度**：bf16 半 ULP ≈ 2e-4 ≫ 非目标行更新 \|dp\| ≈ 1e-6 → 更新被舍 → 退化为纯 Hebbian |
+| 设备边界 | fp8 matmul **仅昇腾 / CUDA**；CPU torch **自动回落 fp16 主副本**（`tdtype` 同步回落，否则 `addmv` dtype 不匹配），只告警一次 |
+| 检查点 | `to_numpy` 对 bf16/fp8 存**位模式**（uint16 / uint8），加载侧按 `ckpt_dtype` 解码闭环（numpy 无原生 bf16，不这样存会崩） |
+| 其它 | M1 编码器默认 **fp64**（昇腾 aarch64 numpy GEMV 病态 → 平台自适应走自写 numba 核，x86 走 BLAS）；分词 / onehot 缓冲 fp16（值域 0/1，无损） |
+
+各精度的 PPL / 带宽数字见《性能评估与迭代方案》。
+
+---
+
+## 四、接口纪律（踩过的坑，改代码前先读）
+
+1. **用类属性 `AccelReadout._is_accel = True` 标识加速后端**——
+   **不要用 `hasattr(readout, 'forward_dev')` 猜**：numba `Readout` 也有同名旧接口，
+   曾导致误走设备路径崩溃（P40 教训）。
+2. **`torch.compile` 是惰性编译**（P58）：`torch.compile()` 构造期不编译、**首次调用**才
+   编译 → 首次失败**永久回落 eager + 告警**；`--torch-compile` **默认关**。
+   `reduce-overhead`/cudagraphs 与本实现**本质冲突**（W 每步原地 mutate 输入）→ 只锁
+   `torch_compile_mode="default"`，不修冲突。
+3. **融合步核必须逐行镜像 eager 路径**（P55）：`target_idx` 路径的"就地改 p"曾只写在 eager
+   分支，`torch.compile` 融合核漏改 → NPU 首跑即崩 `FakeTensor - None`。
+4. **可选依赖边界要惰性 import + `getattr` 防御**（P82/P83b）：`_correct_pinned` 未定义曾
+   让补丁静默 no-op；`to_numpy` 引用未 import 的 torch 曾直接崩。
+5. **`learn_softmax` 的 `accumulate` 参数当前未被使用**：加速后端会静默忽略 minibatch 梯度
+   累积。当前默认 1 → 无行为差异，**启用前必须实现或显式拒绝**。
+6. **x86 的性能结论不构成证据**：M1 fp32、M2 融合核、`OMP_PLACES=cores` 三项在昇腾上分别
+   慢 70× / 8–13× / 8×。跨平台改动必须在目标机器复测。
+
+---
+
+## 五、昇腾实测坑位速查（P55–P83）
+
+详细根因与处置见 `docs/PHD-Net_硬件后端适配报告.md` §八。
+
+| # | 现象 | 根因一句话 |
+|---|---|---|
+| P55 | NPU 首跑崩 `FakeTensor - None` | 融合核漏改 `target_idx` 分支 |
+| P57/P63 | NPU / HBM / AI Core% 恒 `--` | `Telemetry()` 无参构造 + `npu-smi` 不在非交互 shell 的 PATH + 解析依赖该机没有的 Bus-Id 列（改走**按表头定位列**解析；**不能用 `torch.npu.utilization()`**，它同步设备流） |
+| P58 | CPU 忙、NPU 空闲 | 每步 `.item()` 把设备延迟全额暴露给 CPU；**pageable H2D 阻塞** → `--nll-sync-every` 默认 8 + pinned 暂存 `non_blocking` |
+| P71/P73 | CS/s 250 万–600 万；只用 1.1–3.2 核 | 线程无核心亲和性（→ `OMP_PROC_BIND=close`）；`*_NUM_THREADS` 从未限，OpenBLAS 拉 191 线程跑小 sgemv → **必须在 `import numpy` 之前**限 8 |
+| P74 | `OMP_PLACES=cores` 反噬 | 191 核 place 表每次线程池同步都遍历 → M2 再慢 8× → **已回滚，只留 `PROC_BIND`** |
+| P76/P77 | M1 慢 70×（两次误判） | aarch64 numpy GEMV 病态 + 混合 dtype 脱离 BLAS → 平台自适应 GEMV |
+| P81/P84 | bf16 检查点保存崩 | numpy 无原生 bf16 → 存位模式，加载侧解码闭环 |
+
+---
+
+## 六、验证入口
+
+| 脚本 | 覆盖 |
+|---|---|
+| `tests/verifiers/verify_accel_readout.py` | `AccelReadout` 对拍 + **A4 接口完整性扫描**（正则扫全仓库 `readout.X` 访问面，断言加速后端具备） |
+| `tests/verifiers/verify_accel_readout_p55.py` | P55 的 2×2 矩阵（eager/compiled × target 数组/`target_idx`） |
+| `tests/verifiers/verify_multi_device.py` | 设备解析 / 分片均衡与余数 / 单设备 ≡ `AccelReadout` / 分片 ≡ 单设备（逐位）/ 计划报告 / host 线程收敛 |
+| `tests/verifiers/verify_rl.py` | REINFORCE 训练回路（零新增算子，与后端正交） |
+| `tests/verifiers/bench_accel_path.py` | 复现读出路径流量与墙钟对照 |
+| `python tests/run_tests.py fast` | 零回归门槛，**9/9** |
+
+**周边配套**（子包外，但属同一批变更）：`phdnet/telemetry.py::Telemetry`（CPU/RAM/NPU 利用率/
+HBM/CS 率，非阻塞；IPC 需 perf，Python 拿不到就诚实返回 `None`）；`tools/fetch_ms.py`
+（三源采样器，`--plan web=3,code=2,math=1`，零原始落盘，断点续跑）；
+`NUMBA_CACHE_DIR=outputs/numba_cache` 持久缓存（train/infer/train_rl 顶部设置）。

@@ -82,7 +82,7 @@ train/
 │   ├── sft/                    SFT 分片 parquet（≤100 MiB；331.9 万条）
 │   ├── pretrain/               预训练分片 parquet（≤100 MiB；3,906 万条 = 中文 3708 万 + 英文 Magpie-R1 201 万）
 │   └── raw/                    原始件归档（不入库；读取统一走 phdnet/corpus.py）
-├── eval_corpus/                冻结评测基准（internal_corpus.txt 23,504 字符 + OOD 探针；不入训练集）
+├── eval_corpus/                冻结评测基准（internal_corpus.txt 27,034 字符 + OOD 探针；不入训练集）
 ├── tests/                      回归与验收
 │   ├── run_tests.py            分层回归入口（fast 9 项 / --full）
 │   ├── checks_core.py          核心行为检查
@@ -200,7 +200,7 @@ numba 编译缓存持久化于 `outputs/numba_cache`（`NUMBA_CACHE_DIR`，不�
 ## 当前基线与关键指标
 
 > ⚠ 两组口径不可混用：`rebaseline`（256 维 BASE 栈，词级 LM 锚点）与
-> `eval_suite` / `demo_m9`（各自独立配置）。以下均为冻结语料（23,504 字符）实测。
+> `eval_suite` / `demo_m9`（各自独立配置）。以下均为冻结语料（27,034 字符原文长度）实测。
 
 **现行权威锚点**（BASE 配置：n_sdr=256 / k_sparse=32 / eta_pc=0 / eta_readout=0.15 / 读出 fp32；
 复测入口 `tools/rebaseline.py`；语料 = 中文维基高质量条目合集 27,405 字符，2026-09-28 更换——
@@ -209,7 +209,7 @@ numba 编译缓存持久化于 `outputs/numba_cache`（`NUMBA_CACHE_DIR`，不�
 | 口径 | ppl_char | bpc | 吞吐 | 主干连接率 |
 |---|---|---|---|---|
 | 4,000 字符训练段 | **394.4687** | 8.624 | ~2.9 ms/token | 12.5% |
-| 全语料（21,924 字符） | **359.2603** | 8.489 | ~2.5 ms/token | 12.5% |
+| 全语料（27,034 字符原文长度） | **359.2603** | 8.489 | ~2.5 ms/token | 12.5% |
 
 **结构性能力**（与口径无关）：
 
@@ -252,22 +252,50 @@ fp16 有机制性代价，待真机实测（`tools/bench_accel.py` 三档精度�
 Math-L3 122.5 GB（4 子集）；合计 **994.3 GB** → 50 GB 云端预算下经
 `tools/fetch_ms.py` 采样 **3–5%**。
 
-## 文档索引
+## 文档地图
 
-- **扩展指南（加机制 / 后端 / dtype / 数据 / 训练阶段 + 提交检查单）→ `docs/PHD-Net_扩展指南.md`**
-- **缺陷与教训台账（症状 → 根因 → 修复 → 门禁缺口）→ `BUGS.md`**
-- **迭代优化与修复日志（P53–P81 过程总结）→ `docs/PHD-Net_迭代优化与修复日志.md`**
-- 并行/加速的架构级分析（依赖链、实测上限、可做与不可做）→ `docs/PHD-Net_并行与加速架构分析.md`
-- 架构与设计 → `docs/PHD-Net_架构设计.md`
-- 对标 Transformer 的五轨道结论与开放项 → `docs/PHD-Net_对标Transformer优化路线图.md`
-- 与 LLM 的竞争力 / 100B 预估 / 与人脑的同构性 → `docs/PHD-Net_竞争力与脑同构性评估.md`
-- CPU/RAM 量化与迭代结果账 → `docs/PHD-Net_性能评估与迭代方案.md`
-- 硬件后端适配 → `docs/PHD-Net_硬件后端适配报告.md`
-- 一页式介绍 → `docs/index.html`
+**先按你要做的事找文档**（每个事实只有一处权威出处，其余链接引用）：
 
-**CI**：三套并存——GitCode（`.gitcode/workflows/ci.yml` + `Jenkinsfile`）与
-GitHub Actions（`.github/workflows/ci.yml`，GitHub 为镜像）。GitHub 侧自 2026-09-30
-起有失败诊断 step（环境版本 + 完整 traceback 重跑），便于无 token 情况下从 UI 读日志。
+| 你要做的 | 看这份 |
+|---|---|
+| **了解项目是什么、怎么跑** | 本文件 |
+| **扩展它**（加机制 / 后端 / dtype / 数据 / 训练阶段）| `docs/PHD-Net_扩展指南.md` |
+| **理解六个机制与脑同构、容量账、铁律** | `docs/PHD-Net_架构设计.md` |
+| **查性能数字**（唯一出处）| `docs/PHD-Net_性能评估与迭代方案.md` |
+| **搞懂为什么吃不满多核与 NPU** | `docs/PHD-Net_并行与加速架构分析.md` |
+| **回看这轮迭代怎么做的、哪些方案被否决** | `docs/PHD-Net_迭代优化与修复日志.md` |
+| **迁移/适配硬件后端、昇腾踩坑** | `docs/PHD-Net_硬件后端适配报告.md` |
+| **与 Transformer / 大脑对比的结论** | `docs/PHD-Net_竞争力与脑同构性评估.md` |
+| **五轨道优化结论与开放项** | `docs/PHD-Net_对标Transformer优化路线图.md` |
+| **查某个坑的根因** | `BUGS.md`（33 条，症状 → 根因 → 门禁缺口） |
+| 子目录用法 | `train_1b/README.md`、`tools/README.md`、`chat/README.md`、`datasets/README.md`、`phdnet/backends/README.md` |
+
+## 当前状态（2026-09-30）
+
+- **精度**：读出默认 **fp8 forward + fp16 更新**（保住 |dp|≈1e-6 的非目标行更新——
+  bf16 会把它舍掉，导致学习退化为纯 Hebbian）；M1 默认 fp64（昇腾走自写 numba
+  GEMV）；分词 onehot 缓冲 fp16。
+- **性能（1B 档，昇腾 191 核 + NPU）**：20–110 ms/tok；读出 5.5–7 ms（访存受限）；
+  本轮修掉 M4b（63.5 ms/tok）、M1 平台差异、M2 融合核退化、检查点 0.8–37 s 硬停顿。
+  数字与口径见性能文档。
+- **门禁**：`python tests/run_tests.py fast` = 9/9（零回归门槛）。
+- **CI**：两套（GitCode + GitHub 镜像）；GitHub 侧当前仍红，待 traceback。
+- **已知欠账**：M6 读出仍 100% 稠密（人脑连接率 2e-8）→ 幂律稀疏化方案已设计、
+  未实施；数据集语种构成与文档记录矛盾（实测中文仅 2%）。
+
+## 快速开始
+
+```bash
+# 训练（生产单轨；服务器用远程语料直读）
+python train_1b/train.py --preset 1b --data pretrain --remote-data \
+    --remote-fraction 0.3 --lang zh --resume --step-profiling
+
+# 评测基线（复测入口）
+python tools/rebaseline.py
+
+# 门禁
+python tests/run_tests.py fast
+```
 
 ## CI/CD
 

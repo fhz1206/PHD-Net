@@ -469,16 +469,20 @@ def _unsupported_reason(cfg) -> str | None:
     """返回**不可用原因**（None = 加速读出可用）。
 
     P19 教训：换后端前必须核对配置——两级读出（`readout_hidden`）、结构性稀疏
-    读出（`readout_conn_k`）、量化码本（fp8/fp4）三条路径 `AccelReadout` **未
-    实现**（它只做稠密 fp32/fp16/bf16）。强行上会「能跑但语义不同」——比回落
-    到 numba 原路径更糟。命中任一项即回落，并记录原因供日志如实报告。
+    读出（`readout_conn_k`）、fp4 码本三条路径 `AccelReadout` **未实现**。强行上
+    会「能跑但语义不同」——比回落到 numba 原路径更糟。命中任一项即回落，并记录
+    原因供日志如实报告。
+
+    ⚠ **fp8 已在 P84 实现**（forward 用 fp8 副本 + 更新用 fp16 主副本），曾被
+    列在这里导致 `--readout-dtype fp8`（**现在的默认值**）被静默回落到 numba
+    CPU ——加新 dtype 时务必同步这张能力表。
     """
     if int(getattr(cfg, "readout_hidden", 0) or 0) > 0:
         return "readout_hidden>0（两级读出未在加速后端实现）"
     if int(getattr(cfg, "readout_conn_k", 0) or 0) > 0:
         return "readout_conn_k>0（稀疏读出未在加速后端实现）"
-    if str(getattr(cfg, "readout_dtype", "fp32")) in ("fp8", "fp4"):
-        return (f"readout_dtype={cfg.readout_dtype}（量化码本未在加速后端实现）")
+    if str(getattr(cfg, "readout_dtype", "fp32")) == "fp4":
+        return "readout_dtype=fp4（MX 块缩放码本未在加速后端实现）"
     if bool(getattr(cfg, "lognormal_init", False)):
         return None                            # 初始化分布不同但结构兼容，不阻断
     return None

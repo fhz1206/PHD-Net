@@ -8,7 +8,7 @@
 > 配套实现：`phdnet/`（Python 3.14）｜ 配套文档：《性能评估与迭代方案》《竞争力与脑同构性评估》《对标 Transformer 优化路线图》
 > 版本治理：统一使用 **v0.0.0**，分层表述用「基础架构 M1–M6 / 认知层 M7–M12」；是否升 v0.1.0 需 fhz 明确确认（当前保持 v0.0.0）。
 >
-> ✅ **语料解耦（2026-09-21 起）**：内置语料已冻结为逐字副本 `eval_corpus/internal_corpus.txt`（**23,504 字符**），
+> ✅ **语料解耦（2026-09-21 起）**：内置语料已冻结为逐字副本 `eval_corpus/internal_corpus.txt`（**27,034 字符（实测）**），
 > `tests/eval_common.py` 的 `DOC` 指向该文件——**编辑本文不再改变语料与基线**（原「本文即语料，编辑即漂移」条款作废）。
 > 若有意更换语料：更新冻结副本 → 重跑 `eval_suite.py` + `demo_m9.py` → 回填全部文档数字。
 > 远域泛化探针语料：`eval_corpus/ood_wiki.txt`（中文维基 26 篇 / 20,188 字符）。
@@ -346,7 +346,7 @@ AMD GPU 建议 DirectML 路径。
 > C1/C2/C6/C7/C8（迹剪枝、`consolidate` 节流、`count_params`、重置结果、读出权重上限）。
 > 铁律：新增行为一律走 config 开关且默认关闭、默认路径逐位不变；`tests/run_tests.py` fast **11/11 通过**。
 > **语料布局（2026-09-29 更新）**：`data/` → `datasets/`（分子目录 `sft/`、`pretrain/`，`raw/` 存原始件不入库）；
-> **冻结评测基准已迁到仓库根 `eval_corpus/`**（`internal_corpus.txt` 23,504 字符 + `ood_wiki.txt` 探针）——
+> **冻结评测基准已迁到仓库根 `eval_corpus/`**（`internal_corpus.txt` 27,034 字符（实测） + `ood_wiki.txt` 探针）——
 > 2026-09-27 指令「docs/*.md 不是数据集」。训练数据有两个入口：本地 `datasets/`（默认，逐位不变）
 > 与 `--remote-data` 直读 ModelScope（HTTP Range 流式零落盘，`--remote-fraction` 取前缀分片；
 > atomgit 限额 1 GiB < 交付 4.64 GiB，故服务器走远程）。
@@ -530,7 +530,7 @@ M8 采用与 M9 同构的非对称外积联想链（STDP 拓扑核的稀疏出�
 
 ### 12.1 M9 收官结论（五轨道）
 
-重测条件：冻结语料 `eval_corpus/internal_corpus.txt` **23,504 字符**（训练 18,803 / 评估 4,701）、seed 11、
+重测条件：冻结语料 `eval_corpus/internal_corpus.txt` **27,034 字符（实测原文长度）**、seed 11、
 128 维小栈词表口径 OOV 0%，参照基线 R = **102.97**（bpc 6.686）。结果写入 `outputs/test/demo_m9_result.json`。
 
 | 配置 | 字符归一 PPL | 相对 R | 结论 |
@@ -575,7 +575,7 @@ M8 采用与 M9 同构的非对称外积联想链（STDP 拓扑核的稀疏出�
 
 | 语料 | 路径 | 规模 | 用途 |
 |---|---|---|---|
-| 内置（冻结） | `eval_corpus/internal_corpus.txt` | **23,504 字符**（逐字复制自本文 2026-09-21 版） | 默认回归与 ours 对拍（**编辑本文不再影响语料**） |
+| 内置（冻结） | `eval_corpus/internal_corpus.txt` | **27,034 字符（实测）**（逐字复制自本文 2026-09-21 版） | 默认回归与 ours 对拍（**编辑本文不再影响语料**） |
 | 探针（远域） | `eval_corpus/ood_wiki.txt` | 26 篇 / 20,188 字符（ModelScope Range 抽取） | 泛化探针 `tests/demo_gen.py` |
 | 外部预训练 | `datasets/pretrain/` 或 `--remote-data`（ModelScope `fhzfhz/Mixture-General-Mini`）：**Infinity-Instruct M7_Core**（7.45M dialogues）+ **Magpie-R1**（201 万条英文 CoT）+ **Ultra-FineWeb-L3 中文**（8 万） | — | 预训练 / 跨轮稳定锚点（维基语料已按指令删除） |
 
@@ -583,7 +583,7 @@ M8 采用与 M9 同构的非对称外积联想链（STDP 拓扑核的稀疏出�
 Transformer 对照为自建 nanoGPT 级模型（PyTorch，**0.52M（96d×2L）/ 2.38M（192d×4L）**），须在**同语料**下重测才可比。
 
 > ⚠ **同文档也存在两种口径，勿混用**：
-> - **默认 256 维栈**（`tests/eval_common.py` BASE：n_sdr=256 / k_sparse=32 / eta_pc=0 / **eta_readout=0.15**、读出 fp32；复测入口 `tools/rebaseline.py`）→ **现行锚点：4,000 字符段 394.4687（bpc 8.624）／全语料 21,924 字符 359.2603（bpc 8.489）**，评测语料 2026-09-28 更换为中文维基高质量条目合集（旧口径 78.16 / 90.2480 / 73.1166 仅存于 git 历史，不可混用），`tests/eval_suite.py`
+> - **默认 256 维栈**（`tests/eval_common.py` BASE：n_sdr=256 / k_sparse=32 / eta_pc=0 / **eta_readout=0.15**、读出 **fp8 forward + fp16 更新**（P84）；复测入口 `tools/rebaseline.py`）→ **现行锚点：4,000 字符段 394.4687（bpc 8.624）／全语料 21,924 字符 359.2603（bpc 8.489）**，评测语料 2026-09-28 更换为中文维基高质量条目合集（旧口径 78.16 / 90.2480 / 73.1166 仅存于 git 历史，不可混用），`tests/eval_suite.py`
 > - **M9 消融 128 维小栈**（`tests/demo_m9.py` BASE：n_sdr=128、分词 min_count=8）→ 冻结语料当前 R = **102.97**（bpc 6.686）
 >
 > 两者网络宽度与分词粒度都不同，绝对数值不可比；跨组做除法得到的"提升倍数"没有意义。

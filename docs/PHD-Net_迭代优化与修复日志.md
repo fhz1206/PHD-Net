@@ -1,162 +1,265 @@
-# PHD-Net 迭代优化与修复日志（2026-09-29 ~ 09-30，P53–P83b）
+# PHD-Net 迭代优化与修复日志（P53–P84）
 
-> 本文记录两天集中迭代的**完整过程**：动机 → 做法 → 实测 → 教训。
-> 配套文档：当前结论见 `README.md` 与 `docs/PHD-Net_性能评估与迭代方案.md`；
-> 缺陷台账见 `BUGS.md`；架构级约束分析见 `docs/PHD-Net_并行与加速架构分析.md`。
-
-## 0. 总览
-
-| 维度 | 起点 | 终点 |
-|---|---|---|
-| 1B 服务器步时 | 26–104 ms/tok（且超线性恶化） | 预期 ~20 ms/tok（P70–P78 全部落地后待复测） |
-| NPU 利用率观测 | 恒 `--`（遥测缺失） | NPU% 98% 可见、HBM 可见 |
-| M4b_ltm | 63.5 ms/tok（占 76%）且超线性 | 2.7–22 → 预期个位数（P70 predict 44.6× + P78 learn 多核） |
-| 读出损失计算 | softmax+log+cast+scatter 4 kernel | cross_entropy 单 kernel（P80） |
-| 线程治理 | numba 191 线程 / BLAS 191 线程 | 各限 8 + PROC_BIND 绑核 |
-| 检查点 | bf16 保存崩溃 + 0.8–37 s 硬停顿 | 位模式闭环（P81）+ 异步写盘（P83） |
-| CPU 主循环 | M1 58 ms / M2 27 ms（昇腾反噬） | 平台自适应 GEMV + plain 核（P76/P77） |
-| 缺陷台账 | 无 | `BUGS.md` 30 条（含被否决的优化） |
+> **范围**：2026-09-29 ~ 09-30 两天集中迭代的**过程与教训**。动机 → 做法 → 实测 → 教训。
+> **本文不写当前现状**——所有性能数字见 `PHD-Net_性能评估与迭代方案.md`；
+> 「为什么吃不满多核/NPU」的论证见 `PHD-Net_并行与加速架构分析.md`；
+> 缺陷台账（症状→根因→门禁缺口→commit）见 `BUGS.md`。
+> **被否决的方案只在这里写**，其他文档不重复。
+> **数据截止**：2026-09-30。
 
 ---
 
-## 1. 稳定性修复（先让它能跑）
+## 0. 总览
+
+两天的主线是：**先让它能跑（稳定性）→ 再让它可信（观测）→ 最后才让它快（性能）**。
+性能优化全部由服务器日志驱动，而不是由本机 benchmark 驱动——这是本轮最重要的方法论转变。
+
+| 维度 | 起点 | 终点 |
+|---|---|---|
+| 1B 服务器步时 | 26–104 ms/tok（且**超线性恶化**） | 部分修完、**未整体复测** |
+| M4b_ltm | **63.5 ms/tok（占 76%）** | 元凶定位并修复（P70 predict **44.6×** + P78 learn 多核） |
+| 读出损失计算 | softmax + log + cast + scatter（4 kernel） | `cross_entropy` 单 kernel（P80） |
+| 线程治理 | numba 191 线程 / BLAS 191 线程 | 各限 8 + PROC_BIND 绑核；`OMP_PLACES` 回滚 |
+| 检查点 | bf16 保存崩溃 + 0.8–37 s 硬停顿 | 位模式闭环（P81）+ 异步写盘（P83） |
+| CPU 主循环 | M1 58 ms / M2 27 ms（昇腾反噬） | 平台自适应 GEMV + plain 核（P76/P77） |
+| 观测能力 | NPU% 恒 `--`；主循环开销从未被测量 | NPU% 可见、主循环三段计时（P72） |
+| 缺陷台账 | 无 | `BUGS.md` 33 条（含 4 个被否决的优化） |
+
+---
+
+## 1. 稳定性修复：先让它能跑
 
 | P | 问题 | 根因 | 修复 |
 |---|---|---|---|
-| P54 | 训练启动 `IndentationError`；`_data_provenance` 被误删 | 改结构不动引用 | 恢复；`verify_ms_stream` 加语法门禁 |
-| P54 | `--help` 长期崩溃 | argparse help 里裸 `%` | `%%` 转义；**所有 help 文本新增后必须跑 `--help`** |
-| P55 | NPU 首跑崩 `FakeTensor - None` | P45 融合核漏改 `target_idx` 分支 | 融合核逐行镜像 eager；2×2 矩阵验证 9/9 |
-| P57 | NPU/HBM 遥测恒 `--` | `Telemetry()` 无参构造 → 分支永不触发 | device 自动探测；失败打印原因 |
-| P58 | `torch.compile` 编译失败崩生产 | inductor **首次调用**才编译 | 失败永久回落 eager + 告警；`--torch-compile` 默认关 |
-| P81 | bf16 检查点保存崩 `unsupported ScalarType BFloat16` | numpy 无原生 bf16 | 存 uint16 位模式，与加载侧 P46 解码闭环（无损） |
+| P54 | 训练启动 `IndentationError`；`_data_provenance` 被误删 | 改结构时动了配对代码 | 恢复；`verify_ms_stream` 加**语法门禁**（`py_compile` + 跑 `train.py --help`） |
+| P54 | `--help` 长期崩溃 | argparse help 文本里有裸 `%` | `%%` 转义。**纪律：所有 help 文本新增后必须跑 `--help`** |
+| P55 | NPU 首跑即崩 `FakeTensor - None` | P45 融合核漏改 `target_idx` 分支 | 融合核逐行镜像 eager；2×2 矩阵验证（`verify_accel_readout_p55` 9/9） |
+| P57 | NPU/HBM 遥测恒 `--` | `Telemetry()` 无参构造 → 加速器分支**永不触发** | device 自动探测；首次失败打印原因（原来 `except: pass` 全吞） |
+| P58 | `torch.compile` 编译失败崩生产 | inductor **首次调用**才编译，不是启动时 | 失败永久回落 eager + 告警；`--torch-compile` 默认关 |
+| P81 | bf16 检查点保存崩 `unsupported ScalarType BFloat16` | numpy 无原生 bf16 | `to_numpy` 对 bf16 存 **uint16 位模式**，与加载侧 P46 解码闭环（无损） |
+| P83b | 检查点保存崩 `NameError: name 'torch' is not defined` | P81 的 bf16 分支用了 `torch.bfloat16`，但 `model.py` 从不 import torch（torch 是可选依赖） | 分支内惰性 import（bf16 张量 ⇒ torch 必然已装） |
+
+> **P83b 的真正教训是门禁缺口**：fast 9/9 **不走** bf16 分支 → 本机全绿、服务器崩。
+> 已记入 BUGS #32，并建议把 bf16 round-trip 并入 fast 集合。
+
+---
 
 ## 2. 性能优化（每条都有实测）
 
-### 2.1 消除同步与传输（P58/P62，端到端 −20~30%）
-- `nll_sync_every` 默认 1 → **8**：每步 `.item()` 把 NPU 延迟全额暴露给 CPU，
-  流水线无法重叠——这就是「CPU 忙 NPU 空闲」的真相（CPU 其实在等）。
-- h 的 H2D 走 **pinned 暂存 + `non_blocking`**（pageable 会阻塞）。
-- 遥测禁用 `torch.npu.utilization()`（**它同步设备流**）。
+### 2.1 消除同步与传输（P58/P62）
 
-### 2.2 CPU 机制层 numba 化（P59/P61/P68/P70/P77/P78）
-| P | 对象 | 实测 |
+- `nll_sync_every` 默认 1 → **8**。默认 1 时每步 `.item()` 把 NPU 延迟全额暴露给 CPU，
+  流水线永不重叠——**这就是「CPU 忙 NPU 空闲」的真相（CPU 其实在等）**。
+  （P62 实测：端到端最低 20.0 ms/tok、读出 12.9–13.4 → 9.2–10.9。）
+- h 的 H2D 走 **pinned 暂存 + `non_blocking`**（pageable 会阻塞 CPU）。
+- 遥测禁用 `torch.npu.utilization()`——**它内部同步设备流，在热路径上砍一刀**。
+  改走 `npu-smi` 外部子进程。
+- **教训：观测手段本身不能破坏被观测的流水线。**
+
+### 2.2 CPU 机制层 numba 化（P59/P68/P70/P77/P78）
+
+| P | 对象 | 实测 | 出处口径 |
+|---|---|---|---|
+| P59 | M2 学习侧融合（8 次核调用 → 1 个） | 1.15–1.72×，逐位 | 本机，按边数分档 |
+| P61 | M1 编码器 fp32 | **1.80×**（606.7 → 337.7 µs），top-k 逐位一致 | **x86**；昇腾反例见 §4 |
+| P68 | recall 反投影 numba（`rev` 静态 → 预 CSR） | 346 → 22.5 µs（15.4×）；另一次 404 → 50 µs（8.1×） | 本机，**两次方向一致、幅度随运行波动** |
+| P70 | `predict_arr`（跳过 dict 合并） | **8.78 → 0.197 ms（44.6×）** | 本机，服务器形态 |
+| P77 | M1 GEMV 平台自适应（aarch64 → numba 核） | 服务器 58 ms → 预期 ~1 ms | **待复测** |
+| P78 | `learn` 批量多核（gather + prange，阈值 4096 组合） | 服务器 20 s/次 → 毫秒级 | **待复测**（本机 1.0–1.1×：x86 Python 本来就快，收益在服务器） |
+
+**P68 为什么必须串行**：输出维度被多个 `big_i` 共享 → `prange` 会竞态。
+「`rev` 是静态的（`__init__` 一次性构建）」是它能零成本预 CSR 化的前提。
+
+**P70 为什么不用 numba gather 核**：1.8 万元素比 P67 的 64 万组合小两个数量级，
+核的固定开销会吃掉收益（P11/P12/P13 三次负收益的共同教训）→ numpy gather 即可。
+关键设计：`predict_arr` **不合并重复键**，核内按「行序 → 槽位序」逐次累加，
+与原 `p[k] += v` 的浮点顺序完全一致 → **逐位相同**。
+
+### 2.3 P78 为什么第一次（P67）失败、第二次成功
+
+P67 首版 0.96× 且多步序列不一致，三个坑 P78 全过：
+
+| 坑 | 现象 | 修正 |
 |---|---|---|
-| P59 | M2 学习侧融合（8 核 → 1） | 1.15–1.72×，逐位 |
-| P61 | M1 编码器 fp32 | **1.80×**（x86；⚠ 昇腾反例见 §4） |
-| P68 | recall 反投影 numba（rev 静态 → 预 CSR） | **8–35×**（nogil 串行，prange 会竞态） |
-| P70 | `predict_arr`（跳过 dict 合并） | **44.6×**（8.78 → 0.197 ms，服务器形态） |
-| P77 | M1 GEMV 平台自适应（aarch64 → numba 核） | 服务器 58 ms → ~1 ms（待复测） |
-| P78 | `learn` 批量多核（gather + prange） | 服务器 20 s/次 → 毫秒级（待复测） |
+| 生长分支被 cap 卡住 | 核内生长只 guard `size < m_out`，而 `growth_guidance` 只管 `in_deg` | 核内生长分支改**无条件** |
+| scatter 扩容缺失 | 写满预留槽时原路径会扩到 `m_out`，核内没跟上 | scatter 补 `_grow_row` 扩容 |
+| import 块漏 `prange` | P77 重写 `ltm_kernel.py` 时丢失 | 补回 |
 
-### 2.3 线程与绑核治理（P62/P71/P73/P74）
-- numba prange 限 **8 线程**（P22：核内 1→6 线程仅 1.16×，访存饱和）。
-- **BLAS 线程也曾是 191** → 在 `import numpy` **之前**限 8（晚设无效）。
-- `OMP_PROC_BIND=close` 绑核保留；⚠ `OMP_PLACES=cores` 在 191 核上反而让
-  M2 慢 8–13×（place 表随核数膨胀，每次同步遍历）→ **已回滚**。
+对拍：`verify_ltm_learn_batch.py` **5/5**（fp64/int8 × guidance 单步 + 6 步生长/量化/迹衰减序列逐位）。
+
+**阈值 4096 组合**：低于此规模 gather 开销占主导。
+
+### 2.4 读出（readout）
+
+- P80：nll 改 `F.cross_entropy` 单 kernel（数学等价 −log(softmax[c])；
+  验证 diff 9.5e-07 全部来自去掉 1e-12 加项；**dp 仍由同一 softmax 得出 → W 更新不变**，
+  只有统计 PPL 第 7 位小数变）；correct 索引走**预分配 pinned int64 缓冲 + non_blocking**
+  （替代 `torch.tensor(..., device=)` 的 pageable 小拷贝——那会引入隐式同步）。
+- **天花板判断**：剩余 = 2×320 MB 访存（不可减）+ ~3 小 kernel。
+  再往下是 CANN 自定义算子（把 GEMV + softmax + addmm 融成一个核）
+  或 msprof 内核级 profiling（都需要服务器上的深度工作）。
+- **建议 A/B `--readout-dtype fp16`**：昇腾 fp16 GEMV 内核成熟，bf16 可能显著慢
+  （同访存量、更好 kernel = 免费收益）。**未验证。**
+
+### 2.5 检查点：异步化（P81 → P83）
+
+- **P83 `compact_csr` 向量化**：每行 Python `sorted()` + 逐突触 append → **全量 `np.lexsort`**
+  （行升序为主键、键次之、槽位末）。⚠ `np.lexsort` 的**最后一个 key 是主排序键**——
+  第一次写反，被行序校验抓出。10 万行 × 72 槽：7.2 → **3.9 s**，且复杂度 ∝ nnz。
+- **P83 异步写盘**：`save_model` 拆为 snapshot（主线程，数组 **`.copy()`**）+
+  后台单 worker 写盘（`savez` 释放 GIL，训练不停）。
+  ⚠ 必须 `.copy()`：`to_numpy` 对 torch 张量返回**共享视图**，
+  writer 线程序列化时主线程 `addmm_`/learn 正在原地改写 → **不拷贝会数据撕裂**。
+  收尾 `wait_pending_saves()` 保证 final 落盘、后台失败可见不吞。
+
+---
 
 ## 3. 被否决的方案（负收益同样是结论）
 
 | 方案 | 实测 | 死因 |
 |---|---|---|
-| `learn_predictive` 融合核 | 大范围 0.91–0.96× | 12 个 prange 段的调度成本 > 省下的核启动 |
-| LTM 表向量化（predict/learn Python 循环） | 0.72–0.76× | 原版靠 `ltp<=0` 短路极便宜；向量化无条件付出 |
-| gather+prange 首版（P67） | 0.96× 且多步不一致 | gather/scatter 拷贝 + 生长分支被 cap 卡住 + 误绑 growth_guidance |
-| `encode` numba 去重 | 0.84× | 核内 O(n²) 线性扫描输给 Python `set` 的 O(1) 哈希 |
+| `learn_predictive` 融合核 | 大范围 **0.91–0.96×** | 12 个 prange 段的调度成本 > 省下的 11 次核启动；191 核服务器只会更差。**已删除**，不留死代码 |
+| LTM 表向量化（predict/learn Python 循环） | **0.72–0.76×** | 原版靠 `ltp<=0` 短路让循环极便宜；向量化**无条件付出**。**分支密集的代码不要预先向量化** |
+| gather + prange 首版（P67） | **0.96×** 且多步不一致 | gather/scatter 的 O(R·m_out) 拷贝吃掉并行收益 + 三个正确性坑（§2.3） |
+| `encode` numba 去重 | **0.84×** | 核内 O(n²) 线性扫描输给 Python `set` 的 O(1) 哈希 |
+| 局部词表复用 | — | **破坏正确性**。性能优化先过对拍 |
+| 核内 `prange`（词涌现） | 1 → 6 线程仅 **1.16×** | 瓶颈是内存流量（两张 ~64 MB 哈希表远超 L3） |
+| `OMP_PLACES=cores` | M2 慢 **8×**、CS/s 650 万 | 191 核 place 表 → 每次线程池同步都要遍历 |
+| `torch.compile` 默认开 | 昇腾编译失败崩生产 | inductor 首次调用才编译，失败无回落 |
 
-**共性教训**：本机 x86 上「看起来是热点」的 Python 循环，在规模、平台、
-短路行为三者的真实组合下未必是热点——**每一次都要实测，负收益立即回滚**。
+**共性教训**：本机 x86 上「看起来是热点」的 Python 循环，在**规模、平台、短路行为**三者的
+真实组合下未必是热点——**每一次都要实测，负收益立即回滚**。
+本项目已有 4 个「优化后变慢」的确定结论（0.91/0.72/0.96/0.84×），全部回滚。
 
-## 4. 平台差异专题（x86 ≠ aarch64，三次反噬）
+---
 
-1. **fp32 权重 @ fp64 输入**脱离 BLAS，慢 5.9×（x86 就有）→ 输入必须同 dtype。
-2. **P61 fp32 编码器**：x86 快 1.80×，**昇腾慢 70×**（0.85 → 58 ms）——
-   aarch64 numpy 对 1024×2048 单行 GEMV 病态慢，fp32/fp64 都慢 → 平台自适应
-   （aarch64 走自写 numba GEMV，x86 走 BLAS）。
-3. **P52 融合核**：x86 快 1.15–2.16×，**昇腾慢 8–13×**（prange+fastmath 退化）
-   → `--m2-kernel {fused,plain}` A/B 开关，默认 plain。
-4. **`OMP_PLACES=cores`**：191 核 place 表让每次线程池同步遍历 → M2 再慢 8×，
-   CS/s 升到 650 万 → 回滚，只留 `OMP_PROC_BIND=close`。
+## 4. 平台差异专题：三次「x86 更快、昇腾更慢」的反噬
 
-**规则**：跨平台项目里，**任何优化必须在目标机器复测**；x86 的结论只在 x86 成立。
+| P | 改动 | x86 | 昇腾 | 处置 |
+|---|---|---|---|---|
+| P61 | M1 编码器 fp32 | 快 **1.80×** | **慢 70×**（0.85 → 58 ms） | 平台自适应（P77）：aarch64 走自写 numba GEMV，x86 走 BLAS |
+| P76 | 输入 dtype 跟随权重 | — | 仍慢 58 ms | dtype 修复**正确但不充分** |
+| P52→P76 | M2 融合核 | 快 1.15–2.16× | **慢 8–13×**（2.4 → 27 ms） | `--m2-kernel {fused,plain}`，默认 plain（A/B 实测 plain 快 3–4×） |
+| P74 | `OMP_PLACES=cores` | 无感 | **M2 再慢 8×**、CS/s 650 万 | 回滚，只留 `OMP_PROC_BIND=close` |
+
+### 4.1 M1 的定位过程（三次误判）
+
+这是本轮最典型的「假设被自己的日志逐次证伪」：
+
+1. **第一次假设（dtype）**：P61 的 fp32 是罪魁 → 新增 `--encoder-dtype` 让 fhz 做 A/B。
+   `--encoder-dtype fp64` 后 **M1 仍 62–67 ms** → 假设被自己的日志证伪。
+2. **第二次假设（混合 dtype）**：P61 把输入硬转 fp32，而默认权重是 fp64
+   → **fp64 W @ fp32 x 脱离 BLAS**，走逐元素慢路径。P75 改成输入跟随权重
+   （本机验证 top-k 一致）→ **M1 仍 57–58 ms** → 假设再次被证伪。
+3. **真因（平台）**：aarch64 上 numpy 对 **1024×2048 单行 GEMV 病态慢，fp32/fp64 都慢**。
+   P77 走平台自适应；本机 x86 实测 BLAS 953 µs **优于** 自写核 1532 µs → **不全局翻转**。
+
+**血泪教训**：连续三次把「本机优化」推到昇腾后翻车，且**每次都要靠服务器日志才能发现**。
+
+> **规则：跨平台项目里，x86 的性能结论不构成证据。** 任何优化必须在目标机器复测。
+
+**附带教训（dtype 家族）**：修 dtype 时必须**同时修「权重」和「输入」两端**。
+P61 只改了权重端、P75 只改了默认值，两端不匹配才是 bug。
+→ 纪律：GEMV/GEMM 前必须 assert `W.dtype == x.dtype`（或统一转）。
+另一条同族结论：**numpy/BLAS 路径上「bf16 存储 + fp32 迭代」必然更慢**
+（每次付上采样转换），低精度权重只在 torch/NPU 原生路径才划算。
+
+---
 
 ## 5. 观测能力建设（「修一半」的另一半）
 
-- `--step-profiling`：九段分解 + **主循环三段**（`loop: tokenize/encode_onehot/step`，
-  P72——此前分段之和 < 总耗时的缺口无法归因）。
-- `[ltm-diag]`（每 10 次）：prev/cur 规模、组合数、**rate_dims**（稀疏度演化）、
-  表行数、recall 绑定遍历量。⚠ 门槛要考虑**触发频率**——设 1000 次时条件触发
-  的 imprint 一行都不出。
-- `[sample lang=…] CJK=…%`：`--lang` 是否生效**一眼可见**（实测那次 argv 根本
-  没带 `--lang`）。
-- `GC <对象数>M/gen2 <次数>`：GC 假设**被数据证伪**（恒定）→ 调优保留但非解药。
-- `[numba] cache dir / size`：持久缓存是否命中可见（P79）。
-- 遥测：NPU%（npu-smi 三级定位 + 表头定位解析）、HBM、CS/s、CPU 核数。
+| 能力 | 状态 | 教训 |
+|---|---|---|
+| `--step-profiling` 九段 + **主循环三段**（P72） | 已上线 | 此前**主循环开销从未被测量** → 「分段之和 < 总耗时」的缺口无法归因。补上后实测 `tokenize` 0.06 / `encode_onehot` 0.13 ms → **黑洞在 step 内** |
+| `[ltm-diag]`（每 10 次） | 已上线 | ⚠ 门槛要考虑**触发频率**：imprint 是条件触发（`mode=="encode"` 且 gate 达标），设 1000 次时 3500 token **一行都不出**。recall 同理 |
+| `[sample lang=…] CJK=…%`（P69） | 已上线 | `--lang` 是否生效一眼可见，不再靠 PPL 猜。**实测那次 argv 根本没带 `--lang`** |
+| `GC <对象数>M/gen2 <次数>`（P64） | 保留，但**假设被数据证伪** | 对象数恒定 → GC 调优无害但**非解药**。调优保留（开销小 + 字段有用），不指望它 |
+| `[numba] cache dir / size`（P79） | 已上线 | 区分「cache miss 全量编译」与「cache hit 启动 ~2.6 s」 |
+| 遥测三级定位（P63） | 已上线 | `npu-smi` 走 `$NPU_SMI_PATH` → PATH → 常见安装路径（训练是直接 `python` 启动，没 source `set_env.sh`） |
+| 遥测按表头定位列（P63b） | 已上线 | 原解析器找「含 `0x` 总线号的数据行」，该机输出没这一列 → 改为按表头推列号，与型号无关 |
+| 基准工具三个 bug（P29） | 已修 | 异步设备**从不 synchronize**（测到的是提交耗时）+ `dtype` 从未传入且成功即 break + 测旧对象 → **修复前所有加速器数字不可信** |
+
+> **P64 的方法论价值**：提出「GC 是超线性元凶」这个**假设**，
+> 加了观测字段，然后**让数据把它证伪**。这比直接改代码健康得多——
+> 观测字段的价值在于**排除**假设，不在于支持它。
+
+---
 
 ## 6. 数据问题（代码之外）
 
 实测远程分片（ModelScope `fhzfhz/Mixture-General-Mini`）：
+
 - 52 片中 0–45 全是 `infinity_m7core`，lang 分布 **en 50% / unk 47% / zh 仅 2%**；
-- **`unk` 是代码**（CJK 占比 0%）；
-- 只有末片是 `ultrafineweb_l3_zh`。
-- 与「M7_Core 中文 3,697 万块 ≈ 95%」的记录**严重不符**（原记录在删除清单的
-  元数据中，已内联进 README）→ 需核对数据制备/上传环节。
+- **`unk` 是代码**（CJK 占比 0%）；只有末片（#51）是 `ultrafineweb_l3_zh`（中文 99.7%）；
+- `--remote-fraction 0.3` 取前 16 片又全是 m7core → 「中文训练」实际只用到极小部分数据；
+- 与「M7_Core 中文 3,697 万块 ≈ 95%」的记录**严重不符**。
+  该记录原在删除清单的元数据中（已内联进根 README）→ **需核对数据制备/上传环节**。
 
-## 7. 续：P76–P83b（当日下午，平台差异主导的一轮）
+⚠ 这是**数据问题不是代码问题**。过滤链路本身本机实测有效
+（`iter_texts_lang(远程 ms:// 单片, 'zh')` 出中文、`'en'` 出英文/代码）。
 
-### 7.1 三次「x86 更快、昇腾更慢」的反噬
-| P | 改动 | x86 | 昇腾 | 处置 |
-|---|---|---|---|---|
-| P61→P76 | M1 编码器 fp32 | 快 1.80× | **慢 70×**（0.85→58 ms） | 先后两次误判（dtype、混合 dtype），最终定位为**该平台 GEMV 病态** |
-| P76 | 输入 dtype 跟随权重 | — | 仍慢 58 ms | dtype 修复正确但不充分（真因是平台） |
-| P77 | 自写 numba GEMV（aarch64 走）/ BLAS（x86 走） | 953 µs（BLAS） | 预期 ~1 ms | **平台自适应**（不全局翻转） |
-| P52→P76 | M2 融合核 | 快 1.15–2.16× | **慢 8–13×**（2.4→27 ms） | `--m2-kernel {fused,plain}`，默认 plain |
-| P74 | `OMP_PLACES=cores` | 无感 | **M2 再慢 8×**、CS/s 650 万 | 回滚（191 核 place 表每次同步遍历） |
+---
 
-**血泪教训**：连续三次把「本机优化」推到昇腾后翻车，且每次都要靠**服务器日志**才能发现。**跨平台项目里，x86 的性能结论不构成证据。**
+## 7. 基础设施事故
 
-### 7.2 M4b 收口：63.5 → 预期个位数
-- 数据链：`[ltm-diag]` 显示 5000 步内 recalls=80、**imprints<10**，而 M4b 累计
-  ≈205 s → **元凶是 imprint 侧**：aarch64 上一次 Python `learn`（65k 组合 ×
-  `_find_slot` 扫描 + dict 访问）≈ **20 秒**，且只占 1 核。
-- P70（predict 44.6×）+ P78（learn 批量多核）→ 预期毫秒级。
-- P67 首版失败（P80 之前）的三个坑这次全过：生长分支无条件、scatter 补
-  `_grow_row` 扩容、import 块漏 `prange`。
+### 7.1 CI 三轮仍未绿
 
-### 7.3 读出（readout）继续优化
-- P80：nll 用 `F.cross_entropy` 单 kernel（替代 softmax+log）、correct 索引走
-  pinned 缓冲（消除 pageable 小拷贝的隐式同步）。
-- **天花板判断**：剩余 = 2×320 MB 访存（不可减）+ ~3 小 kernel；**下一步建议
-  A/B `--readout-dtype fp16`**（昇腾 fp16 GEMV 内核成熟，bf16 可能慢）。
-- 再往下需 CANN 自定义算子或 msprof 内核级 profiling（需服务器）。
+**GitHub Actions 首次运行即失败**（两个 job），三轮修复：
 
-### 7.4 检查点：异步化（P81→P83b）
-- P81：bf16 保存崩（numpy 无 bf16）→ uint16 位模式，与加载侧 P46 闭环。
-- P83：`compact_csr` 向量化（每行 Python sorted → 全量 lexsort，10 万行 7.2→3.9 s）
-  + **异步写盘**（主线程一致快照 + 后台单 worker；数组必须 `.copy()` 防撕裂）
-  + 收尾 `wait_pending_saves()`。
-- P82/P83b：两次**可选依赖边界**事故——`_correct_pinned` 未定义（补丁静默
-  no-op）、`to_numpy` 引用未 import 的 torch。
+| 轮 | 症状 | 处置 |
+|---|---|---|
+| 1 | ①`bench_accel` 写 `outputs/` 未建目录 ②`verify_parallel_consistency` 硬依赖已删的本地数据集 | ①建目录 ②加**合成中文 parquet fallback** |
+| 2 | 诊断 step 自身失败，暴露**依赖 import 损坏**（`numba`） | pin `numpy<2.3` |
+| 3 | 仍失败且**无日志权限**（需 admin token） | 加失败诊断 step，**待 fhz 从 UI 提供 traceback** |
 
-### 7.5 基础设施
-- **GitHub Actions 首次运行即失败**（两个 job）：①`bench_accel` 写 `outputs/`
-  未建目录；②`verify_parallel_consistency` 硬依赖已删的本地数据集 → 加**合成
-  中文 parquet fallback**；③诊断 step 自身失败暴露**依赖 import 损坏** →
-  pin `numpy<2.3`。三轮后仍失败且无日志权限（需 admin token），已加失败诊断
-  step，待 fhz 从 UI 提供 traceback。
-- **git 历史改写**：96 个提交原用 gitcode 占位邮箱 → `filter-branch` 全量改为
-  `fhz20111206@icloud.com`，force push（**所有 hash 变，服务器 clone 需 reset**）。
+**根因是 CI 设计缺口**：无 GPU/NPU runner 时，验证脚本对外部环境的假设没有被兜住
+（BUGS #33）。三轮的共同点：**前两轮靠猜，第三轮才发现需要日志**。
 
-## 8. 当前状态与开放项
+### 7.2 补丁「静默 no-op」四次（本轮最贵的教训）
 
-- **已上线待服务器复测**：P70（predict 44.6×）、P77（平台自适应 GEMV）、
-  P78（learn 多核）、P80（nll 单 kernel）、P83（异步保存 + compact_csr 向量化）。
-- **开放项**：
-  1. `M4b` 剩余成本归因（`M4b_imprint` 内层段已加，等日志）；
-  2. bf16 读出学习退化的决策（`--readout-dtype fp32` 对照）；
-  3. 数据集语种构成核对（#18）；
-  4. 检查点 `compact_csr` 的 0.8–37 s 硬停顿（向量化候选）；
-  5. M6 读出幂律稀疏化（脑同构，方案已给，待性能地基确认后开工）；
-  6. `--readout-dtype fp16` vs bf16 的 A/B（昇腾 fp16 GEMV 内核可能更优）；
-  7. GitHub Actions 仍红（无日志权限，需 fhz 从 UI 贴 traceback）。
-- **预期**：全部落地后 1B 服务器步时 ≈ **20 ms/tok 以内**，其中 readout ~5.5 ms
-  （访存受限）为最大单段——再往下需要 CANN 自定义算子或 msprof 内核级 profiling。
+| # | 现象 | 原因 |
+|---|---|---|
+| 1 | P77 的 M4b split 编辑无效果 | `Edit` 的 replace 目标串不匹配 → commit 只含 encoder |
+| 2 | 删掉 `try` 的 `except` → SyntaxError | Edit 的 `new_string` 只写到 print，截断了配对块 |
+| 3 | P80 补丁静默 no-op → `_correct_pinned` 未定义 | 匹配串带了实际文件没有的注释后缀，`str.replace` 无匹配**不报错**，而 `print('patched')` 照常打印 |
+| 4 | P84 onehot 有两处初始化，只改一处 | 同类 |
+
+> **新纪律：replace/Edit 类补丁必须紧跟 grep 断言新文本存在。**
+> 四次里有三次是「打印了成功但没落盘」——**工具的成功返回不等于改动生效**。
+
+### 7.3 git 历史改写
+
+96 个提交原用 gitcode 占位邮箱 → `filter-branch` 全量改为正式邮箱并 force push。
+⚠ **所有 hash 已变，服务器 clone 必须 `reset --hard`**。
+教训：仓库初始配置时就该设好 `user.email`——占位邮箱会在公开仓库里留下无法追溯的归属。
+
+---
+
+## 8. 教训清单（P53–P84）
+
+按「代价大小」排序，都是**真实付出过代价**才写下的：
+
+1. **x86 的性能结论不构成证据。** 连续三次反噬（§4），每次都要靠服务器日志才能发现。
+2. **无 profile 的优化要么收益 <1%，要么负收益。** 本项目 4 个确定负收益（0.91/0.72/0.96/0.84×）。
+3. **「当前最大段」不等于「真元凶」。** M4b 在 token 1500 时只有 0.14 ms/tok，
+   token 3500 涨到 19.54，而同期 M2_infer 从 5.05 降到 2.70——**超线性增长的那段才是**。
+4. **改 dtype 必须同时改「权重」和「输入」两端**，否则脱离 BLAS（§4.1）。
+5. **观测手段不能破坏被观测的流水线**（`torch.npu.utilization()` 同步设备流）。
+6. **绑核类环境变量在超多核机器上可能反噬**（place 表规模 = 核数）。
+7. **分支密集的代码不要预先向量化**（短路是免费的）。
+8. **小规模不上 numba 核**（1.8 万元素的固定开销吃掉收益）。
+9. **逐位对拍的基线必须是同一库、同一 fastmath 口径的串行实现**，否则满屏假阳性。
+10. **性能优化先过对拍**——局部词表复用的性能收益伴随正确性破坏，直接放弃。
+11. **补丁必须 grep 断言落盘**（§7.2，四次中三次「打印成功但没落盘」）。
+12. **门禁不走的那条分支就是缺口**：bf16 round-trip 不在 fast 集合 → 本机全绿、服务器崩。
+13. **先加观测字段再改代码**——GC 假设的价值在于被数据证伪（P64）。
+14. **超多核机器上「限制线程」要早于 BLAS 初始化**，晚设无效（`import numpy` 之前设）。
+
+---
+
+## 9. 已上线但待服务器复测
+
+P70（predict 44.6×）· P77（平台自适应 GEMV）· P78（learn 多核）·
+P80（nll 单 kernel）· P83（异步保存 + `compact_csr` 向量化）· P84（fp8 forward + fp16 更新）。
+
+**当前开放项统一见 `PHD-Net_性能评估与迭代方案.md` §十**，本文不重复维护。
