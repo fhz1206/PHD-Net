@@ -86,6 +86,11 @@ CUDA / ROCm / CANN·昇腾 NPU / DirectML / CPU（P10 目录化，P30 定稿，P
 | P63 | AI Core% 仍 `--` | `npu-smi` 不在非交互 shell 的 PATH；解析又依赖该机没有的 Bus-Id 列 | `telemetry.py` |
 | P71 | CS/s 250 万–600 万 | numba/OpenMP 线程**无核心亲和性**，核间漂移 | `--omp-proc-bind`（新，默认开） |
 | P73 | 同上 + 只用 1.1–3.2 核 | `*_NUM_THREADS` 从未限 → OpenBLAS 拉 **191 线程**跑 1024×2048 sgemv | `train.py`（`import numpy` 之前设） |
+| P74 | 撤 `OMP_PLACES=cores` 后 M2 仍慢 → 撤掉 | 191 核 place 表让线程池每次同步遍历（CS/s 650 万） | 只保留 `OMP_PROC_BIND=close` |
+| P76 | M1 慢 70× 的两次误判 | ①fp32 在 aarch64 病态；②混合 dtype 脱离 BLAS | `--encoder-dtype` 开关 + 输入 dtype 跟随权重 |
+| P77 | **平台自适应 GEMV** | aarch64 numpy 对 1024×2048 单行 GEMV 病态（fp32/fp64 都慢） | `_gemv_rows`（aarch64）/ BLAS（x86） |
+| P81 | bf16 检查点崩 | numpy 无 bf16 | `to_numpy` 存 uint16 位模式（加载侧 P46 解码） |
+| P82/P83b | 两次可选依赖边界事故 | `_correct_pinned` 未定义（补丁静默 no-op）、`to_numpy` 引用未 import 的 torch | 惰性 import + getattr 防御 |
 
 **已确立的配置口径**：
 - `--nll-sync-every` **默认 8**（设备侧累积 → CPU/NPU 重叠）；

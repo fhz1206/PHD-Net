@@ -1,4 +1,4 @@
-# PHD-Net 迭代优化与修复日志（2026-09-29 ~ 09-30，P53–P81）
+# PHD-Net 迭代优化与修复日志（2026-09-29 ~ 09-30，P53–P83b）
 
 > 本文记录两天集中迭代的**完整过程**：动机 → 做法 → 实测 → 教训。
 > 配套文档：当前结论见 `README.md` 与 `docs/PHD-Net_性能评估与迭代方案.md`；
@@ -13,7 +13,8 @@
 | M4b_ltm | 63.5 ms/tok（占 76%）且超线性 | 2.7–22 → 预期个位数（P70 predict 44.6× + P78 learn 多核） |
 | 读出损失计算 | softmax+log+cast+scatter 4 kernel | cross_entropy 单 kernel（P80） |
 | 线程治理 | numba 191 线程 / BLAS 191 线程 | 各限 8 + PROC_BIND 绑核 |
-| 检查点 | bf16 保存崩溃 | uint16 位模式闭环（P81） |
+| 检查点 | bf16 保存崩溃 + 0.8–37 s 硬停顿 | 位模式闭环（P81）+ 异步写盘（P83） |
+| CPU 主循环 | M1 58 ms / M2 27 ms（昇腾反噬） | 平台自适应 GEMV + plain 核（P76/P77） |
 | 缺陷台账 | 无 | `BUGS.md` 30 条（含被否决的优化） |
 
 ---
@@ -100,15 +101,62 @@
 - 与「M7_Core 中文 3,697 万块 ≈ 95%」的记录**严重不符**（原记录在删除清单的
   元数据中，已内联进 README）→ 需核对数据制备/上传环节。
 
-## 7. 当前状态与开放项
+## 7. 续：P76–P83b（当日下午，平台差异主导的一轮）
 
-- **已上线待服务器复测**：P70（predict 44.6×）、P76（M1 dtype 修复）、
-  P77（平台自适应 GEMV）、P78（learn 多核）、P80（nll 单 kernel）。
+### 7.1 三次「x86 更快、昇腾更慢」的反噬
+| P | 改动 | x86 | 昇腾 | 处置 |
+|---|---|---|---|---|
+| P61→P76 | M1 编码器 fp32 | 快 1.80× | **慢 70×**（0.85→58 ms） | 先后两次误判（dtype、混合 dtype），最终定位为**该平台 GEMV 病态** |
+| P76 | 输入 dtype 跟随权重 | — | 仍慢 58 ms | dtype 修复正确但不充分（真因是平台） |
+| P77 | 自写 numba GEMV（aarch64 走）/ BLAS（x86 走） | 953 µs（BLAS） | 预期 ~1 ms | **平台自适应**（不全局翻转） |
+| P52→P76 | M2 融合核 | 快 1.15–2.16× | **慢 8–13×**（2.4→27 ms） | `--m2-kernel {fused,plain}`，默认 plain |
+| P74 | `OMP_PLACES=cores` | 无感 | **M2 再慢 8×**、CS/s 650 万 | 回滚（191 核 place 表每次同步遍历） |
+
+**血泪教训**：连续三次把「本机优化」推到昇腾后翻车，且每次都要靠**服务器日志**才能发现。**跨平台项目里，x86 的性能结论不构成证据。**
+
+### 7.2 M4b 收口：63.5 → 预期个位数
+- 数据链：`[ltm-diag]` 显示 5000 步内 recalls=80、**imprints<10**，而 M4b 累计
+  ≈205 s → **元凶是 imprint 侧**：aarch64 上一次 Python `learn`（65k 组合 ×
+  `_find_slot` 扫描 + dict 访问）≈ **20 秒**，且只占 1 核。
+- P70（predict 44.6×）+ P78（learn 批量多核）→ 预期毫秒级。
+- P67 首版失败（P80 之前）的三个坑这次全过：生长分支无条件、scatter 补
+  `_grow_row` 扩容、import 块漏 `prange`。
+
+### 7.3 读出（readout）继续优化
+- P80：nll 用 `F.cross_entropy` 单 kernel（替代 softmax+log）、correct 索引走
+  pinned 缓冲（消除 pageable 小拷贝的隐式同步）。
+- **天花板判断**：剩余 = 2×320 MB 访存（不可减）+ ~3 小 kernel；**下一步建议
+  A/B `--readout-dtype fp16`**（昇腾 fp16 GEMV 内核成熟，bf16 可能慢）。
+- 再往下需 CANN 自定义算子或 msprof 内核级 profiling（需服务器）。
+
+### 7.4 检查点：异步化（P81→P83b）
+- P81：bf16 保存崩（numpy 无 bf16）→ uint16 位模式，与加载侧 P46 闭环。
+- P83：`compact_csr` 向量化（每行 Python sorted → 全量 lexsort，10 万行 7.2→3.9 s）
+  + **异步写盘**（主线程一致快照 + 后台单 worker；数组必须 `.copy()` 防撕裂）
+  + 收尾 `wait_pending_saves()`。
+- P82/P83b：两次**可选依赖边界**事故——`_correct_pinned` 未定义（补丁静默
+  no-op）、`to_numpy` 引用未 import 的 torch。
+
+### 7.5 基础设施
+- **GitHub Actions 首次运行即失败**（两个 job）：①`bench_accel` 写 `outputs/`
+  未建目录；②`verify_parallel_consistency` 硬依赖已删的本地数据集 → 加**合成
+  中文 parquet fallback**；③诊断 step 自身失败暴露**依赖 import 损坏** →
+  pin `numpy<2.3`。三轮后仍失败且无日志权限（需 admin token），已加失败诊断
+  step，待 fhz 从 UI 提供 traceback。
+- **git 历史改写**：96 个提交原用 gitcode 占位邮箱 → `filter-branch` 全量改为
+  `fhz20111206@icloud.com`，force push（**所有 hash 变，服务器 clone 需 reset**）。
+
+## 8. 当前状态与开放项
+
+- **已上线待服务器复测**：P70（predict 44.6×）、P77（平台自适应 GEMV）、
+  P78（learn 多核）、P80（nll 单 kernel）、P83（异步保存 + compact_csr 向量化）。
 - **开放项**：
   1. `M4b` 剩余成本归因（`M4b_imprint` 内层段已加，等日志）；
   2. bf16 读出学习退化的决策（`--readout-dtype fp32` 对照）；
   3. 数据集语种构成核对（#18）；
   4. 检查点 `compact_csr` 的 0.8–37 s 硬停顿（向量化候选）；
-  5. M6 读出幂律稀疏化（脑同构，方案已给，待性能地基确认后开工）。
+  5. M6 读出幂律稀疏化（脑同构，方案已给，待性能地基确认后开工）；
+  6. `--readout-dtype fp16` vs bf16 的 A/B（昇腾 fp16 GEMV 内核可能更优）；
+  7. GitHub Actions 仍红（无日志权限，需 fhz 从 UI 贴 traceback）。
 - **预期**：全部落地后 1B 服务器步时 ≈ **20 ms/tok 以内**，其中 readout ~5.5 ms
   （访存受限）为最大单段——再往下需要 CANN 自定义算子或 msprof 内核级 profiling。

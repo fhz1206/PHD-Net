@@ -16,7 +16,14 @@
 | 进程用核 | 1.1–3.2 / 191；CS/s 250 万–600 万 | BLAS 线程未限（**191 线程跑 1024×2048 sgemv**）→ P73 已在 `import numpy` 前限 8 线程 |
 | 语种 | `--lang zh` 过滤有效（中文仅占分片 **2%**，`unk` 47% 是代码） | 语种自检 `[sample lang=zh] CJK=…%`；数据集构成问题待核 |
 | PPL | 1.4–2.1 万不降 | bf16 读出使非目标行更新被舍入（\|dp\|≈1e-6 vs 半 ULP≈2e-4）→ 退化纯 Hebbian；对照 `--readout-dtype fp32` |
-| 未归属开销 | 分段之和 < 总耗时（主循环从未被测量） | P72 已加主循环三段计时（`loop:`） |
+| 未归属开销 | 分段之和 < 总耗时（主循环从未被测量） | P72 已加主循环三段计时（`loop:`）；实测 0.06/0.13/step 102 → 黑洞在 step 内 |
+| **M1_encode** | 0.85 → **58–60**（昇腾） | P77 平台自适应：aarch64 走自写 numba GEMV，x86 走 BLAS |
+| **M2_infer** | 2.4 → **20–27**（昇腾） | P76 `--m2-kernel plain`（A/B 实测快 3–4×），默认 plain |
+| **M4b_ltm** | 元凶 = imprint（aarch64 单次 ~20 s） | P70 predict 44.6× + P78 learn 批量多核；P67 首版已回滚 |
+| readout | 9.5–13.5 → **5.5–7** | P80 cross_entropy 单 kernel + pinned correct；建议 A/B fp16 |
+| 检查点 | 每 5 万步硬停 0.8–37 s | P83 `compact_csr` 向量化 + **异步写盘**（主线程快照 + 后台 worker） |
+| 线程 | BLAS 191 线程 / OMP_PLACES | P73 BLAS 限 8（`import numpy` 前）；P74 撤 OMP_PLACES；P71 保留 PROC_BIND |
+| 语种 | `--lang zh` 有效但中文仅 2% | 语种自检 `[sample lang=zh] CJK=…%` |
 > 历史细节见 git 历史；回归门槛：`tests/run_tests.py` fast **9/9**。
 > 配套：《架构设计》《对标 Transformer 优化路线图》《竞争力与脑同构性评估》《硬件后端适配报告》
 

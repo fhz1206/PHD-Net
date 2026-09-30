@@ -232,6 +232,9 @@ python train_1b/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz --chat
 | `--prefetch-workers` | `0`（自动 = **1 进程**） | parquet 解码在 pyarrow 内多线程且释放 GIL，单进程即吃满核；多进程只增内存 |
 | `--prefetch-depth` | `0`（缺省 **256** = 在途数据量 4×） | 预取队列深度（批数）；缓冲 4× 防数据供给饿死，仍有界（背压成立） |
 | `--vocab-workers` | `0`（核数×0.8） | 词表扫描线程数（nogil 真并行） |
+| 平台差异开关 | CLI | `--m2-kernel {fused,plain}`（默认 **plain**，昇腾实测快 3–4×）、`--encoder-dtype {fp64,fp32,fp16,bf16}`（默认 **fp64**；昇腾 aarch64 上 fp32/fp64 的 numpy GEMV 都病态慢，故默认 fp64，aarch64 走自写 numba 核）、`--readout-dtype`（建议 A/B fp16 vs bf16） |
+| 线程治理 | CLI | `--numba-threads`（默认 8）、`--omp-proc-bind`（默认开，`OMP_PROC_BIND=close`；⚠ 不设 `OMP_PLACES`，191 核 place 表实测反噬）、BLAS 线程在 `import numpy` 前限 8 |
+| 检查点 | 行为 | 每 `ckpt-every`（默认 50000）步**异步**保存：主线程做一致快照（数组 `.copy()`），后台单 worker 写盘；收尾 `wait_pending_saves()` |
 | 读出计时 | 日志 | `token N … \| 读出 X ms/tok（后端@设备，占 Y%）` |
 
 启动日志会打印并行度预算、能力矩阵（numba 只能上 CPU）与读出后端（回落时给原因）。

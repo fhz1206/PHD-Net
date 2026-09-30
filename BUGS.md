@@ -41,7 +41,8 @@
 | 29 | 每步 `argmax` 扫全词表 + 重复 `stdp.predict` | 既有遗留 | `11c9a6e` |
 | 30 | bf16 读出的检查点保存崩（numpy 无 bf16） | 我引入（bf16 默认） | `9f69282` |
 | 31 | P80 补丁静默 no-op → `_correct_pinned` 未定义 | 我引入（当场修） | `90b7b63` |
-| 32 | `to_numpy` 用了 `torch` 但 model.py 不 import torch | 我引入（当场修） | `待提交` |
+| 32 | `to_numpy` 用了 `torch` 但 model.py 不 import torch | 我引入（当场修） | `4666870` |
+| 33 | GitHub Actions 首跑即红（outputs 目录 / 数据集缺失 / 依赖 import） | CI 设计缺口 | `0a5ab0b`（仍红，待 traceback） |
 
 ---
 

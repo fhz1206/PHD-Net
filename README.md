@@ -264,6 +264,10 @@ Math-L3 122.5 GB（4 子集）；合计 **994.3 GB** → 50 GB 云端预算下�
 - 硬件后端适配 → `docs/PHD-Net_硬件后端适配报告.md`
 - 一页式介绍 → `docs/index.html`
 
+**CI**：三套并存——GitCode（`.gitcode/workflows/ci.yml` + `Jenkinsfile`）与
+GitHub Actions（`.github/workflows/ci.yml`，GitHub 为镜像）。GitHub 侧自 2026-09-30
+起有失败诊断 step（环境版本 + 完整 traceback 重跑），便于无 token 情况下从 UI 读日志。
+
 ## CI/CD
 
 - 回归入口 `tests/run_tests.py`（fast 9 项）+ 逐位对拍 `tests/verifiers/`。
