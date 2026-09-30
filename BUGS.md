@@ -38,7 +38,8 @@
 | 26 | 诊断行 `np.diff(rev_indptr)` 每次物化 134 MB | **我引入（P68）** | 待提交 |
 | 27 | `_rev_to_csr` 构造期 1677 万次 Python 循环 | 我引入（P68） | 待提交 |
 | 28 | BLAS 线程未限（191 线程跑小 sgemv） | 既有遗留 | 待提交 |
-| 29 | 每步 `argmax` 扫全词表 + 重复 `stdp.predict` | 既有遗留 | 待提交 |
+| 29 | 每步 `argmax` 扫全词表 + 重复 `stdp.predict` | 既有遗留 | `11c9a6e` |
+| 30 | bf16 读出的检查点保存崩（numpy 无 bf16） | 我引入（bf16 默认） | `9f69282` |
 
 ---
 
@@ -213,6 +214,16 @@
 
 未采纳（记录理由）：`learn` 侧 numba 化需先建逐位门禁（当前无覆盖）；
 `_ensure` 的 O(n²) 字符串切片（收益小、需改 tokenize 状态机）。
+
+### #30 bf16 读出的检查点保存崩溃（`9f69282`）
+- **症状**（服务器 2026-09-30 14:39）：`save_model` → `to_numpy(ro_W)` →
+  `TypeError: Got unsupported ScalarType BFloat16`。
+- **根因**：`readout_dtype=bf16` 使设备张量是 bf16，而 **numpy 无原生 bf16**
+  → `.numpy()` 直接抛。bf16 检查点路径此前从未走到「保存」这一步。
+- **修复**：`to_numpy` 对 bf16 张量存 **uint16 位模式**（`view(torch.uint16)`），
+  与加载侧 P46 的解码（`ckpt_dtype=bf16` + `dtype.kind in "ui"` →
+  `view(bfloat16)`）正好闭环——无损，且检查点保持 bf16 体积（不膨胀成 fp32）。
+- **门禁**：`verify_ms_stream.py` 增加 bf16 round-trip 用例（41/41）。
 
 ### #15 fp32 权重 @ fp64 输入 → 脱离 BLAS 慢 5.9×（`0f203d5`）
 - **症状**：M1 编码器改 fp32 后反而从 857 µs 变 5047 µs。
