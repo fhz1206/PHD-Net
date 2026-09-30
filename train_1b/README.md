@@ -301,7 +301,7 @@ python train_1b/train.py --preset 1b --data pretrain --remote-data --resume
 **本文不给性能数字。** 所有 ms/tok、带宽、加速比、平台差异对照表的唯一出处是
 `docs/PHD-Net_性能评估与迭代方案.md`；「为什么吃不满 191 核」的论证在
 `docs/PHD-Net_并行与加速架构分析.md`；优化过程与被否决的方案在
-`docs/PHD-Net_迭代优化与修复日志.md`。本文 §2 只解释**开关默认值为什么这么设**。
+`docs/BUGS.md#结构性教训汇总`。本文 §2 只解释**开关默认值为什么这么设**。
 
 ### 7.3 诊断工具
 

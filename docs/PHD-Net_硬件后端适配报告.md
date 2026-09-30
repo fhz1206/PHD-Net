@@ -190,7 +190,7 @@ P29 修正了基准工具的三个 bug（异步设备无 synchronize / dtype 从
 | **P81 / P84** | bf16 检查点保存崩 `unsupported ScalarType BFloat16` | numpy 无原生 bf16 | `to_numpy` 存 uint16 **位模式**，加载侧按 `ckpt_dtype` 解码闭环（无损）；fp8 同理存 uint8 |
 | **P76/P77** | M1 编码器在昇腾慢 70×（两次误判） | ① fp32 在 aarch64 病态；② 混合 dtype（fp32 权重 @ fp64 输入）脱离 BLAS | 输入 dtype 跟随权重 + **平台自适应 GEMV**（aarch64 → 自写 numba 核 `_gemv_rows`；x86 → BLAS），**不做全局翻转** |
 
-**平台差异铁律**（三次反噬，见《并行与加速架构分析》与《迭代优化与修复日志》）：
+**平台差异铁律**（三次反噬，见《并行与加速架构分析》与 BUGS.md「结构性教训汇总」）：
 
 | 改动 | x86 | 昇腾 |
 |---|---|---|

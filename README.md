@@ -263,10 +263,8 @@ Math-L3 122.5 GB（4 子集）；合计 **994.3 GB** → 50 GB 云端预算下�
 | **理解六个机制与脑同构、容量账、铁律** | `docs/PHD-Net_架构设计.md` |
 | **查性能数字**（唯一出处）| `docs/PHD-Net_性能评估与迭代方案.md` |
 | **搞懂为什么吃不满多核与 NPU** | `docs/PHD-Net_并行与加速架构分析.md` |
-| **回看这轮迭代怎么做的、哪些方案被否决** | `docs/PHD-Net_迭代优化与修复日志.md` |
 | **迁移/适配硬件后端、昇腾踩坑** | `docs/PHD-Net_硬件后端适配报告.md` |
 | **与 Transformer / 大脑对比的结论** | `docs/PHD-Net_竞争力与脑同构性评估.md` |
-| **五轨道优化结论与开放项** | `docs/PHD-Net_对标Transformer优化路线图.md` |
 | **查某个坑的根因** | `BUGS.md`（33 条，症状 → 根因 → 门禁缺口） |
 | 子目录用法 | `train_1b/README.md`、`tools/README.md`、`chat/README.md`、`datasets/README.md`、`phdnet/backends/README.md` |
 

@@ -83,3 +83,17 @@ M5 公平评测（PHD-Net vs nanoGPT 级 Transformer）入口不在本目录：
 - `experiment_*.py`、`ablation_modules.py`：一次性机制实验，结论已固化进 `docs/`。
 - `archive/`：`bench.py`、`bench_1b_migrate.py`、`audit_prof_1b.py`、`hunt_bugs.py`、
   `rerun_task6.py` —— 保留可追溯，不再维护。
+
+## 云端性能重测（P86，2026-09-30）
+
+| 工具 | 用途 |
+|---|---|
+| `tools/bench_server.py` | **在服务器上一键重测**所有关键配置（基线 / m2 核 / encoder dtype / readout dtype / 绑核 / 线程数），解析训练日志产出机器可读 JSON（含步时趋势、九段分解、遥测、环境指纹 + commit） |
+| `tools/apply_bench.py` | 把该 JSON **回填**进 `docs/PHD-Net_性能评估与迭代方案.md` 的基线块（性能数字的唯一权威处），并绑定测量配置与 commit |
+
+```bash
+# 服务器：约 15 分钟
+python tools/bench_server.py --preset 1b --steps 3000 --profile quick
+# 回填（本地或服务器皆可）
+python tools/apply_bench.py outputs/experiments/server_bench_<ts>.json
+```
