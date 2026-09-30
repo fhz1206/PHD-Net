@@ -509,9 +509,16 @@ def to_numpy(x, dtype=None):
     P17（服务器实测）：昇腾机器上 `np.asarray(npu_tensor)` 抛
     "can't convert npu:0 device type tensor to numpy"，检查点保存与参数统计
     都会踩到；torch 张量须先 `.detach().to('cpu')`。
+    P81（2026-09-30 服务器实测）：**bfloat16 张量 `.numpy()` 抛
+    "Got unsupported ScalarType BFloat16"**（numpy 无原生 bf16）→ 存 **uint16
+    位模式**，与加载侧 P46 的解码（`ckpt_dtype=bf16` + dtype.kind in "ui" →
+    `view(bfloat16)`）正好闭环，无损且不膨胀。
     """
     if hasattr(x, "detach"):
-        x = x.detach().to("cpu").numpy()
+        x = x.detach().to("cpu")
+        if x.dtype == torch.bfloat16:
+            x = x.view(torch.uint16)            # 位模式透传（加载侧 view 回）
+        x = x.numpy()
     else:
         x = np.asarray(x)
     return x if dtype is None else x.astype(dtype, copy=False)

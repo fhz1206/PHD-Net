@@ -152,3 +152,23 @@ def _raises(exc, fn, *a, **kw):
 
 if __name__ == "__main__":
     raise SystemExit(_main())
+
+
+def test_bf16_tonumpy_roundtrip() -> None:
+    """P81：bf16 张量 → to_numpy(uint16 位模式) → view 回 bf16，无损。
+
+    服务器实测（2026-09-30）：readout_dtype=bf16 时检查点保存崩在
+    `TypeError: Got unsupported ScalarType BFloat16`（numpy 无原生 bf16）。
+    加载侧 P46 已支持 uint16 位模式解码，保存侧必须配套。
+    """
+    import torch
+    from phdnet.model import to_numpy
+
+    t = torch.randn(256, dtype=torch.bfloat16)
+    arr = to_numpy(t)
+    assert arr.dtype == np.uint16, f"应为 uint16 位模式，得到 {arr.dtype}"
+    back = torch.from_numpy(arr).view(torch.bfloat16)
+    assert torch.equal(back, t), "bf16 round-trip 必须无损"
+    # 非 bf16 路径不受影响
+    a32 = to_numpy(torch.randn(8))
+    assert a32.dtype == np.float32
