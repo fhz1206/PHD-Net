@@ -409,6 +409,33 @@ def main() -> None:
     # （涨 8-13×）、CS/s 反而升到 600 万。只保留 PROC_BIND。
     if args.omp_proc_bind:
         os.environ.setdefault("OMP_PROC_BIND", "close")
+    # P88：加速器**启动期健康检查**。服务器 2026-09-30 18:59 报
+    # `error code 507033 / Failed to start the device / open device 0 failed`
+    # → 回落 numba CPU（机制正常，但**原因只出现在 CANN 日志里**，训练日志
+    # 看不出是「设备被上次残留进程占用」还是「驱动异常」）。这里在建 net 之前
+    # 真正建一个设备张量，把原因翻译成人能懂的一句话。
+    def _npu_health():
+        spec = str(getattr(args, "accel", "auto") or "auto").lower()
+        if spec in ("cpu", "off", "numba"):
+            return
+        try:
+            import torch
+            if not hasattr(torch, "npu"):
+                return
+            _ = torch.zeros(4, device="npu")
+            _ = torch.zeros(4, device="npu") + 1
+        except Exception as e:                                # noqa: BLE001
+            msg = str(e).replace("\n", " ")[:160]
+            print("[device] ⚠️ NPU 初始化失败 → 读出将回落到 numba CPU。"
+                  f"\n         原因：{msg}"
+                  "\n         常见：①上一次训练的 python 进程还在（查 `npu-smi info`"
+                  " 的进程列表 / `ps aux | grep train_1b` 并 kill）；"
+                  "\n              ②容器未映射设备或驱动状态异常（重进容器 / `npu-smi info`"
+                  " 看设备是否 Healthy）；"
+                  "\n              ③设备被占满（507033 = device retain 失败）。"
+                  "\n         想强制 CPU：加 --accel cpu", flush=True)
+    _npu_health()
+
     # P79：numba 缓存状态可见化（cache=True 的核是否真的命中持久缓存）
     try:
         import numba
