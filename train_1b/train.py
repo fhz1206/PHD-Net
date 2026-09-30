@@ -179,6 +179,11 @@ def _print_table_stats(lm) -> None:
 
 
 def main() -> None:
+    # P94：终端语言随 `--lang` 切换（zh=全中文默认 / en=全英文），必须
+    # 早于任何 print 安装。zh 时是空操作；en 时输出层把历史中文文案转英文。
+    from phdnet.i18n import set_lang, install_stream_filter
+    set_lang(args.lang)
+    install_stream_filter()
     ap = argparse.ArgumentParser(description="PHD-Net 1B 档流式训练（事件驱动稀疏类脑）")
     ap.add_argument("--preset", choices=list(PRESETS), default="1b",
                     help="smoke=管线验证 / 1b=标准档(容量≥1B) / 1b_max=大主干档")

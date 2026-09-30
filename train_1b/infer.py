@@ -221,6 +221,10 @@ def main() -> None:
                          "注意本入口为 numba CPU 生产路径（单路），"
                          "多卡加速见 torch 栈 tools/train_torch_lm.py")
     args = ap.parse_args()
+    # P94：终端语言随 --lang 切换（zh=全中文默认 / en=全英文）
+    from phdnet.i18n import set_lang, install_stream_filter
+    set_lang(args.lang)
+    install_stream_filter()
 
     # ---- 设备探测（诚实声明：1B 生产推理为 numba CPU 单路，不假装多卡）----
     try:
