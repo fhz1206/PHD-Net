@@ -276,3 +276,17 @@ token 100  … | 读出 1.234 ms/tok（accel:npu@npu, 占 12.3%）
   （P29 修正版）、`multi_device` 全套、`AccelReadout`。
 
 此后读出加速只有一个实现（AccelReadout），基准只测生产对象。
+
+---
+
+## 2026-09-29 增补（昇腾实测后的修复）
+
+| 项 | 问题 | 修复 |
+|---|---|---|
+| **P55 崩溃** | NPU 首次真跑生产训练即崩：`FakeTensor - None` @ `accel_readout.py:159`。P45 的「`target_idx` 路径就地改 p」只实现在 **eager 分支**，`torch.compile` 融合核漏改（`t32=None`）；既有验证只走 target 数组路径 | 融合核逐行镜像 eager（`p−onehot` ≡ `p[c]−= 1`，数值等价）；新增 `verify_accel_readout_p55.py` 2×2 矩阵 9/9 |
+| **inductor 惰性编译** | `torch.compile()` 构造期不编译，**首次调用**才编译 → 编译失败会崩生产 | 首次失败**永久回落 eager + 告警**（P19「回落 + 记原因」）；`--torch-compile` 现**默认关** |
+| **P58 同步/流水** | 每步 `.item()`（`nll_sync_every` 默认为 1）把 NPU 延迟全额暴露给 CPU；h 的 pageable H2D 阻塞 | `--nll-sync-every` 默认 **8**；`_staged_to_dev` 用 pinned 暂存 + `non_blocking`（4 槽 + Event 覆写保护） |
+| **P57/P63 遥测** | `Telemetry()` 无参构造 → 加速器分支永不触发；`npu-smi` 不在 PATH；解析依赖该机没有的 Bus-Id 列 | device 自动探测 + 三级定位 `npu-smi` + **按表头定位列**解析；AI Core% 改走 npu-smi（`torch.npu.utilization()` 会同步设备流） |
+| **P71 绑核** | numba/OpenMP 线程无亲和性 → 核间漂移（CS/s 250 万+） | `--omp-proc-bind`（默认开）设 `OMP_PROC_BIND=close` / `OMP_PLACES=cores`；`--numba-threads` 默认 8（P22：核内 1→6 线程仅 1.16×） |
+| **P73 BLAS 线程** | `*_NUM_THREADS` 从未限 → OpenBLAS 拉 191 线程跑小 sgemv | 在 **`import numpy` 之前**设四个环境变量为 8（仓库早有 `configure_host_threads()` 但无生产调用点） |
+| **bf16 读出的机制代价** | 非目标行更新（\|dp\|≈1e-6）被 bf16 半 ULP（≈2e-4）舍掉 → 学习退化为纯 Hebbian，PPL 震荡不降 | 建议 `--readout-dtype fp32` + `--ckpt-dtype bf16`（**存储仍半精度**，学习规则精确） |

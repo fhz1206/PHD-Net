@@ -345,7 +345,11 @@ AMD GPU 建议 DirectML 路径。
 > A3 非 softmax 读出配置生效、B1–B7（含 `max_len` 配置化、dtype 纳入等价门禁、`readonly` 可复现评估等）、
 > C1/C2/C6/C7/C8（迹剪枝、`consolidate` 节流、`count_params`、重置结果、读出权重上限）。
 > 铁律：新增行为一律走 config 开关且默认关闭、默认路径逐位不变；`tests/run_tests.py` fast **11/11 通过**。
-> **语料布局（2026-09-21 更新）**：`data/` 已更名 `datasets/` 并分子目录（`eval/` 冻结语料与探针、`sft/`、`pretrain/`）；
+> **语料布局（2026-09-29 更新）**：`data/` → `datasets/`（分子目录 `sft/`、`pretrain/`，`raw/` 存原始件不入库）；
+> **冻结评测基准已迁到仓库根 `eval_corpus/`**（`internal_corpus.txt` 23,504 字符 + `ood_wiki.txt` 探针）——
+> 2026-09-27 指令「docs/*.md 不是数据集」。训练数据有两个入口：本地 `datasets/`（默认，逐位不变）
+> 与 `--remote-data` 直读 ModelScope（HTTP Range 流式零落盘，`--remote-fraction` 取前缀分片；
+> atomgit 限额 1 GiB < 交付 4.64 GiB，故服务器走远程）。
 > 中文维基预训练语料（原 54.0 + 5.4 MB）已按指令删除。**预训练语料已拍板（2026-09-22）：Infinity-Instruct `7M_core`（M7_Core）**——atomgit `BAAI/Infinity-Instruct`，75 parquet 分片 6.1 GB，实测 750 万条对话 / 全量文本 ~10.2 GB，经 `tools/convert_infinity.py` 流式转换落 `datasets/pretrain/infinity_m7core.txt`（**已就位：7,449,106 条 / 10.07 GB 文本**；语言分布 en 89.9% / zh-cn 10.1%，中文子集约 75 万条 / ~1 GB）。
 > **SFT 语料已就位（2026-09-23）**：OpenBMB `UltraInteract_sft`——288,579 条 / **0.603 GB 文本**，77,023 条唯一指令（偏好树 `parent_id`，平均 3.75 响应/指令），任务构成 Coding 39.8% / Math 56.2% / Logic 4.0%；`tools/convert_ultrainteract.py` 转换落 `datasets/sft/ultrainteract_sft.txt`。
 > 旧的多份 SFT / 会话轨迹语料（`tool_train.txt` 等）此前已全部删除，详见《性能评估与迭代方案》§5.2。
@@ -573,13 +577,13 @@ M8 采用与 M9 同构的非对称外积联想链（STDP 拓扑核的稀疏出�
 |---|---|---|---|
 | 内置（冻结） | `eval_corpus/internal_corpus.txt` | **23,504 字符**（逐字复制自本文 2026-09-21 版） | 默认回归与 ours 对拍（**编辑本文不再影响语料**） |
 | 探针（远域） | `eval_corpus/ood_wiki.txt` | 26 篇 / 20,188 字符（ModelScope Range 抽取） | 泛化探针 `tests/demo_gen.py` |
-| 外部预训练 | `datasets/pretrain/`（= Infinity-Instruct 7M_core / M7_Core，2026-09-22 拍板并已就位） | — | 预训练 / 跨轮稳定锚点（维基语料已按指令删除） |
+| 外部预训练 | `datasets/pretrain/` 或 `--remote-data`（ModelScope `fhzfhz/Mixture-General-Mini`）：**Infinity-Instruct M7_Core**（7.45M dialogues）+ **Magpie-R1**（201 万条英文 CoT）+ **Ultra-FineWeb-L3 中文**（8 万） | — | 预训练 / 跨轮稳定锚点（维基语料已按指令删除） |
 
 统一口径：**字符归一 PPL** = exp(总 token NLL / 评估段字符数)，并报 bpc。
 Transformer 对照为自建 nanoGPT 级模型（PyTorch，**0.52M（96d×2L）/ 2.38M（192d×4L）**），须在**同语料**下重测才可比。
 
 > ⚠ **同文档也存在两种口径，勿混用**：
-> - **默认 256 维栈**（`tests/eval_common.py` BASE：n_sdr=256、分词 min_count=5）→ 冻结语料当前 **78.16**（bpc 6.288），`tests/eval_suite.py`
+> - **默认 256 维栈**（`tests/eval_common.py` BASE：n_sdr=256 / k_sparse=32 / eta_pc=0 / **eta_readout=0.15**、读出 fp32；复测入口 `tools/rebaseline.py`）→ **现行锚点：4,000 字符段 394.4687（bpc 8.624）／全语料 21,924 字符 359.2603（bpc 8.489）**，评测语料 2026-09-28 更换为中文维基高质量条目合集（旧口径 78.16 / 90.2480 / 73.1166 仅存于 git 历史，不可混用），`tests/eval_suite.py`
 > - **M9 消融 128 维小栈**（`tests/demo_m9.py` BASE：n_sdr=128、分词 min_count=8）→ 冻结语料当前 R = **102.97**（bpc 6.686）
 >
 > 两者网络宽度与分词粒度都不同，绝对数值不可比；跨组做除法得到的"提升倍数"没有意义。

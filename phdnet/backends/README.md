@@ -71,3 +71,30 @@ CUDA / ROCm / CANN·昇腾 NPU / DirectML / CPU（P10 目录化，P30 定稿，P
 - **三源采样器（P49）**：`tools/fetch_ms.py`（web/code/math，
   `--plan web=3,code=2,math=1`，零原始落盘，断点续跑）。
 - **fast 门禁**：9/9 通过。
+
+---
+
+## 2026-09-29 昇腾实测增补（P55–P73）
+
+**踩坑顺序（都是「第一次真机跑才暴露」）**：
+
+| # | 现象 | 根因 | 位置 |
+|---|---|---|---|
+| P55 | `FakeTensor - None` 崩 dynamo | P45 的「就地改 p」只写在 **eager 分支**，融合核漏改；旧验证从不传 `target_idx` | `accel_readout.py::_train_step_core` |
+| P57 | NPU/HBM 遥测恒 `--` | `Telemetry()` 无参构造 → `device=""` → 加速器分支永不触发（P41 遗留） | `telemetry.py` |
+| P58 | CPU 忙、NPU 空闲 | 每步 `.item()`（`nll_sync_every` 默认 1）+ pageable H2D 阻塞 | `train.py` / `_staged_to_dev` |
+| P63 | AI Core% 仍 `--` | `npu-smi` 不在非交互 shell 的 PATH；解析又依赖该机没有的 Bus-Id 列 | `telemetry.py` |
+| P71 | CS/s 250 万–600 万 | numba/OpenMP 线程**无核心亲和性**，核间漂移 | `--omp-proc-bind`（新，默认开） |
+| P73 | 同上 + 只用 1.1–3.2 核 | `*_NUM_THREADS` 从未限 → OpenBLAS 拉 **191 线程**跑 1024×2048 sgemv | `train.py`（`import numpy` 之前设） |
+
+**已确立的配置口径**：
+- `--nll-sync-every` **默认 8**（设备侧累积 → CPU/NPU 重叠）；
+- `--torch-compile` **默认关**（inductor 惰性编译，首次失败永久回落 eager）；
+- `--numba-threads` 默认 8、**BLAS 线程同为 8**、OMP 绑核默认开；
+- h 的 H2D 走 pinned 暂存 + `non_blocking`（4 槽 + Event 覆写保护）；
+- 遥测的 NPU% 走 `npu-smi`（**不能**用 `torch.npu.utilization()`，它同步设备流）；
+- **bf16 读出有机制代价**：非目标行更新被舍入 → 纯 Hebbian；要精确规则用
+  `--readout-dtype fp32` + `--ckpt-dtype bf16`（存储仍半精度）。
+
+**验证入口**：`tests/verifiers/verify_accel_readout_p55.py`（2×2 矩阵 9/9）、
+`verify_ltm_kernels.py`（recall 全链路 10/10）、`verify_pc_learn_fused.py`（12/12）。
