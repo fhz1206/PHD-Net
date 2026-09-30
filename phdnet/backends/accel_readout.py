@@ -194,9 +194,23 @@ class AccelReadout:
             return self.W
         self._fp8_age += 1
         if self._W8 is None or self._fp8_age >= max(1, self.fp8_refresh):
-            # 量化在设备上一次算子完成（1.6 亿元素 → 80 MB 写），摊到 N 步
-            self._W8 = self.W.to(torch.float8_e4m3fn)
-            self._fp8_age = 0
+            # 量化在设备上一次算子完成（1.6 亿元素 → 80 MB 写），摊到 N 步。
+            # P90 兜底：**任何版本都不能在这里崩**——服务器实测 19:17 有一台
+            # 机器跑着 P84（无 __init__ 期的运行时探测）直接在
+            # `W.to(float8_e4m3fn)` 抛 ERR01007 而中断训练。量化失败即
+            # **永久回落 fp16**（记原因 + 告警），而不是让训练崩掉。
+            try:
+                self._W8 = self.W.to(torch.float8_e4m3fn)
+                self._fp8_age = 0
+            except Exception as e:                          # noqa: BLE001
+                self._fp8_fallback = True
+                self.tdtype = torch.float16               # h 的 dtype 一并回落
+                self._W8 = None
+                import warnings
+                warnings.warn(
+                    f"fp8 量化在设备 {self.device} 上失败（{type(e).__name__}）"
+                    f" → 永久回落 fp16（训练不中断）", RuntimeWarning)
+                return self.W
         return self._W8
 
     def forward_dev(self, h):
@@ -208,7 +222,25 @@ class AccelReadout:
         异步上传让 CPU 提前回去算下一步的 M1–M5）。
         """
         ht = self._staged_to_dev(h)
-        y = self._w_forward() @ ht
+        try:
+            y = self._w_forward() @ ht
+        except Exception as e:                              # noqa: BLE001
+            # P90 兜底：fp8 路径的**任何**失败（量化不支持、matmul 无算子、
+            # 传输不支持）都在这里被吸收 → 永久回落 fp16 后重算，**训练不中断**。
+            # 服务器实测（2026-09-30 19:17）证明这条必需：跑着旧版的机器直接
+            # 在 `W.to(float8_e4m3fn)` 崩掉；本机 CPU 则能建张量但 addmv 无实现，
+            # 崩在 `@`——只兜量化那一层不够。
+            if self._fp8_fallback:          # 已经回落过一次 → 真错误，照抛
+                raise
+            self._fp8_fallback = True
+            self._W8 = None
+            self.tdtype = self.W.dtype
+            import warnings
+            warnings.warn(
+                f"fp8 前向在设备 {self.device} 上失败（{type(e).__name__}: "
+                f"{str(e)[:80]}）→ 永久回落 fp16（训练不中断）", RuntimeWarning)
+            ht = self._staged_to_dev(h)
+            y = self.W @ ht
         self._cache_h = np.ascontiguousarray(h, dtype=np.float32)
         self._cache_ht = ht
         self._cache_y = y
