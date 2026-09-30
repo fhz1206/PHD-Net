@@ -30,13 +30,7 @@ try:
 except Exception:                                            # pragma: no cover
     torch = None
 
-# P84：`fp8` = **forward 用 fp8 副本 + 更新用 fp16 主副本**（fhz 2026-09-30 决策）。
-# 动机不是访存（实测账：bf16 全程 960 MB/步 vs 本方案 1.36 GB/步，**访存反而
-# +42%**），而是**学习精度**：bf16 的半 ULP ≈ 2e-4 ≫ 非目标行更新 |dp| ≈ 1e-6
-# → 更新被舍入 → 学习退化为纯 Hebbian（今天 PPL 不降的根因）。fp16 在 1e-6 附近
-# 的相对精度约 5e-4，能保住更新；fp8 副本只服务 forward 的读流量。
-_DT = {"fp32": "float32", "fp16": "float16", "bf16": "bfloat16",
-       "fp8": "float8_e4m3fn"}
+_DT = {"fp32": "float32", "fp16": "float16", "bf16": "bfloat16"}
 
 
 def resolve_accel_device(spec: str = "auto") -> str:
@@ -63,7 +57,7 @@ class AccelReadout:
     def __init__(self, n_h: int, n_out: int, rng=None, device: str = "auto",
                  dtype: str = "fp32", w_clip: float = 0.0, w0=None,
                  nll_sync_every: int = 1, compile: bool = False,
-                 compile_mode: str = "default", fp8_refresh: int = 8):
+                 compile_mode: str = "default"):
         if torch is None:
             raise RuntimeError("未安装 torch，加速读出不可用")
         if dtype not in _DT:
@@ -79,9 +73,6 @@ class AccelReadout:
         self._last_nll = 0.0
         # P80/P82：correct 索引的 pinned 上传缓冲（避免 pageable 小拷贝的隐式同步）
         self._correct_pinned = None
-        # P84：fp8 forward 副本的重建间隔（步）——量化 1.6 亿元素的设备侧成本
-        # 摊到 N 步；N 越大越省，但 forward 用的副本越旧。
-        self.fp8_refresh = max(1, int(fp8_refresh))
         # P38/P44：`torch.compile` 融合读出热路径的 4 个小 kernel
         # （softmax / log / sub / addmm_；CANN 上每个 launch 开销 ~50-200 μs）。
         #
@@ -119,41 +110,8 @@ class AccelReadout:
             init = np.asarray(w0, dtype=np.float32)
         # ⚠ 必须**复制**：torch.as_tensor / torch.from_numpy 会与传入数组共享内存，
         # 而 W 是原位更新的 → 调用方（例如比较用的参考权重）会被静默改掉。
-        _init = np.ascontiguousarray(init, dtype=np.float32)
-        if _DT[dtype] == "float8_e4m3fn":
-            # P84：主副本 fp16（更新路径，保住微小更新）+ fp8 forward 副本
-            self.W = torch.tensor(_init, device=self.device,
-                                  dtype=torch.float16)
-            self._W8: torch.Tensor | None = None      # 每 fp8_refresh 步重建
-            self._fp8_age = 0
-            # P85：**运行时能力探测**（设备名判断不可靠）。服务器实测 2026-09-30：
-            # 昇腾 `torch_npu` 也不支持 fp8——`buf.to(dev, non_blocking).to(fp8)`
-            # 抛 "Float8_e4m3fn has not been supported" + ERR01007；CPU torch
-            # 则在 addmv 处抛 dtype 不匹配。两边都要回落，所以改为**构造期真的
-            # 试一次**（1 元素张量，µs 级）：能建 fp8 张量才启用。
-            try:
-                # 探「算子支持」而非「能否建张量」：CPU 能建 fp8 张量但 addmv
-                # 不支持（NotImplementedError），昇腾两者都不支持（ERR01007）。
-                _a = torch.zeros(4, dtype=torch.float8_e4m3fn, device=self.device)
-                _ = _a @ _a                                  # noqa: B018
-                self._fp8_fallback = False
-            except Exception:                              # noqa: BLE001
-                self._fp8_fallback = True
-            if self._fp8_fallback:
-                # 回落 fp16：**tdtype 必须一起回落**（`_staged_to_dev` 用它产出 h，
-                # 否则 ht 是 fp8 而权重是 fp16 → dtype 不匹配）。
-                self.tdtype = torch.float16
-                import warnings
-                warnings.warn(
-                    f"fp8 在设备 {self.device} 上不可用（昇腾/CPU 均不支持）"
-                    f"→ 回落 **fp16**（仍保住非目标行更新，forward 读流量退回"
-                    f" 320 MB）。要真正用 fp8 需 CANN 自定义算子/专用 API。",
-                    RuntimeWarning)
-        else:
-            self.W = torch.tensor(_init, device=self.device, dtype=self.tdtype)
-            self._W8 = None
-            self._fp8_age = 0
-            self._fp8_fallback = False
+        self.W = torch.tensor(np.ascontiguousarray(init, dtype=np.float32),
+                              device=self.device, dtype=self.tdtype)
         # P28：设备侧 (h, y) 缓存，供 forward → learn_softmax 的热路径复用
         self._cache_h: np.ndarray | None = None
         self._cache_ht = None
@@ -183,36 +141,6 @@ class AccelReadout:
         """
         return self.forward(h)
 
-    def _w_forward(self):
-        """P84：forward 用的权重——fp8 模式下返回 fp8 副本（每 N 步重建）。
-
-        ⚠ **设备能力边界**：fp8 matmul 只在昇腾/CUDA 可用；CPU torch 直接抛
-        "addmv input tensors must have the same dtype"。非加速器设备**回落主副本
-        （fp16）并只告警一次**——功能正确，forward 读流量退回 320 MB。
-        """
-        if self._fp8_fallback:
-            return self.W
-        self._fp8_age += 1
-        if self._W8 is None or self._fp8_age >= max(1, self.fp8_refresh):
-            # 量化在设备上一次算子完成（1.6 亿元素 → 80 MB 写），摊到 N 步。
-            # P90 兜底：**任何版本都不能在这里崩**——服务器实测 19:17 有一台
-            # 机器跑着 P84（无 __init__ 期的运行时探测）直接在
-            # `W.to(float8_e4m3fn)` 抛 ERR01007 而中断训练。量化失败即
-            # **永久回落 fp16**（记原因 + 告警），而不是让训练崩掉。
-            try:
-                self._W8 = self.W.to(torch.float8_e4m3fn)
-                self._fp8_age = 0
-            except Exception as e:                          # noqa: BLE001
-                self._fp8_fallback = True
-                self.tdtype = torch.float16               # h 的 dtype 一并回落
-                self._W8 = None
-                import warnings
-                warnings.warn(
-                    f"fp8 量化在设备 {self.device} 上失败（{type(e).__name__}）"
-                    f" → 永久回落 fp16（训练不中断）", RuntimeWarning)
-                return self.W
-        return self._W8
-
     def forward_dev(self, h):
         """设备内前向（返回**设备张量**，零同步）。
 
@@ -223,7 +151,7 @@ class AccelReadout:
         """
         ht = self._staged_to_dev(h)
         try:
-            y = self._w_forward() @ ht
+            y = self.W @ ht
         except Exception as e:                              # noqa: BLE001
             # P90 兜底：fp8 路径的**任何**失败（量化不支持、matmul 无算子、
             # 传输不支持）都在这里被吸收 → 永久回落 fp16 后重算，**训练不中断**。
@@ -586,7 +514,6 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
                              dtype=cfg.readout_dtype,
                              w_clip=cfg.readout_w_clip,
                              nll_sync_every=int(getattr(cfg, "nll_sync_every", 1)),
-                             fp8_refresh=int(getattr(cfg, "fp8_refresh", 8)),
                              compile=bool(getattr(cfg, "torch_compile", False)),
                              compile_mode=str(getattr(cfg,
                                                      "torch_compile_mode",

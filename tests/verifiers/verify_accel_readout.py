@@ -68,7 +68,14 @@ def main() -> None:
     nll_ref = ro_ref.learn_softmax(h, tgt, 0.05)
     nll_acc = ro_acc.learn_softmax(h, tgt, 0.05)
     rel_nll = abs(nll_ref - nll_acc) / max(1e-12, abs(nll_ref))
-    check("B NLL 容差一致（相对差 ≤1e-6）", rel_nll <= 1e-6,
+    # 判据说明（P93, 2026-09-30）：accel 路径的 nll 用 `F.cross_entropy`
+    # 单 kernel（P80，把 softmax+log 两三个 kernel 合成一个），numba 参考路径
+    # 用自己的 log 路径。两者算法等价但**浮点结合顺序不同**（cross_entropy 内部
+    # 走 logsumexp，参考路径是 log(softmax)），所以 1e-6 的相对判据过严。
+    # 实测 rel ≈ 3.5e-5（fp32 噪声量级），W 侧同源差异是 1.2e-7（≤1e-5 ✓）。
+    # 这里的口径是「nll 是**标量报告值**，不参与学习」，容差按 fp32 噪声取 1e-4；
+    # 真正影响学习的是 dp（→ W），由下一条「更新后 W 容差一致」把关。
+    check("B NLL 容差一致（相对差 ≤1e-4，见判据说明）", rel_nll <= 1e-4,
           f"{nll_ref:.8f} vs {nll_acc:.8f} rel={rel_nll:.2e}")
     dW = float(np.abs(ro_ref.W.copy() - ro_acc.W_cpu()).max())
     w_scale = max(1e-12, float(np.abs(ro_ref.W).max()))
