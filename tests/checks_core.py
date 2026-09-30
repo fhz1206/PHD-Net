@@ -10,7 +10,13 @@ from checks_common import DOC, ENV, PY, ROOT, TESTS, _check
 
 def t_version() -> None:
     import phdnet
-    _check("版本一致性 v0.0.0", phdnet.__version__ == "0.0.0", phdnet.__version__)
+
+_EXPECTED_VERSION = "v0.1.0-alpha"
+    # 版本一致性：__init__.__version__ 必须与本文件下方的 _EXPECTED_VERSION 一致
+    # （v0.1.0-alpha 分支起版本号带前缀，2026-09-30 之前是裸 "0.0.0"——把期望值
+    # 抽成常量，升级版本时只需改这一处）
+    _check(f"版本一致性 {_EXPECTED_VERSION}", phdnet.__version__ == _EXPECTED_VERSION,
+           phdnet.__version__)
 
 
 def t_core_demo() -> None:
