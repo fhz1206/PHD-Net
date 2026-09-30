@@ -98,16 +98,20 @@ python tools/probe_fp8.py --json     # 机器可读
 **芯片（910B/910C）本身有 fp8**。本脚本用来确认是否有别的入口（专用算子/量化
 API），结论决定 P86 的禁用是否保留。
 
-## 云端性能重测（P86，2026-09-30）
+## 本地性能回归基准（P89，2026-09-30）
 
 | 工具 | 用途 |
 |---|---|
-| `tools/bench_server.py` | **在服务器上一键重测**所有关键配置（基线 / m2 核 / encoder dtype / readout dtype / 绑核 / 线程数），解析训练日志产出机器可读 JSON（含步时趋势、九段分解、遥测、环境指纹 + commit） |
-| `tools/apply_bench.py` | 把该 JSON **回填**进 `docs/PHD-Net_性能评估与迭代方案.md` 的基线块（性能数字的唯一权威处），并绑定测量配置与 commit |
+| `tools/bench_local.py` | 本机（x86）测 CPU 侧热点（M1 编码 / M2 两个核 / M4b predict_arr）+ numba 线程缩放 + 4M 档端到端 smoke。`--compare` 与上一份结果对比，给出「变快/变慢」结论 |
 
 ```bash
-# 服务器：约 15 分钟
-python tools/bench_server.py --preset 1b --steps 3000 --profile quick
-# 回填（本地或服务器皆可）
-python tools/apply_bench.py outputs/experiments/server_bench_<ts>.json
+python tools/bench_local.py                        # 基线
+python tools/bench_local.py --compare             # 与上一份对比（回归检测）
+python tools/bench_local.py --threads 1,2,4,8     # 线程缩放
+python tools/bench_local.py --no-smoke            # 只测微基准（快）
 ```
+
+⚠ **本机数字不进文档**：2026-09-29 已实测三次「x86 更快、昇腾更慢」（M1 fp32、
+M2 融合核、OMP place 表）。本脚本只回答「这次改动让 CPU 侧变快还是变慢」，
+以及测**与平台无关**的部分（复杂度、Python 开销、内存分配、线程缩放）。
+文档里的 ms/tok 必须来自服务器实测。
