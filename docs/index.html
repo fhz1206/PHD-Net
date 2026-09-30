@@ -148,10 +148,10 @@ footer{padding:34px 0;color:var(--dim2);font-size:13px}
       <span class="chip">无堆叠层</span>
       <span class="chip">无反向传播（学习规则全部局部化）</span>
       <span class="chip">事件驱动稀疏计算</span>
-      <span class="chip ok">v0.0.0 · 2026-09-21 · M9 五轨道收官 · 全量 19/19</span>
+      <span class="chip ok">v0.0.0 · 2026-09-30 · 昇腾 1B 服务器实测 · fast 9/9</span>
     </div>
     <div class="stats">
-      <div class="stat"><b>78.16</b><small>词级 LM 字符归一 PPL（冻结语料 23,504 字符，bpc 6.288；同口径 Transformer 0.52M 为 85.27）</small></div>
+      <div class="stat"><b>359.2603</b><small>词级 LM 字符归一 PPL（冻结语料 21,924 字符，bpc 8.489；同口径 Transformer 0.52M 为 85.27）</small></div>
       <div class="stat"><b>0.000</b><small>持续学习遗忘率 BWT；同条件 Transformer 为 −1.000（完全遗忘）</small></div>
       <div class="stat"><b>1.28 ms</b><small>10 亿突触容量模型单步训练耗时（tools/train_1b.py 端到端复跑，本机 CPU 无独显）</small></div>
       <div class="stat"><b>100%</b><small>单样本记忆召回准确率（每条只印迹一次，30% 噪声线索）</small></div>
@@ -325,7 +325,7 @@ footer{padding:34px 0;color:var(--dim2);font-size:13px}
         <div class="bar"><span>Transformer 0.52M（96d×2L）</span><span class="track"><span class="fill tf" style="width:99.6%"></span></span><span class="val">85.27</span></div>
         <div class="bar"><span>Transformer 2.38M（192d×4L）</span><span class="track"><span class="fill tf" style="width:100%"></span></span><span class="val">85.66</span></div>
       </div>
-      <p class="note">条形按本组最大值（85.66）归一化。本组三项<b>严格同口径</b>（评测套件 task1，bpc 6.288 / 6.414 / 6.421）→ 判定 <b>「相当（达标）」，低 8.3%</b>。</p>
+      <p class="note">条形按本组最大值（85.66）归一化。本组三项<b>严格同口径</b>（评测套件 task1，bpc 6.288 / 6.414 / 6.421）→ 判定 <b>「相当（达标）」，低 8.3%</b>（该组数字为 128 维小栈口径，勿与首屏 256 维锚点混用）。</p>
       <p class="note"><b>⚠ 两组数字不能混用</b>：M9 消融（<code>tests/demo_m9.py</code>）跑的是 <b>128 维小网络栈</b>（n_sdr=128、分词 min_count=8），
         冻结语料下参照基线 R = <b>102.97</b>（bpc 6.686），稳定正增益 <b>T3.4 内容寻址 101.29（−1.6%）</b>、② 回放稳定读出 101.48（−1.4%）；
         T3.2 top-k 检索 <b>106.24（+3.2%，符号翻转转有害）</b>，不推荐启用。
@@ -349,7 +349,7 @@ footer{padding:34px 0;color:var(--dim2);font-size:13px}
         <tr><td>持续学习 BWT（任务 A→B）</td><td class="good"><b>+0.000</b></td><td class="bad">−1.000（acc_A2=0.000）</td><td class="win">零遗忘 vs 完全遗忘</td></tr>
         <tr><td>多跳推理（语义图 2 跳）</td><td>链式 4/4</td><td>不适用</td><td>机制验证</td></tr>
         <tr><td>长程依赖（延迟复制 n=4/8/16）</td><td>默认栈 ~10.1% / 11.0% / 10.0%；<b>启用 M13 后 45.6% / 25.9% / 17.8%</b></td><td>5.7% / 9.7% / 8.6%（随机 8.3%）</td><td class="win">M13 带来 3.6× 提升；整段复现率仍低（n=4 约 7.5%）</td></tr>
-        <tr><td>效率（LM 路径）</td><td><b>6.96 ms/token</b>（P6 热路径优化，修复前 12.84；逐位等价），可塑参数 1,712,388</td><td>训练 1.0 s / 4.7 s（批量并行）</td><td>各有胜负</td></tr>
+        <tr><td>效率（LM 路径）</td><td><b>6.96 ms/token</b>（256 维小栈口径，P6 热路径优化，修复前 12.84；逐位等价），可塑参数 1,712,388；<b>1B 服务器（191 核昇腾 + NPU 读出）实测 26 ms/tok</b>，其中读出 9.5–13.5、M2 推理 2.4、M1 编码 0.85</td><td>训练 1.0 s / 4.7 s（批量并行）</td><td>各有胜负</td></tr>
       </tbody>
     </table>
     <p class="note">判定（路线图 §七）：主任务差距 ≤10% 且 ≥2 项结构化任务显著占优 → 「相当」；持平或更优且 ≥3 项占优 → <b>「更强」</b>。
