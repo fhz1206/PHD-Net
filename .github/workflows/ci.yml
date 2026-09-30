@@ -37,6 +37,16 @@ jobs:
           python tests/verifiers/verify_vocab_parallel.py
           python tests/verifiers/verify_parallel_consistency.py
 
+      - name: 诊断（对拍失败时打印环境与重跑 traceback）
+        if: failure()
+        run: |
+          python -c "import sys; print('python', sys.version)"
+          python -c "import numpy, numba, pyarrow, torch; print('numpy', numpy.__version__, '| numba', numba.__version__, '| pyarrow', pyarrow.__version__, '| torch', torch.__version__)"
+          echo '--- 重跑 verify_parallel_consistency（完整 traceback）---'
+          python tests/verifiers/verify_parallel_consistency.py; echo "exit=$?"
+          echo '--- 重跑 verify_seg_equiv ---'
+          python tests/verifiers/verify_seg_equiv.py; echo "exit=$?"
+
       - name: torch LM 栈 vs numpy 主实现等价性（容差判据）
         run: python tests/verifiers/verify_torch_lm.py --device cpu
 
@@ -57,6 +67,14 @@ jobs:
           pip install numpy
       - name: Device probe + readout bench (CPU 参考)
         run: python tools/bench_accel.py --steps 20
+
+      - name: 诊断（bench 失败时打印环境与重跑 traceback）
+        if: failure()
+        run: |
+          python -c "import sys; print('python', sys.version)"
+          python -c "import torch, numpy; print('torch', torch.__version__, '| numpy', numpy.__version__)"
+          echo '--- 重跑 bench_accel（完整 traceback）---'
+          python tools/bench_accel.py --steps 20; echo "exit=$?"
       - name: STDP torch 等价性自检
         run: python -c "from phdnet.torch_backend import selftest_torch; assert selftest_torch('cpu'); print('selftest PASS')"
       - name: 显式执行两个 torch 回归检查（缺 torch 会在此硬失败）
