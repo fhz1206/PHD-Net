@@ -368,6 +368,12 @@ def load_model(path: Path, lm) -> dict:
             if len(val) != len(z["ro_val"]):
                 raise ValueError("稀疏读出形状不一致（词表或 conn_k 变了？）")
             val[:] = z["ro_val"]
+            # P111：加速后端的 val 是**主机副本**（设备张量不可原地写），
+            # 上面这行写完不会自动同步回设备 → 必须显式推一次。
+            # numba Readout 没有这个方法（val 本来就是活数组），用 getattr 兼容。
+            _sync = getattr(net.readout, "sync_csr_from_host", None)
+            if callable(_sync):
+                _sync()
         else:
             _rw = np.asarray(z["ro_W"])
             # P46：位模式解码（fp8/bf16 存 uint8/uint16，无损转回 fp32）
