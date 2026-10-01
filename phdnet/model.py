@@ -346,6 +346,20 @@ class PHDNet:
                     and self.step_count % cfg.wm_summary_every == 0:
                 self.wm.summarize(self.ltm)
 
+        # P117（方案 A）：**异步读出提交**——把 M6 的设备侧提交与 CPU 侧后续
+        # 段解耦：提交后**不等**设备结果就继续往下走，nll 在 N 步后再取。
+        #
+        # ⚠⚠ **本轮不实现顺序前移**（把 `PC_learn`/`STDP_learn` 提到读出之前）。
+        # 我读了那段代码：它依赖 `mod_scale`/`pc_scale`/`stdp_scale` 以及
+        # **会在段内更新持久状态**（`self._exp`、`self._instab_ema`、`_prev_pc`、
+        # `_prev_rate`、`self.pc` 权重、`self.stdp` 迹）。前移会改变这些状态的
+        # **推进时机** —— `STDP_learn(self._prev_rate, rate)` 用的是**上一步**的
+        # rate，前移后它读到的 `_prev_rate` 变成了别的步，等于换了一套时序规则。
+        # 这是**学习规则层面的语义变更**，收益（~1.09×）不足以承担这个风险，
+        # 故留作独立立项（计划文档 §2.5 已记录依赖链与两条替代路径）。
+        #
+        # 这里只做**纯异步**：`nll` 不再在每步同步（默认沿用 nll_sync_every），
+        # 语义与现有 P34 行为完全一致，故不需要额外开关。
         h = self._build_h(r2, pred_feat, fused)              # 7. M6 读出（拼装见 _build_h）
         # P20：读出计时（后端可能是 numba CPU 或加速器设备）。两次 perf_counter
         # ≈ 0.2 μs，相对读出本身（ms 级）可忽略；只累计时间不改变任何数值。
