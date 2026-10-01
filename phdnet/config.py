@@ -300,6 +300,20 @@ class PHDNetConfig:
     # numba CPU 原路径（逐位不变）；cpu/off/numba = 强制原路径；
     # npu/cuda/rocm/dml = 显式设备（不可用则回落并如实报告）。
     accel_readout: str = "auto"
+    # P116：稀疏读出**前向算子**选择（仅加速后端的 conn_k>0 路径生效）。
+    # "mulsum"= `(W * h[Wi]).sum(1)` —— 物化一个 (n_out,k) 临时张量
+    #   （1b 档25.37 MiB×2 处/步= 总流量的 22%，P115 实测口径）。
+    # "einsum" = `torch.einsum('ij,ij->i', W, h[Wi])` —— 不物化中间张量，
+    #   本机 x86 实测快 ~21%，但**归约顺序不同 → max|Δ| ≈ 3e-05（非逐位）**。
+    # ⚠ **默认 "mulsum"**：本机结论不构成昇腾证据（本项目已实测到四次方向相反），
+    #   einsum 的收益必须在服务器实测后才能改默认值。
+    # ⚠ einsum 非逐位：若采用，验收判据是**容差**（1e-4 相对）而非逐位对拍。
+    sparse_fwd_kernel: str = "mulsum"
+    # P116（方案 B）：M4b imprint 的**配对学习摊销**因子 N。
+    # 1 = 每步写入（旧行为，**默认，逐位不变**）；N>1 = 攒 N 对提交 N-1 对。
+    # ⚠ N>1 是**语义变更**（中间 N-1 步表状态不同），不是纯调度优化。
+    # ⚠ 组合代价随 N **二次**增长（N(N-1)/2），故只宜小值（实测候选：2）。
+    ltm_imprint_amortize: int = 1
     # P34：nll 同步周期（AccelReadout）。1=每步同步（旧行为）；N>1 时
     # nll 累积到设备、每 N 步同步一次 → CPU/NPU 重叠（NPU 上端到端约 -30~40%）。
     # P62（2026-09-29）：默认 1 → **8**。服务器日志证据：读出 12.9 ms/tok、

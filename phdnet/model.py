@@ -329,7 +329,10 @@ class PHDNet:
                 # 大容量表按**稀疏率**印迹：±1 稠密码会激活全部维度，破坏事件驱动稀疏性
                 _p = self._prof_t('M4b_ltm')
                 _pi = self._prof_t('M4b_imprint')   # P77：imprint 与 recall 分开计时
-                self.ltm.imprint(rate if cfg.big_ltm else p)     # 预测失败/极新颖 → 快速印迹
+                # P116：imprint 摊销（方案 B）。默认 1 = 每步写入（旧行为逐位不变）；
+                # N>1 是**语义变更**（中间 N-1 步表状态不同），须显式开启。
+                self.ltm.imprint(rate if cfg.big_ltm else p,
+                                 amortize=int(getattr(cfg, "ltm_imprint_amortize", 1)))
                 self._prof_end('M4b_imprint', _pi)
                 self._prof_end('M4b_ltm', _p)
             elif retrieve_now:

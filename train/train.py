@@ -247,6 +247,22 @@ def main() -> None:
                     help="P84：读出 fp8 forward 副本的重建间隔（步）。"
                          "量化 1.6 亿元素是一次设备算子，摊到 N 步；N 越大越省，"
                          "但 forward 用的 fp8 副本越旧")
+    ap.add_argument("--ltm-imprint-amortize", type=int, default=1,
+                    help="P116（方案 B）：M4b imprint 配对学习摊销因子 N。"
+                         "**默认 1 = 每步写入（旧行为逐位不变）**；N>1 攒 N 对"
+                         "提交 N-1 对 → 省掉部分 encode+learn。"
+                         "⚠ N>1 是**语义变更**（中间 N-1 步大空间表状态不同），"
+                         "非纯调度优化；且组合代价随 N **二次**增长"
+                         "（N(N-1)/2），只宜小值。候选值：2")
+    ap.add_argument("--sparse-fwd-kernel", default="mulsum",
+                    choices=["mulsum", "einsum"],
+                    help="P116：稀疏读出（conn_k>0）的前向算子。"
+                         "**默认 mulsum**=`(W*h[Wi]).sum(1)`，每步物化一个 "
+                         "(n_out,k) 临时张量（1b 档 25.37 MiB x 2 处 = "
+                         "总流量 22%%）；`einsum` 不物化，本机 x86 快 ~21%%，"
+                         "但**归约顺序不同 → 非逐位**（max|Δ|≈3e-05）且"
+                         "**昇腾收益未实测**（x86 结论不构成昇腾证据）。"
+                         "试 --sparse-fwd-kernel einsum 看服务器读出耗时")
     ap.add_argument("--m2-kernel", default="plain",
                     choices=["serial", "fused", "plain"],
                     help="P76/P99/P113：M2 推理核。**默认 plain**——"
@@ -502,6 +518,10 @@ def main() -> None:
     cfg = build_cfg(args.preset, args.width, args.big_n,
                     args.csr_online, args.readout_conn_k, args.seed)
     cfg.readout_dtype = args.readout_dtype            # P9 精度（默认 fp32）
+    # P116：稀疏读出前向算子
+    cfg.sparse_fwd_kernel = args.sparse_fwd_kernel
+    # P116：imprint 摊销因子（默认 1 = 旧行为逐位不变）
+    cfg.ltm_imprint_amortize = max(1, int(args.ltm_imprint_amortize))
     cfg.encoder_dtype = args.encoder_dtype            # P75：M1 权重精度（平台相关）
     # P99：三态（serial=单核融合 / fused=并行融合 / plain=原始多核调用）
     cfg.pc_fused_kernel = (False if args.m2_kernel == "plain"
