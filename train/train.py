@@ -203,15 +203,16 @@ def main() -> None:
                          "sft 分片同样适用）。词表扫描不受影响（词表是训练流的"
                          "超集，OOV 恒 0）")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
-    ap.add_argument("--readout-dtype", default="fp16",
-                    choices=["fp32", "fp16", "bf16", "fp8", "fp4"],
-                    help="读出精度。**默认 fp16**（P85, 2026-09-30）：fp8 经实测"
-                         "**昇腾与 CPU 都不支持**（ERR01007 / addmv 无实现）→ 已"
-                         "降级为 fp16；而 bf16 半 ULP≈2e-4 ≫ 非目标行更新 "
-                         "|dp|≈1e-6，会把更新舍掉 → 学习退化为纯 Hebbian"
-                         "（PPL 震荡不降的根因）。fp16 在昇腾有原生 GEMV，且能"
-                         "保住微小更新。fp8 选项保留（运行时探测可用才启用，"
-                         "待 CANN 支持）；fp32 = 精确规则对照")
+    ap.add_argument("--readout-dtype", default="int8",
+                    choices=["fp32", "fp16", "bf16", "fp8", "fp4", "int8", "int4",
+                             "int16", "int32"],
+                    help="读出精度。**默认 int8**（fhz 2026-10-01）：权重量化码本"
+                         "**（存储 1 B/权重，降 4×）。⚠ int8 权重会吞掉 "
+                         "|dp|≈1e-6 的非目标行更新 → 学习退化；因此走**自适应**"
+                         "：更新保持全精度（码本饱和裁剪防回绕），且 "
+                         "`tools/apply_bench.py` 的 PPL 对照可量化退化幅度。"
+                         "int8 在昇腾有原生 INT8 Cube（社区 W8A8 主线）。"
+                         "int16/int32 精度递增（int32 近无损）。fp32 = 精确对照")
     ap.add_argument("--torch-compile", dest="torch_compile",
                     action="store_true", default=False,
                     help="P58（fhz 2026-09-29「图优化关了吧」）：默认 OFF——"

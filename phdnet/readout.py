@@ -850,7 +850,11 @@ class Readout:
             elif self.qfmt in ("int16", "int32"):
                 qmax = INT16_QMAX if self.qfmt == "int16" else INT32_QMAX
                 amax = float(np.abs(W).max())
-                self._wscale = (amax / qmax) if amax > 0.0 else 1.0
+                # P104「迭代自适应」：scale 留 **2× 余量**——训练中权重幅值
+                # 增长（Hebbian 累积）不需要重标定，超出余量才静默截断（比
+                # 回绕好，且截断点在 2σ 之外，实际罕见）。代价是量化步长 ×2
+                # （int16 误差 1.5e-5 → 3e-5，仍远小于 int8 的 4e-2）。
+                self._wscale = ((amax * 2.0) / qmax) if amax > 0.0 else 1.0
                 self._wscales = None
                 self._codes = quantize_to(self.qfmt, W / self._wscale)
             else:
