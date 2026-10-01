@@ -691,3 +691,49 @@ P113 把它改对的方式不是删掉 help 里的数字，而是**把 help 换�
    与 `verify_multi_device.py`（4 路分片）。⚠ 基线必须是同库同 fastmath 的串行实现。
 6. **它加的是核还是进程？** 加核在访存饱和区（1→6 线程 1.16×）无效；
    加进程在数据侧已被 8 进程 + 19 解码核封顶（§1.5）。
+
+---
+
+## 附录 B：numba 的GPU 能力与本项目的关系（P121，2026-10-01）
+
+fhz 提出「numba 有 API 能把运算放到 CUDA 上」。核实结论：
+
+### B.1 `numba.cuda` 存在，但**对本项目不可用**
+
+`numba.cuda` 确实能把 Python 数值核编译成 CUDA kernel（`@cuda.jit`，
+可访问 NumPy 数组、自动在 host/device 间传输）。但它**硬绑 NVIDIA CUDA 驱动**：
+
+| 依赖 | 要求 | 昇腾 910B |
+|---|---|---|
+| `CUDA_HOME` / `/usr/local/cuda` | NVIDIA CUDA Toolkit ≥ 11.2 | ✗ 不存在 |
+| `libcuda`（`NUMBA_CUDA_DRIVER` 指定路径） | NVIDIA 驱动库 | ✗ 不存在 |
+| Compute Capability | ≥ 5.0（Maxwell 及以后） | ✗ NPU 无此概念 |
+| 后端| `numba-cuda` 独立包 / ROCm（AMD） | ✗ 无昇腾后端 |
+
+**numba 没有任何昇腾 NPU 后端**。P18 已实测确认这条边界：numba 只编译到 CPU
+机器码，故加速器必须走 torch 栈（`phdnet/backends/accel_readout.py`），
+而 torch 栈缺 7 项机制（含 `big_ltm`）→ **整体迁移会丢机制**，且权重与生产
+ckpt 不通用。
+
+### B.2 但这次核查发现一个**真实的 CPU 侧缺口**：`nogil` 覆盖不全
+
+我们用了 42 处 `@njit` + 77 处 `prange`，其中 `parallel=True` 的核**有 11 个
+缺 `nogil=True`**，包括 **`--m2-kernel plain` 走的 5 个 CSR matvec 核**
+（`sparse_pc.py:43/55/66/86/97`）。
+
+- `nogil=True` 让 numba 核在执行期间**释放 GIL**，从而能与Python 线程并发。
+- 本机（x86 8 核、1B 档真实尺寸 n=1024/k=128）实测**单次调用慢 7.8%**
+  （0.090 → 0.097 ms），数值逐位相同。
+  → **单线程路径下加 nogil 是纯亏**，只在「该核与其它 Python 线程并发」时回本。
+
+**结论与后续**：`nogil` 该不该加，取决于 CPU/NPU 重叠（P117方案 A）做不做：
+
+| 场景 | 建议 |
+|---|---|
+| **当前**（CPU 侧串行，无并发） | **不加** —— 单次调用慢 7.8%，白亏 |
+| **若做 P117 方案 A**（M1(t+1) 与读出并发） | M2 的 matvec 仍排在关键路径上（依赖 PC 权重），故**仍不加** |
+| 若将来把 `bigltm.imprint` 的 `learn` 挪进线程池 | 那时给 `_ltm_learn_rows` 保持 `nogil`（**它已有**），并考虑给被并发调用的核加 |
+
+⚠ 本条纪律：**不要为了「看起来更并行」到处加 nogil**。它是一个**有成本的
+选项**（单次调用变慢），只在真正的并发场景才回本——与 P22（prange 线程数
+1→6 仅 1.16×，访存饱和）是同一类「先量再开」的问题。
