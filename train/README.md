@@ -66,10 +66,11 @@ python tests/run_tests.py fast
 | 开关 | 默认 | 为什么是这个值 |
 |---|---|---|
 | `--preset` | `1b` | 容量档位。`smoke`=管线验证（分钟级，< 1B）；`1b`=标准档（width=1024/conn_k=128/big_n=2²⁴/big_m=72）；`1b_max`=大主干档（width=4096/conn_k=512）；`30b`=2²⁹×56≈30.3B。`smoke` 只验管线不验容量 |
-| `--data` | `sft` | 训练语料 glob。`sft` / `pretrain`（全量）/ `pretrain_zh`（**已废弃，等价 `pretrain --lang zh`**，保留兼容）/ `eval`（冻结语料）。默认给 `sft` 是因为它最小、最适合当冒烟默认 |
+| `--data` | `sft` | 训练语料 glob。`sft` / `pretrain`（全量）/ `pretrain_zh`（**已废弃，等价 `pretrain --data-lang zh`**，保留兼容）/ `eval`（冻结语料）。默认给 `sft` 是因为它最小、最适合当冒烟默认 |
 | `--remote-data` | 关 | 数据直读 ModelScope `fhzfhz/Mixture-General-Mini`，HTTP Range 流式**零落盘**。**默认关闭**是为了保证本地 `datasets/` 路径逐位不变；服务器 `glob 无匹配` 时才需打开。**仅支持 ModelScope** |
 | `--remote-fraction` | `0.3` | `--remote-data` 时取**排序后前 30%** 分片。取前缀子集而非随机采样，是为了保持数据顺序语义——词表扫描与训练流开头逐字符一致。改这个值再 `--resume` 会静默改变数据分布，故数据口径随检查点落盘 |
-| `--lang` | `all` | 训练语料语言过滤（按 parquet 的 `lang` 列）：`all`=全量（默认，与旧逐位一致）/ `zh` / `en`。**注意它是双重职责**：非 `en` 值一律按中文终端输出（`phdnet/i18n.py`），所以默认 `all` = 终端中文。词表扫描不受影响（词表是训练流的超集 → OOV 恒 0） |
+| `--lang` | `en` | **终端输出语言**（P119）：`en`=英文（**默认**）/ `zh`=中文。**对训练结果零影响** —— 语料、词表、模型状态、数值全不变，只改打印文案。实现见 `phdnet/i18n.py`（`set_lang` + 输出层兜底翻译）。 |
+| `--data-lang` | `all` | **训练语料**语言过滤（P119 从 `--lang` 拆出）：`all`=全量（默认，与旧逐位一致）/ `zh` / `en`，按 parquet 的 `lang` 列筛训练流。**⚠ 这个参数会改变训练结果**。词表扫描不受影响（词表是训练流的超集 → OOV 恒 0） |
 
 ### 2.2 精度与后端
 
@@ -164,7 +165,7 @@ python tests/run_tests.py fast
 | 本地 | `datasets/sft/sft_000.*.parquet`、`datasets/pretrain/pretrain_*.parquet` | 独立 git 仓库（`fhzfhz/Mixture-General-Mini`），gitignore |
 | 远程 | `--remote-data` → `ms://fhzfhz/Mixture-General-Mini/<split>/<glob>` | ModelScope 官方 SDK 列目录 + fsspec HTTP Range 可 seek 流 → pyarrow 直读，**零原始落盘** |
 
-统一 schema：**`text` / `lang` / `src`**（`text` 是训练文本，`lang` 供 `--lang` 过滤，`src` 溯源）。
+统一 schema：**`text` / `lang` / `src`**（`text` 是训练文本，`lang` 供 `--data-lang` 过滤，`src` 溯源）。
 导入侧统一走 `phdnet/corpus.py`（同认 txt 与 parquet）。
 样本边界：字符流按 `SEP = "\n\n"` 切分。
 
