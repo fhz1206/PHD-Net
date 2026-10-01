@@ -247,15 +247,20 @@ def main() -> None:
                     help="P84：读出 fp8 forward 副本的重建间隔（步）。"
                          "量化 1.6 亿元素是一次设备算子，摊到 N 步；N 越大越省，"
                          "但 forward 用的 fp8 副本越旧")
-    ap.add_argument("--m2-kernel", default="serial",
+    ap.add_argument("--m2-kernel", default="plain",
                     choices=["serial", "fused", "plain"],
-                    help="P76/P99：M2 推理核。**默认 serial**（单核融合核）——"
-                         "服务器 A/B 实测：fused(prange) 20-27 ms/tok vs plain "
-                         "6.7-11.9（prange fork/join 屏障在昇腾上主导开销）；"
-                         "P99 因fused 慢 3-4× 而改出单核 serial 核。"
-                         "⚠ plain 走 _csr_matvec（**有**行级 prange，从未被否），"
-                         "是待服务器 A/B 的候选：M2_infer 占端到端 39%% 且跑单核，"
-                         "而进程只用 1.1/191 核。x86 上 fused 快 2.1×，跨平台请按机器选")
+                    help="P76/P99/P113：M2 推理核。**默认 plain**——"
+                         "P113 服务器实测（1b 档，昇腾 191 核 + NPU）："
+                         "M2_infer **6.92 → 1.28 ms/tok（5.41×）**，"
+                         "端到端 **17.63 → 12.09 ms/tok（1.46×）**；"
+                         "四个采样点 sliding PPL 与 serial 运行**逐位相同**"
+                         "（纯调度变化、零语义变化）。"
+                         "  · plain：走 _csr_matvec（**有**行级 prange）"
+                         "  · serial：单核融合核（P99，昇腾上prange 屏障主导开销）"
+                         "  · fused：prange 融合核（昇腾实测慢 3-4×，已否决）"
+                         "⚠ **x86 结论不构成昇腾证据**：本机上fused 比 plain 快，"
+                         "跨平台训练请按机器选择；对拍见 "
+                         "tests/verifiers/verify_m2_kernels.py（11 例）")
     ap.add_argument("--encoder-dtype", default="fp32",
                     choices=["fp32", "fp64", "fp16", "bf16"],
                     help="P74/P75/P107：M1 编码器权重存储精度（迭代量恒 fp32）。"
