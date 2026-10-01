@@ -797,6 +797,16 @@ def _unsupported_reason(cfg) -> str | None:
     # 导致默认配置静默回落 numba CPU）。
     if _rd in ("int8", "fp8"):
         return None
+    # P112 修复（能力表与 `_DT` 错位）：int16/int32 在 **CPU 路径**是真实
+    # 实现的定点码本（`readout.py` P101，最近格点 = 四舍五入到最近整数），
+    # 但加速后端的 `_DT` 没有这两种 → 原来会一路走到构造期抛
+    # `ValueError: 不支持 dtype=...`，由 `pick_readout_backend` 的
+    # `except Exception` 兜底回落 —— **回落原因丢失（`_accel_fallback_reason`
+    # 为 None）**，日志上看不出为什么没上设备。
+    # 正确做法：在能力表里**显式拒绝并说明原因**（P19 纪律「回落 + 记原因」）。
+    if _rd in ("int16", "int32"):
+        return (f"readout_dtype={_rd}（加速后端未实现该定点码本；"
+                f"CPU 的 numba 路径可用——用 --accel cpu 走 P101 的整数核）")
     if bool(getattr(cfg, "lognormal_init", False)):
         return None                            # 初始化分布不同但结构兼容，不阻断
     return None
