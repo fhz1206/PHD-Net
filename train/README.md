@@ -343,7 +343,7 @@ meta 落盘**数据口径**（数据路径 / `--remote-fraction` / 语言过滤�
 | 训练慢、CPU 占用率极低 | 逐 token 串行是**架构性**的。确认 `--numba-threads`（默认 8）与 `[parallel]` 行 |
 | `[device] ⚠️ NPU 初始化失败` | 杀掉残留进程（`npu-smi info` / `ps aux \| grep train_1b`）；确认容器映射设备；或 `--accel cpu` |
 | `--lang zh` 看着没生效 | 看 `[sample lang=…]` 行的 CJK 占比（比猜 PPL 可靠）；注意 `--lang` 默认是 `all` |
-| PPL 震荡不降 | 确认 `--readout-dtype fp16`（bf16 把非目标行更新舍成纯 Hebbian，这是历史根因） |
+| PPL 震荡不降 | 确认 `--readout-dtype int8`（bf16 把非目标行更新舍成纯 Hebbian，这是历史根因） |
 | 首次启动慢 | numba 首次全量编译约 2.6 s；`[numba] cache` 看缓存目录与大小 |
 | 检查点写盘慢 | 1B 档每次约 867 MiB D2H + 数秒写盘，属预期；调大 `--ckpt-every` |
 | 想确认容量 | 启动时的容量验算表，或 `--report` 查已生长突触 / 利用率 |
