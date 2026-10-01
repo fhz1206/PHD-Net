@@ -222,6 +222,26 @@ class Telemetry:
             out["acc_util"] = util
             out["hbm_alloc_gb"] = used / 1024
             out["hbm_total_gb"] = total / 1024
+        # P120：追加 `-t usages` —— **带宽利用率只在这个子命令里**。
+        # 它是判断「NPU 到底有没有发挥出来」的关键：若 HBM 带宽占用很低
+        # 而 AICore 很高 → 瓶颈在 kernel 下发/调度，不在算力也不在带宽。
+        # ⚠ 每 tick 多一次子进程（~10 ms）。故按 `_smi_usages_every` 抽样，
+        # 不每个 tick 都跑；带宽指标变化慢，抽样的代表性足够。
+        self._smi_ticks = getattr(self, "_smi_ticks", 0) + 1
+        _every = int(getattr(self, "_smi_usages_every", 4) or 4)
+        if self._smi_ticks % _every == 0:
+            try:
+                r2 = subprocess.run([self._smi_path, "info", "-t", "usages"],
+                                    capture_output=True, text=True, timeout=10)
+                u = _parse_npu_smi_usages(r2.stdout)
+                if u:
+                    out.update(u)
+                    if not getattr(self, "_usages_reported", False):
+                        self._usages_reported = True
+                        print("[telemetry] npu-smi -t usages 字段: "
+                              + ", ".join(sorted(u)), flush=True)
+            except Exception:                           # noqa: BLE001
+                pass
 
     @staticmethod
     def fmt(d: dict) -> str:
@@ -236,6 +256,14 @@ class Telemetry:
             f"NPU/GPU {g('acc_util')}%",
             f"HBM {g('hbm_alloc_gb', '{:.1f}')}/{g('hbm_total_gb', '{:.0f}')}GB",
         ]
+        # P120：带宽利用率（仅在 `-t usages` 抽样命中时出现）。
+        # **高 AICore + 低带宽 = 瓶颈在 kernel 下发，不是算力/带宽**——
+        # 这个组合是本项目读出段 7.83 ms 的最可能形态（实测是带宽下界的
+        # 26.1 倍，故必然不是带宽瓶颈）。
+        if d.get("hbm_bw_pct") is not None:
+            parts.append(f"HBM-bw {d['hbm_bw_pct']:.0f}%"
+                         f"/vec {g('aivector_pct')}%"
+                         f"/aicpu {g('aicpu_pct')}%")
         if d.get("ctx_switches") is not None:
             parts.append(f"CS/s {d['ctx_switches'] / max(1e-9, 1):.0f}")
         if d.get("gc_objs") is not None:
@@ -283,6 +311,63 @@ def _parse_npu_smi(text: str):
             continue
         return float(ai[0]), int(m.group(1)), int(m.group(2))
     return None
+
+
+def _parse_npu_smi_usages(text: str) -> dict:
+    """解析 `npu-smi info -t usages` → 关键指标字典（失败返回 {}）。
+
+    P120：**`npu-smi info`（表格式）里没有带宽利用率**，必须用 `-t usages`
+    子命令才有。这些字段是判断「NPU 有没有真正发挥出来」的**直接证据**：
+
+    ==========================  ============================================
+    字段含义（官方口径）
+    ==========================  ============================================
+    ``Aicore Usage Rate(%)``    AI Core 占用率。⚠ **它高≠算力用满**：
+                                 大量小算子（launch 开销）也能把它顶到
+                                 99%，而真正的大矩阵可能没在跑。
+    ``Memory Bandwidth Usage     **HBM 带宽占用率** —— 判断 memory-bound
+     Rate(%)`` 的**唯一**可靠指标。实测口径（910B）：memory-bound 算子会让
+                                 它接近 100%；若它很低而 AICore 很高，
+                                 说明瓶颈**不在算力也不在带宽**，而在
+                                 kernel 调度/下发（见 TASK_QUEUE_ENABLE）。
+    ``Aivector Usage Rate(%)``  Vector 单元占用率。
+    ``Aicpu Usage Rate(%)``     AI CPU（控制流 + 非矩阵算子）占用率。
+    ``Ctrlcpu Usage Rate(%)``   管理 CPU 占用率。
+    ``Memory Usage Rate(%)``    显存占用率。
+    ==========================  ============================================
+
+    输出样例（每行 `Key : value`，故按 `:` 切分而非按列）：
+        NPU ID : 0
+        Aicore Usage Rate(%) : 99
+        Memory Bandwidth Usage Rate(%) : 4
+    """
+    out: dict = {}
+    for ln in text.splitlines():
+        if ":" not in ln:
+            continue
+        k, _, v = ln.partition(":")
+        k = k.strip().lower()
+        v = v.strip()
+        m = re.search(r"-?\d+(?:\.\d+)?", v)
+        if not m:
+            continue
+        try:
+            num = float(m.group(0))
+        except ValueError:
+            continue
+        if "aicore" in k:
+            out["aicore_pct"] = num
+        elif "bandwidth" in k:
+            out["hbm_bw_pct"] = num
+        elif "aivector" in k:
+            out["aivector_pct"] = num
+        elif "aicpu" in k:
+            out["aicpu_pct"] = num
+        elif "ctrlcpu" in k:
+            out["ctrlcpu_pct"] = num
+        elif "memory usage" in k or "hbm usage" in k:
+            out["mem_usage_pct"] = num
+    return out
 
 
 def torch_available() -> bool:
