@@ -290,9 +290,9 @@ class PHDNet:
         if not readonly:
             _p = self._prof_t('M5_mod')
             gate, mode = self.modulator.observe(surprise)    # 4. M5 神经调制
-            self._prof_end('M5_mod', _p)
             if cfg.multi_modulation:
                 self._last_da = self.modulator.da           # DA 巩固信号（供 sleep 回放）
+            self._prof_end('M5_mod', _p)
         else:
             gate, mode = 0.0, ""                             # 只读：不更新调制器内部状态
 
@@ -311,7 +311,11 @@ class PHDNet:
         else:
             wm_written = False
 
-        self._prof_end("M4a_wm", _p)
+        # P122：`_prof_end("M4a_wm", ...)` 必须在 `if not readonly` **内部**。
+        # 原来它写在 if/else 之后，而 `_p` 只在 if 分支里赋值 → `readonly=True`
+        # 时 `_p` 仍是 M3_pred 那一段的起点，于是 `M4a_wm` 记下的是
+        # 「从 M3_pred 到现在」的时长，**把 M3_pred + M5 的时间重复计入**。
+        # 对照 `M5_mod`（end 在 if 内）的正确写法。
         recall_hit = False                                   # 6. M4b 长期记忆交互
         if not readonly:
             # T3.2-lite 错误触发检索：预测失败时额外检索，每 4 步至多一次
