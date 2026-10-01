@@ -196,7 +196,14 @@ s[idx] = norm(u[idx]) + 0.1     # 归一到 [0.1, 1.1]，sparse_encoder.py:129
 - **三态核选择**（`config.py:198`，`pc_fused_kernel`）：`True`/"fused"（并行融合核）、
   `"serial"`（单核融合核，去掉 prange 屏障）、`False`（原始 5 次核调用）。
   ⚠ **不能 `bool()`**（`sparse_pc.py:381-384`）——那会把 `"serial"` 变成 `True`，
-  让单核核永不可达。生产 CLI 默认 `--m2-kernel serial`（`train/train.py:250`）。
+  让单核核永不可达。**生产 CLI 默认 `--m2-kernel plain`（P113，`train/train.py:250`）**：
+  P76 只否掉了「prange **融合**」（昇腾上10 个屏障区主导开销），**没否掉 `_csr_matvec`
+  自身的行级 prange**——而 plain 走的正是后者。服务器实测（1b 档，昇腾 191 核 + NPU）：
+  M2_infer **6.92 → 1.28 ms/tok（5.41×）**，端到端 17.63 → 12.09 ms/tok（1.46×），
+  四个采样点 sliding PPL 与 serial 运行**逐位相同**（纯调度变化、零语义变化）。
+  对拍见 `tests/verifiers/verify_m2_kernels.py`（11 例三态等价 + n_steps 1/2/3）。
+  ⚠ **x86 上测不出这个差异**（本机 fused/serial/plain 三态`max|Δ|=0`，256 行规模下
+  结果恰好相同）——x86 结论不构成昇腾证据。
 - **学习**（`sparse_pc.py:500-529`）：下行 `ΔW += η_pc·e⊗r`（误差驱动稀疏外积）；
   上行 Oja `ΔW += η_oja·post·(pre − post·W)`；四权重 clip 到 `±pc_w_max`（默认 **2.0**，
   `config.py:29-31` —— 2026-09-28 修复：此前 `cfg.w_max` 从未传入 PC，签名默认 2.0 静默生效）。
@@ -837,7 +844,7 @@ LUT 反量化到 fp32、更新后重量化写回。**内存流量 ∝ 存储位�
 | 7 | `docs/文档写作规范.md` §2.4 / §2.8 | 写「读出 **CLI 默认 fp16**（库 config 默认 bf16）」 | 两者均为 **fp32**（`config.py:292` 与 `train/train.py:205`）。P110（2026-10-01）授权改回 |
 | 8 | `docs/文档写作规范.md` §2.8 | 写 `--readout-conn-k 0` | 实际 **128**（P108，`train/train.py:291`） |
 | 9 | `phdnet/sparse_encoder.py:12-14` 模块 docstring vs `config.py:298` | docstring 说「M1 默认 `fp32`」 | **config 是 `fp64`**（`sparse_encoder.py` 的形参默认是 `dtype="fp32"`，但 `model.py:37` 传的是 `cfg.encoder_dtype`） |
-| 10 | `train/train.py:250-255` | `--m2-kernel` 的 `default="serial"`，但 help 文本写「**默认 plain**」 | **argparse default 与 help 自相矛盾**。实际生效值 = `serial` |
+| 10 | ~~`train/train.py:250-255`~~ | ~~`--m2-kernel` 的 `default="serial"`，但 help 文本写「**默认 plain**」~~ | **P113 已修**：默认改`plain`（有服务器实测支撑），help 同步为实测数字。见§1 M2 三态核 |
 | 11 | `phdnet/sparse_pc.py:29-32` 文档字符串 | 说「开关（默认关闭，默认路径逐位不变）：`cfg.sparse_conn` —— True 时主干改用本模块」 | **已过时**（写于稠密栈仍在时）。2026-09-28 稠密栈已删除，`sparse_conn` 恒 `True`，False 会 fail-fast |
 | 12 | `phdnet/config.py:84-85` vs `phdnet/model.py:53-57` | config 仍保留 `backend` / `torch_dtype` 字段和「昇腾部分型号建议 float16」的说明 | `model.py` 对非 `auto/numpy/cpu` 的 backend **fail-fast**（旧 torch 栈已随 P30 删除）。字段为**兼容保留** |
 | 13 | `tools/bench_readout_sparse.py:113-115` 注释 | 「`sparse_alloc.py` 由另一位同事并行实现中」 | `sparse_alloc.py` **已存在**（21 个 verifier 已在 `verify_readout_sparse_gate.py:375-390` 探测它）。但它**仍未接入 `readout.py`**（纯分配函数） |

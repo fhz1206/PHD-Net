@@ -66,7 +66,7 @@ train/
   ckpt_1b.py              检查点保存/恢复
   config_1b.py            四档预设 + 容量账
   tokenizer_core.py       分词热路径（numba nogil）
-tests/verifiers/          21 个专项验证器
+tests/verifiers/          22 个专项验证器（含 P113 新增的 `verify_m2_kernels.py`）
 tools/                    工具脚本
 ```
 
@@ -256,9 +256,14 @@ python train/train.py --help ; echo "exit=$?"
 
 ### 5.2 ⚠ `default=` 与 help 文本必须一致
 
-现存两个已修的例子：`--m2-kernel` 实际 `serial` 而 help 曾写「默认 plain」；
-`--encoder-dtype` 实际 `fp32` 而 help 曾写 `fp64`。**help 里不要重复陈述默认值**，
-或确保陈述与 `default=` 一致。
+**已修的两个例子**：`--encoder-dtype` 实际 `fp32` 而 help 曾写 `fp64`；
+`--m2-kernel` 实际 `serial` 而 help 曾写「默认 plain」。
+
+⚠ **`--m2-kernel` 是修复范例，P113 已把它改对**：不只是把 `default=` 改成 `plain`，
+**同时把 help 换成了实测数字**（6.92 → 1.28 ms/tok、5.41×、四个采样点 PPL 逐位相同）。
+**这比删掉 help 里的数字更好** —— help 是用户唯一不用翻文档就能看到口径的地方。
+
+**help 里不要重复陈述默认值**，或确保陈述与 `default=` 一致。
 
 ### 5.3 其它
 
@@ -353,7 +358,7 @@ P111 恰恰是要取消这个回落。改代码前若不看清断言，**会把�
 | `--readout-conn-k` | M6 稀疏化入边数（默认 128） | >0 时加速后端走 gather-GEMV；**只支持均匀 k**，非均匀行宽 fail-fast |
 | `--readout-dtype` | 读出计算精度（默认 **fp32**） | 低精度破坏 p − t 规则（§4.2） |
 | `--encoder-dtype` | M1 权重存储精度（默认 fp32） | 昇腾走平台自适应 GEMV，与 dtype 无关 |
-| `--m2-kernel` | M2 推理核（默认 **serial** 单核） | `plain` 走 `_csr_matvec`（**有**行级 prange，从未被否），是待 A/B 候选 |
+| `--m2-kernel` | M2 推理核（默认 **`plain`**） | 三态见下方 §9.1。**`plain` 在昇腾赢 5.41×**（P113 实测）；`fused` 在昇腾退化 3–4×（已否）。门禁 `verify_m2_kernels.py` |
 | `--nll-sync-every` | nll 同步周期（默认 8） | N>1 时消除每步硬同步 |
 | `--numba-threads` | prange 线程上限（默认 8） | 191 核上 P22 实测 1→6 线程仅 1.16×（带宽饱和） |
 | `--accel` | 读出设备（默认 auto） | `cpu/off/numba` = 强制 numba 路径 |
@@ -361,6 +366,41 @@ P111 恰恰是要取消这个回落。改代码前若不看清断言，**会把�
 | `--ckpt-dtype` | 检查点存储精度（默认 fp16） | 位模式存取，加载侧解码闭环 |
 | `--torch-compile` | 图优化（默认**关**） | 只在首次调用编译 → 首次执行时捕获失败并永久回落 eager |
 | `--step-profiling` | 九段耗时分解 | 判断优化是否生效看这个，不看「检测到设备」 |
+
+### 9.1 `--m2-kernel` 三态：各自走什么，为什么 `plain` 在昇腾赢
+
+`phdnet/sparse_pc.py::infer()` 是一个**三态分派**。三态不是「同一实现的三档并行度」，
+而是**两条不同的代码路径**（融合 / 非融合），加一个并行度档：
+
+| 取值 | 走什么 | 并行性 | 昇腾实测 | 状态 |
+|---|---|---|---|---|
+| **`plain`**<br>（**默认**） | `_csr_matvec` × 5 次<br>（`sparse_pc.py:43-53`） | ✅ **`prange(n)` + `parallel=True`**，行内按 `indptr` 顺序累加、**行间并行** | **1.28 ms/tok**（端到端 12.09） | ✅ **P113 实测采纳为默认** |
+| `serial` | `_pc_infer_fused_serial`<br>（P99 加） | ❌ **单核**。融合的「一次调用 + 核内复用中间数组」保留，去掉 `parallel=True` | **6.92 ms/tok**（端到端 17.63） | **历史默认**（P113 前），现为显式 opt-out |
+| `fused` | `_pc_infer_fused`<br>（P52） | ⚠ `parallel=True` 但有 **10 个 prange 屏障区** | fused 20–27 vs plain 6.7–11.9 → **慢 3–4×** | ❌ **已否决**，保留仅供对照 |
+
+⚠ **两条容易被写错的纪律**：
+
+1. **P76 只否了 `fused` 的「融合 + 10 区prange 屏障」，没有否 CSR 行级并行本身。**
+   `--m2-kernel plain` 走的就是 `_csr_matvec`，它从 P43 起就带行级 prange，
+   与融合核是两个独立维度。**把「融合核被否」写成「CSR 行级并行被否」是错的**——
+   这条已由 P113 的实测背书（5.41×，不是推论）。
+2. **P76 那组 plain 值 6.7–11.9 ms/tok 与现在的 1.28 不是同一口径**
+   （P76 A/B 期间、线程配置未标、不同批次 run），**不可并列比较**。
+
+**为什么 plain 在昇腾赢、在 x86 测不出来**（P113 的实测补充）：
+同一份CSR 行级 prange，x86 上**从未 A/B**（性能文档 §五），
+昇腾上赢 5.41×。这印证了性能文档的铁律③：
+**x86 的性能结论不构成昇腾的证据，连「无差别」也不构成。**
+
+**门禁**：新增机制改到 M2 的核时必须跑 `tests/verifiers/verify_m2_kernels.py`（**11 例**）：
+A1 fused vs serial、A2 plain vs serial（容差 1e-7 量级——plain 是非融合路径，
+内部 `np.tanh`/`np.clip` 的归约顺序与融合核的 `math.tanh` 不同）、
+A3 `n_steps=1/2/3`、B 类断言行级 prange **不改变求和顺序**。
+P113 的零回归证据见性能文档 §2.1（四个采样点 sliding PPL 与 serial 运行**逐位相同**）。
+
+⚠ **库默认 ≠ CLI 默认**：`phdnet/config.py:198` 的 `pc_fused_kernel` 默认 `True`（= `fused`），
+被 `train.py:495-496` 在 CLI 层覆盖为三态。**引用「M2 默认用哪个核」必须指明是哪一层**
+（**CLI = `plain`；库 config = `fused`**）。
 
 ---
 
