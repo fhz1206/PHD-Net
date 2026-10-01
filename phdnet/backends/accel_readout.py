@@ -68,7 +68,8 @@ class AccelReadout:
                  dtype: str = "fp32", w_clip: float = 0.0, w0=None,
                  nll_sync_every: int = 1, compile: bool = False,
                  compile_mode: str = "default", conn_k: int = 0,
-                 csr=None, lognormal_init: bool = False, exc_ratio: float = 0.8):
+                 csr=None, lognormal_init: bool = False, exc_ratio: float = 0.8,
+                 sparse_fwd_kernel: str = "mulsum"):
         if torch is None:
             raise RuntimeError("未安装 torch，加速读出不可用")
         dtype = _DTYPE_ALIASES.get(str(dtype), str(dtype))
@@ -165,6 +166,9 @@ class AccelReadout:
                 _val = _val.reshape(self.n_out, k).astype(np.float32)
             self._sparse_k = k
             self._sparse = True
+            # P116：前向算子（"mulsum" | "einsum"）。⚠ einsum 非逐位（归约顺序
+            # 不同，本机 max|Δ|≈3e-05），且昇腾收益未实测 → 默认 mulsum。
+            self._sp_fwd = str(sparse_fwd_kernel or "mulsum").lower()
             self.Wi = torch.tensor(_idx, device=self.device, dtype=torch.long)
             self.W = torch.tensor(_val, device=self.device, dtype=torch.float32)
             # 稀疏模式**只支持 fp32**：低精度会丢弃非目标行更新（P110 实测），
@@ -277,7 +281,12 @@ class AccelReadout:
             # （曾经的 bug：写成 `self._sp_gather(ht).sum(dim=1)`，等于把
             #   权重全丢掉、只把 gather 到的 h 分量相加——数值完全错但形状/
             #   dtype 都对，只在数值对拍里才暴露。）
-            return (self.W * self._sp_gather(ht)).sum(dim=1)
+            g = self._sp_gather(ht)
+            if self._sp_fwd == "einsum":
+                # P116：不物化 (n_out,k) 中间张量（mulsum 每步两处各25.37 MiB）。
+                # ⚠ 归约顺序与 mulsum 不同 → **非逐位**（本机 max|Δ|≈3e-05）。
+                return torch.einsum("ij,ij->i", self.W, g)
+            return (self.W * g).sum(dim=1)
         if self._int8:
             Wq = (self.W.to(torch.float32) * self._wscale).to(ht.dtype)
             return Wq @ ht
@@ -862,7 +871,9 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
                              conn_k=int(getattr(cfg, "readout_conn_k", 0) or 0),
                              lognormal_init=bool(getattr(cfg, "lognormal_init",
                                                          False)),
-                             exc_ratio=float(getattr(cfg, "exc_ratio", 0.8))),
+                             exc_ratio=float(getattr(cfg, "exc_ratio", 0.8)),
+                             sparse_fwd_kernel=str(
+                                 getattr(cfg, "sparse_fwd_kernel", "mulsum"))),
                 f"accel:{spec}")
     except Exception as e:                                   # noqa: BLE001
         return _fallback(f"{type(e).__name__}: {e}")

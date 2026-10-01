@@ -260,6 +260,38 @@ def main() -> int:
     except ValueError:
         check(True, "C3 load_W 形状不符 → 报错")
 
+    # ── C4b. 稀疏前向算子 A/B（P116）────────────────────────────────────
+    # `--sparse-fwd-kernel`：mulsum（默认，逐位基线）vs einsum（不物化
+    # (n_out,k) 中间张量，但**归约顺序不同→ 非逐位**）。
+    # ⚠ 本机 x86 实测 einsum 快 ~21%，但**昇腾收益未实测**——x86 结论不构成
+    # 昇腾证据（本项目已实测到四次方向相反）。故 einsum **不作默认**，
+    # 只提供开关 + 容差对拍，让服务器自己测。
+    print("\n[C4b] 稀疏前向算子 mulsum vs einsum（P116，容差判据）")
+    # `build_pair(seed=31)` 给两边喂**同一份 CSR**，故两者结构完全一致，
+    # 唯一变量就是前向算子。（不能手动给 `_csr` 赋值——它是只读 property。）
+    _, ro_mul, _, _ = build_pair(n_h, n_out, k, seed=31)
+    _, ro_ein, _, _ = build_pair(n_h, n_out, k, seed=31)
+    ro_ein._sp_fwd = "einsum"          # noqa: SLF001（刻意切换被测算子）
+    d_ein = 0.0
+    for _ in range(5):
+        hh = rng.normal(0.0, 1.0, n_h)
+        ym = np.asarray(ro_mul(hh))
+        ye = np.asarray(ro_ein(hh))
+        d_ein = max(d_ein, float(np.abs(ym - ye).max()))
+    s_e = max(1.0, float(np.abs(ym).max()))
+    check(d_ein <= 1e-4 * s_e,
+          "C4b einsum 与 mulsum 容差内一致（**非逐位**）",
+          f"max|Δ|={d_ein:.3e} 相对={d_ein/s_e:.2e}（归约顺序不同，预期非0）")
+    # 反向：确认 einsum 不是「什么都没算」（防再次出现丢权重的 bug）
+    check(float(np.abs(ye).max()) > 0.0,
+          "C4b einsum 输出非零（防「丢权重」类静默错误）",
+          f"max|y|={float(np.abs(ye).max()):.4f}")
+    # 更新路径不受影响（两条前向共用同一 learn_softmax）
+    w_before = ro_ein.W.clone()
+    ro_ein.learn_softmax(hh.copy(), rng.normal(0, 1, n_out), 0.15)
+    check(not bool((w_before == ro_ein.W).all()),
+          "C4b einsum 臂的更新路径仍生效（W 已变）")
+
     # ── D. 零回归 ─────────────────────────────────────────────────────────
     print("\n[D] 零回归：conn_k=0 稠密路径未被污染")
     dense_ref = AccelReadout(n_h, n_out, np.random.default_rng(23), device="cpu",

@@ -18,8 +18,16 @@ class LongTermMemory:
         self.W_slow = np.zeros((n, n))          # 皮层慢权重（统计巩固）
         self.diag_idx = np.diag_indices(n)
 
-    def imprint(self, p_out: np.ndarray, p_in: np.ndarray | None = None) -> None:
-        """一次性 Hebbian 印迹：对称自联想（p_in=None）或非对称配对关联。"""
+    def imprint(self, p_out: np.ndarray, p_in: np.ndarray | None = None,
+                amortize: int = 1) -> None:
+        """一次性 Hebbian 印迹：对称自联想（p_in=None）或非对称配对关联。
+
+        ⚠ `amortize` 是 P116（方案 B）为对齐 `SparseLTM.imprint` 的调用面而
+        接受的**占位参数**，本实现**忽略它**——因为这里是**纯稠密 Hebbian**
+        `W += η·p_out⊗src`，代价是 O(n_dim²) 的一次外积，与「配对组合数」
+        无关，不存在可摊销的组合爆炸。故摊销对这条路径**无意义也无收益**。
+        （P23/P24 纪律：换实现必须对齐完整调用面，否则生产首个 step 崩。）
+        """
         src = p_out if p_in is None else p_in
         self.W_fast += self.eta_hip * np.outer(p_out, src)
         self.W_fast[self.diag_idx] = 0.0        # 去对角防自激

@@ -134,9 +134,45 @@ class SparseLTM:
         return list(dict.fromkeys(
             chain.from_iterable([idx_lists[j] for j in dims.tolist()])))
 
-    def imprint(self, rate: np.ndarray) -> None:
+    def imprint(self, rate: np.ndarray, amortize: int = 1) -> None:
+        """P116 `amortize>1`：把配对学习摊销到 N 步一次（方案 B）。
+
+        动机（M4b_imprint 实测 0.40 ms/tok，占 CPU 侧 4.26 ms 的 9.4%）：
+        `imprint` 每步都跑 `table.learn(self._prev, cur)`，而 learn 的代价
+        = |prev| × |cur| 次槽位查找。这是**时间整合**（B7 已在读出侧用
+        `minibatch_size` 做过同思路），脑同构上对应突触巩固的整合。
+
+        ⚠⚠ **代价随 N 二次增长**（不是线性）：攒 N 对后一次提交要做
+        N-1 次配对学习（`learn(prev[i], cur[i])`），故总组合数从 N 次变
+        N(N-1)/2。N=2 时 1 次（不增），N=4 时 6 次（3×）。
+        **所以 N 必须很小，且收益上限 = 省掉 (N-1)/N 的 encode+learn，
+        代价是组合数×(N-1)/2。**实测只做 N=2。
+
+        ⚠ **语义等价性**：配对学习的**顺序**变了（原本 (p0,c0),(p0,c1),(p1,c1)
+        逐步；现在攒到第 N 步一次性提交 (p0,c0),(p1,c1)...）。
+        ⚠️ 逐步版在中间步就写了表，摊销版到第 N 步才写 → **中间 N-1 步
+        表的状态不同**。这不是「延迟执行」而是「改变写入时机」，
+        故**默认 amortize=1（旧行为逐位不变）**，N>1 是显式的语义变更。
+        """
         self._check_sparse(rate)                       # A2：契约校验（稠密模式显式报错）
         cur = self.encode(rate)
+        if amortize and int(amortize) > 1:
+            # 缓存本对的 (prev, cur)；到第 N 对才一次性提交前 N-1 对
+            buf = getattr(self, "_imprint_buf", None)
+            if buf is None:
+                buf = self._imprint_buf = []
+            prev_p = self._prev
+            buf.append((prev_p, cur))
+            self._prev = cur
+            self.table.step_count += 1
+            n_amort = int(amortize)
+            if len(buf) >= n_amort:
+                # 提交前 n_amort-1 对（最后一对留给下次做 prev）
+                for pv, cu in buf[:-1]:
+                    if pv is not None and cu:
+                        self.table.learn(pv, cu)
+                self._imprint_buf = buf[-1:]
+            return
         if self._prev is not None and cur:
             self.table.learn(self._prev, cur)
             # P66 诊断（2026-09-29）：服务器 1B 档 `M4b_ltm` 段从 0.14 涨到
