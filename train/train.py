@@ -287,8 +287,11 @@ def main() -> None:
     ap.add_argument("--no-csr-online", dest="csr_online",
                     action="store_false",
                     help="关闭在线 CSR，回退 dict 邻接表（仅短跑/调试用）")
-    ap.add_argument("--readout-conn-k", type=int, default=0,
-                    help="稀疏读出每输出单元入边数（0=稠密；大词表时建议 512–2048）")
+    ap.add_argument("--readout-conn-k", type=int, default=128,
+                    help="P108（fhz 2026-10-01）：M6 读出稀疏化——每输出单元的"
+                         "入边数（0=稠密）。1B 档 128/3072 = 4.2%% 连接率，"
+                         "访存 320→39 MB（省 8×）。默认 128 取自 4M 档 A/B："
+                         "k=128 时 PPL 477 vs 稠密 608 且速度持平。")
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--epochs", type=int, default=1,
                     help="语料流过遍数（状态跨 epoch 连续不重置）")
