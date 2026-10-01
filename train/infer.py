@@ -221,10 +221,11 @@ def main() -> None:
                          "注意本入口推理为 numba CPU 生产路径（单路）；"
                          "P30 已删除 torch 全栈（tools/train_torch_lm.py，缺 7 项机制），"
                          "当前无可用的多卡/加速器推理轨")
-    ap.add_argument("--lang", choices=["zh", "en"], default="zh",
-                    help="终端输出语言（zh=默认全中文 / en=all English）")
+    ap.add_argument("--lang", choices=["en", "zh"], default="en",
+                    help="**终端输出语言**（P119）：**默认英文**；"
+                         "--lang zh 输出中文。对推理结果**无任何影响**。")
     args = ap.parse_args()
-    # P94：终端语言随 --lang 切换（zh=全中文默认 / en=全英文）
+    # P119：终端语言随 --lang 切换（**默认 en=英文** / zh=中文）
     from phdnet.i18n import set_lang, install_stream_filter
     set_lang(args.lang)
     install_stream_filter()

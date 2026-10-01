@@ -153,7 +153,9 @@ def convert(lang: str, dst: Path, max_samples: int = 0, max_mb: float = 300.0,
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--lang", choices=["zh", "en"], default="zh")
+    ap.add_argument("--lang", choices=["en", "zh"], default="en",
+                    help="终端输出语言（P119：默认英文；--lang zh 输出中文。"
+                         "不影响转换结果）")
     ap.add_argument("--dst", type=Path, default=None)
     ap.add_argument("--max-samples", type=int, default=0)
     ap.add_argument("--max-mb", type=float, default=300.0)

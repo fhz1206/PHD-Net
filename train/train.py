@@ -196,12 +196,19 @@ def main() -> None:
                     help="--remote-data 时取排序后前多少比例的分片"
                          "（默认 0.3 = fhz 2026-09-29「数据集只取30%%」；"
                          "前缀子集，词表扫描与训练流开头一致）")
-    ap.add_argument("--lang", choices=["all", "zh", "en"], default="all",
-                    help="训练语料语言过滤（fhz 2026-09-29）：all=全量（默认，"
-                         "与旧逐位一致）；zh/en=按 parquet 的 lang 列过滤"
-                         "（--data pretrain --lang zh 等价旧 --data pretrain_zh；"
-                         "sft 分片同样适用）。词表扫描不受影响（词表是训练流的"
-                         "超集，OOV 恒 0）")
+    ap.add_argument("--lang", choices=["en", "zh"], default="en",
+                    help="**终端输出语言**（P119, fhz 2026-10-01 重新定义）。"
+                         "**默认英文**；--lang zh 时终端输出中文。"
+                         "⚠ 该参数对训练结果**没有任何影响** —— 语料、词表、"
+                         "模型状态、数值全部不变，改的只是打印文案的语言。\n"
+                         "  （语料语言过滤是另一个参数 --data-lang）")
+    ap.add_argument("--data-lang", choices=["all", "zh", "en"], default="all",
+                    help="**训练语料**语言过滤（P119 从 --lang 拆出）："
+                         "all=全量（默认，与旧逐位一致）；zh/en=按 parquet 的 "
+                         "lang 列过滤训练流（--data pretrain --data-lang zh "
+                         "等价旧 --data pretrain_zh；sft 分片同样适用）。"
+                         "词表扫描不受影响（词表是训练流的超集，OOV 恒 0）。"
+                         "⚠ **这个参数会改变训练结果**，与 --lang 不同")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
     ap.add_argument("--readout-dtype", default="fp32",
                     choices=["fp32", "fp16", "bf16", "fp8", "fp4", "int8", "int4",
@@ -376,7 +383,7 @@ def main() -> None:
     ap.add_argument("--report", action="store_true",
                     help="只打印检查点的大空间表统计后退出")
     args = ap.parse_args()
-    # P94：终端语言随 `--lang` 切换（zh=全中文默认 / en=全英文），必须
+    # P119：终端语言随 `--lang` 切换（**默认 en=英文** / zh=中文），必须
     # **早于任何 print**（zh 时是空操作；en 时输出层翻译历史中文文案）。
     from phdnet.i18n import set_lang, install_stream_filter
     set_lang(args.lang)
@@ -566,12 +573,13 @@ def main() -> None:
     # 语言过滤（fhz 2026-09-29）：--lang zh/en 按 parquet 的 lang 列过滤训练流；
     # 旧 --data pretrain_zh 等价 --data pretrain --lang zh（保留兼容）。
     # 词表扫描不受影响（词表是训练流超集 → OOV 恒 0）。
+    # P119：过滤走 **--data-lang**（不再是 --lang）—— --lang 只管终端文案。
     _lang_filter = None
     _lang_tail: list[int] = []          # P69：语种自检（最近 8 个真实 token）
     if args.data == "pretrain_zh":
         _lang_filter = "zh"
-    elif args.lang != "all":
-        _lang_filter = args.lang
+    elif args.data_lang != "all":
+        _lang_filter = args.data_lang
         print(f"[data] lang filter: {_lang_filter} (parquet `lang` column)")
     _data_provenance = {
         "data": args.data,

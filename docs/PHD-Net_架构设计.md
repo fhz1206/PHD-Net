@@ -746,7 +746,7 @@ LUT 反量化到 fp32、更新后重量化写回。**内存流量 ∝ 存储位�
 **兼容性铁律**（`corpus.py:14-19`）：只**新增**读取能力，不改动既有默认路径 ——
 `tests/eval_common.py` 仍读纯文本 `.txt`，行为逐位不变。
 
-**其它 CLI 语料开关**：`--lang {all,zh,en}`（默认 `all`；按 parquet `lang` 列过滤，
+**其它 CLI 语料开关**：`--data-lang {all,zh,en}`（默认 `all`；按 parquet `lang` 列过滤，⚠ P119 从 `--lang` 拆出——`--lang` 现只管终端语言、默认 `en`；原 `--lang {all,zh,en}`（默认 `all`；按 parquet `lang` 列过滤，
 **词表扫描不受影响** —— 词表是训练流的超集，OOV 恒 0）、`--vocab-scan {head,full}`
 （默认 `head`，采样 `--vocab-sample-chars 4000000` 字符建词表）、
 `--vocab-file`（外部词表，给了就跳过扫描）、`--remote-fraction`。

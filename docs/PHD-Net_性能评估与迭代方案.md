@@ -676,7 +676,7 @@ python tests/run_tests.py fast        # 9/9
 ### 9.2 性能：1B 档生产配置分段剖析（**务必带 `--step-profiling`**）
 
 ```bash
-python train/train.py --preset 1b --data pretrain --lang zh --remote-data \
+python train/train.py --preset 1b --data pretrain --data-lang zh --remote-data \
     --remote-fraction 0.3 --step-profiling
 ```
 
