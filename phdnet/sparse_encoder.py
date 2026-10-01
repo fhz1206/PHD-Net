@@ -112,8 +112,14 @@ class SparseEncoder:
         if use_numba:
             # P77：aarch64 上 numpy 对该形状 GEMV 病态慢（57-58 ms/tok），
             # 自写 numba 核跨平台一致（行内顺序累加，容差 1-2 ulp）
-            u = np.empty(self.n_sdr, dtype=np.float64)
-            _gemv_rows(W32, x_cast.astype(np.float64), self.b.astype(np.float64), u)
+            # P107b（fhz）：**GEMV 内部也用 fp16**——W/x/b 全转 fp16 后进核，
+            # 输出 fp16 再升 fp32 做 k-WTA。半带宽 ×2 收益 + 精度足够
+            #（k-WTA 只比大小，1e-3 相对误差不影响胜者集合）。
+            W16 = W32.astype(np.float16)
+            u16 = np.empty(self.n_sdr, dtype=np.float16)
+            _gemv_rows(W16, x_cast.astype(np.float16),
+                       self.b.astype(np.float16), u16)
+            u = u16.astype(np.float64)
         elif _NUMBA_ENC and W32.dtype == np.float32:
             u = np.empty(self.n_sdr, dtype=np.float32)
             _gemv_rows(W32, x_cast, self.b.astype(np.float32), u)

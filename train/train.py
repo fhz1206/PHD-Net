@@ -328,8 +328,8 @@ def main() -> None:
                          "fhz 2026-09-25 指令）")
     ap.add_argument("--context-milestone", type=int, default=1_000_000,
                     help="context 里程碑间隔 tokens（0=关闭；默认 1M）")
-    ap.add_argument("--ckpt-dtype", default="bf16",
-                    choices=["", "fp8", "bf16", "fp16"],
+    ap.add_argument("--ckpt-dtype", default="fp16",
+                    choices=["", "fp8", "bf16", "fp16", "int8", "int16", "int32"],
                     help="P46: checkpoint storage precision for the big matrices "
                          "(readout W etc). fp8/bf16 are stored as raw bit patterns "
                          "and decoded losslessly on load. NOT the training "
