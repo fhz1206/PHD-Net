@@ -65,6 +65,21 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
 # 因此**默认保持 ACTIVE（原行为）**，改为 `--omp-wait passive` 按需开启——
 # 191 核 + 每步数毫秒的大规模环境里结论可能相反，应由实测决定而非想当然。
 
+# P120：CANN / torch_npu 环境变量（**同样必须在 import numpy / torch 之前**）：
+# TASK_QUEUE_ENABLE=2（算子下发队列 Level 2，掩盖 CPU 下发开销）、
+# COMBINED_ENABLE=1（非连续算子合并下发）、
+# PYTORCH_NPU_ALLOC_CONF=expandable_segments:True（内存池扩展段）、
+# MULTI_STREAM_MEMORY_REUSE=1（跨流内存复用）。
+# 动机：P115 实测读出 7.83 ms是带宽下界（0.300 ms）的 **26.1 倍** → 瓶颈不在
+# 算力也不在带宽，就在这类**下发/调度开销**上。详见 phdnet/backends/cann_env.py
+# （含每条的官方依据与风险说明；显式设过的变量不覆盖）。
+try:
+    from phdnet.backends.cann_env import apply_cann_env as _apply_cann_env
+    _apply_cann_env(verbose=True)
+except Exception as _e:                       # noqa: BLE001
+    print(f"[cann-env] 设置失败（不致命）：{type(_e).__name__}: {_e}",
+          flush=True)
+
 import numpy as np
 
 _HERE = Path(__file__).resolve().parent
