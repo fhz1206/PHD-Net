@@ -115,17 +115,54 @@ class PHDNet:
         # P35：step 分段计时（诊断 CPU 侧耗时分布；默认关，零开销）
         self._prof_on = bool(getattr(cfg, "step_profiling", False))
         self._prof: dict = {}
+        # P115：滑窗计时（与 _prof 并行；_prof 是全程累计、从不清零）
+        self._prof_win: dict = {}
+        self._prof_win_n = 0
 
     # ---------- P35 分段计时 ----------
     def _prof_t(self, name: str):
-        """段起点（未开启 profiling 时返回 None，零开销）。"""
+        """段起点（未开启 profiling 时返回 None，零开销）。
+
+        P115：`M2_infer` 这类段名**一step 内可能出现多次**（循环内调infer），
+        所以「步数」不能靠 `_prof_end` 自增——那会数到段的次数而不是步数。
+        改为每次 `_prof_t`（即每个段起点的首次调用）给 `_prof_win_n` 加 1 会
+        同样数错。正确做法：由 `step()` 显式给 `_prof_step()` 记一次。
+        """
         if self._prof_on:
             return time.perf_counter()
         return None
 
+    def _prof_step(self) -> None:
+        """计**一个训练步**（P115：滑窗分母的正确来源）。
+
+        由 `step()` 开头调用。不放在 `_prof_t`/`_prof_end` 里——因为一段一步
+        可能出现多次（`M2_infer` 在循环内），按段计数会把分母放大数倍
+        （实测 300 步被数成 2095）。
+        """
+        if self._prof_on:
+            self._prof_win_n += 1
+
     def _prof_end(self, name: str, t0) -> None:
         if t0 is not None:
-            self._prof[name] = self._prof.get(name, 0.0) + time.perf_counter() - t0
+            d = time.perf_counter() - t0
+            self._prof[name] = self._prof.get(name, 0.0) + d
+            self._prof_win[name] = self._prof_win.get(name, 0.0) + d
+
+    def reset_prof_window(self) -> None:
+        """清空**滑窗**计时（`_prof_win` / `_prof_win_n`）。
+
+        P115：`_prof` 是**从 token 0 起全程累加、从不清零**的累计量，所以
+        `segments:` 打印的是「历史平均」。启动期（词表构建后的首批 numba 编译、
+        首次设备 kernel 编译、CSR 首次生长）会被摊进这个平均，
+        **系统性高估稳态成本**——实测 readout 从 28.77 一路衰减到 7.68 就是这个原因
+        （不是模型变快了，是早期昂贵样本被摊薄）。
+
+        故并行维护一个**滑窗**累计量：调用方在打印间隔处调本方法清零，
+        之后 `_prof_win[x] / _prof_win_n` 就是**该区间内的真实平均**。
+        两个口径都打印，读者可自行判断。
+        """
+        self._prof_win = {}
+        self._prof_win_n = 0
 
     @staticmethod
     def _rate(r2: np.ndarray) -> np.ndarray:
@@ -216,6 +253,7 @@ class PHDNet:
 
         默认（readonly=False, learn_scale=1.0, recur_cue=None）行为逐位不变。
         """
+        self._prof_step()          # P115：滑窗分母计「一个训练步」
         x = np.asarray(x)
         if x.shape[0] != self.cfg.n_input:
             raise ValueError(
