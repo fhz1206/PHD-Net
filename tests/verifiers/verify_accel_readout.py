@@ -12,7 +12,9 @@ B  等价性：前向 / NLL / 更新后 W **容差一致**（atol/rtol 口径，
 C  状态往返：W_cpu() / load_W() 精确还原（检查点兼容）；
 D  后端选择：auto 在**无加速器**机器上回落 numba 原路径（默认路径逐位不变）；
    显式不可用设备时回落并记录原因（诚实降级，不静默）。
-E  精度档：fp32 / fp16 / bf16 均可构造并前向（低精度容差判据）。
+E  精度档：fp32 / fp16 / bf16 / int8 均可构造并前向（低精度容差判据）。
+F  int8 读出（P105）：存储 int8 / 前向每步反量化 / 目标行更新 vs fp16 参考
+   对拍 / 20 步稳定性 / w_clip 重量化裁剪 / fp8 旧名别名 / ckpt 往返。
 
 运行：python tests/verifiers/verify_accel_readout.py
 """
@@ -113,17 +115,27 @@ def main() -> None:
           f"max|Δ|={d_learn:.3e}")
     check("A2 W 为设备张量（保存路径用 W_cpu）", torch.is_tensor(ro_x.W))
 
-    # ── A3：配置不兼容必须回落（两级/稀疏/量化读出未实现）──
-    print("[A3] 配置兼容性 → 强制回落")
+    # ── A3：配置不兼容必须回落（两级/稀疏读出未实现）；dtype 能力表直查 ──
+    # 注（P105）：旧版这里还有一条 `readout_dtype=fp8` 的回落断言，但在无加速器
+    # 机器上 pick 走 `auto→numba-cpu`（硬件探测层决定），永远拿不到回落原因，
+    # 是一条环境依赖的假 FAIL。dtype 的能力判断应直查 `_unsupported_reason`：
+    # fp8 是 int8 的旧名别名（P100 正名），int8 在 P105 已实现 → 两者都放行。
+    print("[A3] 配置兼容性 → 强制回落 / dtype 能力表")
     for label, kw in (("readout_hidden", {"readout_hidden": 8}),
-                      ("readout_conn_k", {"readout_conn_k": 16}),
-                      ("readout_dtype=fp8", {"readout_dtype": "fp8"})):
+                      ("readout_conn_k", {"readout_conn_k": 16})):
         cfg_x = PHDNetConfig(accel_readout="cuda" if has_accel else "auto", **kw)
         ro_c, backend_c = pick_readout_backend(cfg_x, n_h, n_out, rng)
         reason = getattr(ro_c, "_accel_fallback_reason", "")
         check(f"A3 {label} 回落 numba 并记录原因",
               isinstance(ro_c, Readout) and label.split("=")[0] in reason,
               f"backend={backend_c} reason={reason[:40]}")
+    from phdnet.backends.accel_readout import _unsupported_reason
+    check("A3 int8 放行（_unsupported_reason=None，P105 已实现）",
+          _unsupported_reason(PHDNetConfig(readout_dtype="int8")) is None)
+    check("A3 fp8 旧名别名放行（=int8，P100 正名 / P105 同步）",
+          _unsupported_reason(PHDNetConfig(readout_dtype="fp8")) is None)
+    check("A3 int4 仍拒绝（910B 无 INT4 矩阵乘单元）",
+          _unsupported_reason(PHDNetConfig(readout_dtype="int4")) is not None)
 
     # ── A4：接口完整性自动扫描（P23 根治：三次崩溃都是漏属性）──
     print("[A4] 接口完整性（扫描全仓库 readout.X 访问面）")
@@ -212,7 +224,7 @@ def main() -> None:
 
     # ── E：精度档 ──
     print("[E] 精度档")
-    for dt in ("fp32", "fp16", "bf16"):
+    for dt in ("fp32", "fp16", "bf16", "int8"):
         try:
             m = AccelReadout(n_h, n_out, None, device="cpu", dtype=dt, w0=W0)
             y = m.forward(h)
@@ -220,6 +232,90 @@ def main() -> None:
                   and np.isfinite(y).all(), f"max={np.abs(y).max():.4f}")
         except Exception as e:                                # noqa: BLE001
             check(f"E dtype={dt} 前向可用", False, f"{type(e).__name__}: {e}")
+
+    # ── F：int8 读出（P105，fhz 2026-10-01 决策）──
+    # 语义：存储 int8（per-tensor scale = 2*max|W|/127，2× 余量不重标定）；
+    # forward 每步反量化到 fp16 再 matmul；learn 在 fp32 域算 dp⊗ht 后重量化
+    # 写回。精度约束（知情取舍）：非目标行 |dp|≈1e-6 ≪ int8 步长 ≈ max|W|/127，
+    # 其更新被量化吃掉（int8 存储降 4× 访存的代价）；目标行 |dp|≈1 必须保留。
+    print("[F] int8 存储 / 前向 / 目标行更新 / 多步稳定性")
+    _n8, _h8 = 100, 64
+    _rng8 = np.random.default_rng(20261001)
+    _W08 = (_rng8.normal(0.0, 0.05, (_n8, _h8)) * np.sqrt(_h8)).astype(np.float32)
+    _h8v = _rng8.normal(0.0, 1.0, _h8).astype(np.float32)
+    _tgt8 = np.zeros(_n8, dtype=np.float32)
+    _tgt8[7] = 1.0
+    try:
+        ro_i = AccelReadout(_h8, _n8, None, device="cpu", dtype="int8", w0=_W08)
+        check("F1 int8 构造且 W.dtype == torch.int8", ro_i.W.dtype == torch.int8,
+              f"dtype={ro_i.W.dtype}")
+        _amax = float(np.abs(_W08).max())
+        check("F1 scale = 2*max|W|/127（2× 余量纪律）",
+              abs(ro_i._wscale - 2.0 * _amax / 127.0) < 1e-9,         # noqa: SLF001
+              f"wscale={ro_i._wscale:.6g}（码余量 = {127 - _amax / ro_i._wscale:.1f}）")
+        check("F1 存储 1 B/权重",
+              ro_i.stats()["storage_MB"] * 1e6 == ro_i.n_synapses(),
+              f"{ro_i.stats()['storage_MB'] * 1e6:.0f} B / {ro_i.n_synapses():,} 权重")
+        _y8 = ro_i.forward_dev(_h8v)
+        check("F2 forward_dev 返回有限值", torch.is_tensor(_y8)
+              and bool(torch.isfinite(_y8).all()),
+              f"max|y|={float(_y8.abs().max()):.4f}")
+        # 目标行更新 vs fp16 参考对拍：同 W0、同 (h, target, η)。
+        ro_r16 = AccelReadout(_h8, _n8, None, device="cpu", dtype="fp16", w0=_W08)
+        _W0q = ro_i.W_cpu().copy()             # int8 反量化后的实值（共同起点）
+        ro_r16.load_W(_W0q)
+        _nll_i = ro_i.learn_softmax(_h8v, _tgt8, 0.05, target_idx=7)
+        _nll_r = ro_r16.learn_softmax(_h8v, _tgt8, 0.05, target_idx=7)
+        _d_i = ro_i.W_cpu()[7] - _W0q[7]
+        _d_r = ro_r16.W_cpu()[7] - _W0q[7]
+        _cos = float(np.dot(_d_i, _d_r)
+                     / (np.linalg.norm(_d_i) * np.linalg.norm(_d_r) + 1e-30))
+        _mag = float(np.abs(_d_i).max()) / max(1e-30, float(np.abs(_d_r).max()))
+        check("F3 目标行更新方向与 fp16 参考一致（cos ≥ 0.99）",
+              0.99 <= _cos <= 1.0 + 1e-9, f"cos={_cos:.4f}")
+        check("F3 目标行更新幅度合理（0.5 ≤ |Δ|int8/|Δ|fp16 ≤ 1.5）",
+              0.5 <= _mag <= 1.5, f"|Δ_i|={np.abs(_d_i).max():.4f} "
+              f"|Δ_r|={np.abs(_d_r).max():.4f} 比值={_mag:.3f}")
+        check("F3 NLL 与 fp16 参考容差一致（≤1e-4 相对）",
+              abs(_nll_i - _nll_r) <= 1e-4 * max(1e-12, abs(_nll_r)),
+              f"{_nll_i:.6f} vs {_nll_r:.6f}")
+        # 非目标行：更新被量化吃掉是**知情取舍**——绝大多数码应纹丝不动
+        # （个别元素恰跨半步长边界 ±1 码属 RNE 正常舍入，值变 ≤1 步长）。
+        _dn = np.abs(ro_i.W[3].cpu().numpy().astype(np.int64)
+                     - np.round(_W0q[3] / ro_i._wscale).astype(np.int64))  # noqa: SLF001
+        check("F3 非目标行更新被量化吸收（码变化 ≤1 步，知情取舍）",
+              int(_dn.max()) <= 1,
+              f"非目标行最大码变化 = {int(_dn.max())}"
+              f"（≤1 码 = {ro_i._wscale:.3g} 实值）")                      # noqa: SLF001
+        for _k in range(20):
+            _yk = ro_i.forward_dev(_h8v)
+            ro_i.learn_softmax(_h8v, _tgt8, 0.05, target_idx=_k % _n8)
+        _yk = ro_i.forward_dev(_h8v)
+        check("F4 20 步 learn+forward 无崩溃无 NaN",
+              bool(torch.isfinite(_yk).all())
+              and int(ro_i.W.min()) >= -127 and int(ro_i.W.max()) <= 127,
+              f"码范围 [{int(ro_i.W.min())}, {int(ro_i.W.max())}] ⊆ [-127, 127]")
+        # w_clip：int8 的 clamp_ 对码张量无意义 → 改为重量化前裁剪。
+        _ro_c = AccelReadout(_h8, _n8, None, device="cpu", dtype="int8",
+                             w0=_W08, w_clip=0.05)
+        _ro_c.learn_softmax(_h8v, _tgt8, 0.05, target_idx=7)
+        _lim = int(np.floor(0.05 / _ro_c._wscale + 1e-9))                    # noqa: SLF001
+        check("F5 w_clip 在重量化时裁剪（码 ≤ w_clip/scale）",
+              int(_ro_c.W.abs().max()) <= _lim,
+              f"max|码|={int(_ro_c.W.abs().max())} ≤ {_lim}（w_clip=0.05）")
+        # 旧名别名：dtype="fp8" 构造出的是 int8 码本。
+        _ro_a = AccelReadout(_h8, _n8, None, device="cpu", dtype="fp8", w0=_W08)
+        check("F6 旧名 fp8 → int8 码本（别名归一）",
+              _ro_a.W.dtype == torch.int8 and _ro_a.dtype_name == "int8",
+              f"W.dtype={_ro_a.W.dtype}")
+        # 检查点往返：W_cpu 给实值、load_W 重量化，一次往返后稳定（不再漂移）。
+        _v1 = ro_i.W_cpu()
+        ro_i.load_W(_v1)
+        _v2 = ro_i.W_cpu()
+        check("F7 W_cpu/load_W 实值往返稳定", np.array_equal(_v1, _v2),
+              f"max|Δ|={float(np.abs(_v1 - _v2).max()):.2e}")
+    except Exception as e:                                    # noqa: BLE001
+        check("F1 int8 构造", False, f"{type(e).__name__}: {e}")
 
     print("-" * 76)
     if _FAILURES:

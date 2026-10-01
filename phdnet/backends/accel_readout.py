@@ -30,7 +30,17 @@ try:
 except Exception:                                            # pragma: no cover
     torch = None
 
-_DT = {"fp32": "float32", "fp16": "float16", "bf16": "bfloat16"}
+_DT = {"fp32": "float32", "fp16": "float16", "bf16": "bfloat16",
+       "int8": "int8"}
+# P105：旧名别名（与 readout.py 的 _RO_DTYPE_ALIASES 同口径）——"fp8" 本来就
+# 是 1 字节码本，P100 已正名为 int8；加速后端同样接受旧名，避免配置里的
+# dtype="fp8" 在这里被 ValueError 拒绝而静默回落。
+_DTYPE_ALIASES = {"fp8": "int8"}
+
+# int8 模式的**计算** dtype：存储是 int8 码本，但 ht/y 的 matmul 在 fp16 域做
+# （昇腾/CUDA 的 fp16 矩阵乘是原生快路径）。构造期探测失败则整体回落 fp16。
+_INT8_CDTYPE = torch.float16 if torch is not None else None
+_INT8_QMAX = 127.0
 
 
 def resolve_accel_device(spec: str = "auto") -> str:
@@ -60,10 +70,54 @@ class AccelReadout:
                  compile_mode: str = "default"):
         if torch is None:
             raise RuntimeError("未安装 torch，加速读出不可用")
+        dtype = _DTYPE_ALIASES.get(str(dtype), str(dtype))
         if dtype not in _DT:
             raise ValueError(f"不支持 dtype={dtype!r}；可用 {sorted(_DT)}")
         self.device = resolve_accel_device(device)
-        self.tdtype = getattr(torch, _DT[dtype])
+        # P105 int8 语义（fhz 2026-10-01 决策）——存储/计算/更新三层分开：
+        #   存储：W 用 torch.int8 码本，per-tensor scale = 2*max|W|/127（P104 的
+        #         2× 余量纪律：训练中权重增长 ≤2× 不需要重标定；越界被 clamp
+        #         饱和，不回绕）。
+        #   forward：每步反量化 W_int8 → fp16（codes.float()*scale）再 matmul
+        #         ——1.6 亿元素 ≈ 0.5-1 ms（NPU 可接受）。**不缓存 fp16 副本**：
+        #         W 每 step 都在更新，缓存必然过期。
+        #   learn：在 fp32 域计算 dp⊗ht，然后 W_int8 重量化写回（见
+        #         _int8_update）。精度约束（知情取舍）：int8 步长
+        #         ≈ max|W|/127 ≈ 0.008 ≫ 非目标行 |dp|≈1e-6 → 非目标行更新
+        #         会被量化吃掉（int8 存储降 4× 访存的代价，fhz 知情选择）；
+        #         但目标行 |dp|≈1 远大于步长，必须完整保留。
+        # tdtype 是**存储** dtype（int8）；ht/y 等 matmul 参与者的 dtype 跟随
+        # _cdtype（int8 模式 = fp16）——所有原来用 self.tdtype 的地方都要检查。
+        if dtype == "int8":
+            self.tdtype = torch.int8
+            self._cdtype = _INT8_CDTYPE
+        else:
+            self.tdtype = getattr(torch, _DT[dtype])
+            self._cdtype = self.tdtype
+        # int8 模式不走 torch.compile 融合核：_train_step_core 未覆盖反量化/
+        # 重量化路径，融合会产出另一套计算图——宁可放弃融合收益（正确性优先）。
+        if dtype == "int8" and compile:
+            compile = False
+        # P105 回落保护（参考 P85/P90 的 fp8 模式）：构造后做一次探测——int8 码本
+        # 反量化 + fp16 matmul 在该设备是否真的可用；不可用则**永久**回落 fp16
+        # （tdtype/_cdtype 跟随）+ 告警。⚠ P90 的 forward 级兜底（try/except
+        # around matmul）仍然保留在 forward_dev：探测通过不代表运行期所有 shape
+        # 都不炸，int8 matmul 在某些平台可能跑着跑着才失败。
+        self._int8 = (self.tdtype == torch.int8)
+        self._wscale = None
+        if self._int8:
+            try:
+                _p8 = torch.ones(4, 4, dtype=torch.int8, device=self.device)
+                _p16 = torch.ones(4, 4, dtype=self._cdtype, device=self.device)
+                _ = (_p8.to(self._cdtype) @ _p16).sum().item()
+            except Exception as e:                          # noqa: BLE001
+                import warnings
+                warnings.warn(
+                    f"int8 探测在设备 {self.device} 上失败（{type(e).__name__}: "
+                    f"{str(e)[:80]}）→ 永久回落 fp16（训练不中断）", RuntimeWarning)
+                self.tdtype = torch.float16
+                self._cdtype = torch.float16
+                self._int8 = False
         self.n_out, self.n_h = int(n_out), int(n_h)
         self.w_clip = float(w_clip)
         # P34：nll 设备侧累积（消除每步 .item() 同步 → CPU/NPU 重叠）
@@ -110,14 +164,58 @@ class AccelReadout:
             init = np.asarray(w0, dtype=np.float32)
         # ⚠ 必须**复制**：torch.as_tensor / torch.from_numpy 会与传入数组共享内存，
         # 而 W 是原位更新的 → 调用方（例如比较用的参考权重）会被静默改掉。
-        self.W = torch.tensor(np.ascontiguousarray(init, dtype=np.float32),
-                              device=self.device, dtype=self.tdtype)
+        _init_t = torch.tensor(np.ascontiguousarray(init, dtype=np.float32),
+                               device=self.device, dtype=torch.float32)
+        if self._int8:
+            # int8 存储：per-tensor scale = 2*max|W|/127（2× 余量，见上方注释）。
+            # 码本容量 ±127；初始码最大只到 ~63.5，权重涨到 2× 才触饱和（clamp
+            # 裁剪，不回绕）。全零权重退化 wscale=1.0（与 fp 路径同等的退化行为）。
+            _amax = float(_init_t.abs().max().item()) if _init_t.numel() else 0.0
+            self._wscale = (2.0 * _amax / _INT8_QMAX) if _amax > 0.0 else 1.0
+            self.W = torch.clamp(
+                torch.round(_init_t / self._wscale),
+                -_INT8_QMAX, _INT8_QMAX).to(torch.int8)
+        else:
+            self.W = _init_t.to(self.tdtype)
         # P28：设备侧 (h, y) 缓存，供 forward → learn_softmax 的热路径复用
         self._cache_h: np.ndarray | None = None
         self._cache_ht = None
         self._cache_y = None
 
     # ---------- 前向 ----------
+    def _matmul(self, ht):
+        """y = W @ ht；int8 模式**每步**反量化后再乘。
+
+        P105：反量化 = `codes.float() * scale`（fp32 域）→ cast 到 ht 的 dtype
+        （fp16）做 matmul。**不缓存 fp16 副本**——W 每 step 都在更新，任何缓存
+        下一步就过期（fhz 明确要求每步反量化；1.6 亿元素 ≈ 0.5-1 ms @NPU）。
+        """
+        if self._int8:
+            Wq = (self.W.to(torch.float32) * self._wscale).to(ht.dtype)
+            return Wq @ ht
+        return self.W @ ht
+
+    def _int8_update(self, dp32, ht32, alpha: float) -> None:
+        """int8 权重的 rank-1 更新：**fp32 域**计算 dp⊗ht，再重量化写回。
+
+        P105（fhz 2026-10-01 决策）：直接在 int8 码上原地加更新毫无意义——
+        int8 步长 ≈ max|W|/127 ≈ 0.008，而 softmax 梯度里非目标行的 |dp|≈1e-6，
+        加上去 round 回来码不变（更新被量化吃掉，这是 int8 存储降 4× 访存的
+        **知情取舍**，不是 bug）；目标行 |dp|≈1 远大于步长，走 fp32 域更新 +
+        重量化后完整保留（verifier [F] 用 fp16 参考对拍把关）。
+
+        流程：dequant(W) → fp32 域 addmm_（rank-1 AXPY，同 P28 口径）→
+        可选 w_clip（int8 的 clamp_ 对码张量无意义，改为**重量化前裁剪**）→
+        round(RNE)/clamp(±127)/cast int8 写回。scale 固定不重标定（2× 余量）。
+        """
+        W_fp = self.W.to(torch.float32) * self._wscale
+        W_fp.addmm_(dp32.reshape(-1, 1), ht32.reshape(1, -1), alpha=float(alpha))
+        if self.w_clip > 0.0:
+            W_fp.clamp_(-self.w_clip, self.w_clip)
+        codes = torch.clamp(torch.round(W_fp / self._wscale),
+                            -_INT8_QMAX, _INT8_QMAX)
+        self.W.copy_(codes.to(torch.int8))
+
     def forward(self, h) -> np.ndarray:
         """前向并返回 **numpy**（`Readout.__call__` 契约）。
 
@@ -126,7 +224,7 @@ class AccelReadout:
         若不缓存就要 D2H 289 KiB 再 H2D 传回，纯往返）。
         """
         ht = self._to_dev(h)
-        y = self.W @ ht
+        y = self._matmul(ht)
         self._cache_h = np.ascontiguousarray(h, dtype=np.float32)
         self._cache_ht = ht
         self._cache_y = y
@@ -151,24 +249,27 @@ class AccelReadout:
         """
         ht = self._staged_to_dev(h)
         try:
-            y = self.W @ ht
+            y = self._matmul(ht)
         except Exception as e:                              # noqa: BLE001
-            # P90 兜底：fp8 路径的**任何**失败（量化不支持、matmul 无算子、
-            # 传输不支持）都在这里被吸收 → 永久回落 fp16 后重算，**训练不中断**。
-            # 服务器实测（2026-09-30 19:17）证明这条必需：跑着旧版的机器直接
-            # 在 `W.to(float8_e4m3fn)` 崩掉；本机 CPU 则能建张量但 addmv 无实现，
-            # 崩在 `@`——只兜量化那一层不够。
-            if self._fp8_fallback:          # 已经回落过一次 → 真错误，照抛
+            # P90 兜底（P105 沿用）：int8 路径的**任何**运行期失败（matmul 无算子、
+            # 反量化/传输不支持）都在这里被吸收 → 永久回落 fp16 后重算，训练不中断。
+            # 服务器实测（2026-09-30 19:17）证明这条必需：fp8 能建张量但 matmul 无
+            # 实现会崩在 `@`——只靠构造期探测不够。非 int8 模式无可回落 → 真错误照抛。
+            if not self._int8:
                 raise
-            self._fp8_fallback = True
-            self._W8 = None
-            self.tdtype = self.W.dtype
+            self._int8 = False
+            _scale = self._wscale
+            self._wscale = None
+            self.tdtype = torch.float16
+            self._cdtype = torch.float16
+            # 保值反量化到 fp16 稠密主副本（codes*scale），此后走普通 fp16 路径
+            self.W = (self.W.to(torch.float32) * _scale).to(torch.float16)
             import warnings
             warnings.warn(
-                f"fp8 前向在设备 {self.device} 上失败（{type(e).__name__}: "
+                f"int8 前向在设备 {self.device} 上失败（{type(e).__name__}: "
                 f"{str(e)[:80]}）→ 永久回落 fp16（训练不中断）", RuntimeWarning)
             ht = self._staged_to_dev(h)
-            y = self.W @ ht
+            y = self.W @ ht          # 已回落 fp16 稠密 → 直接乘（勿再走 _matmul）
         self._cache_h = np.ascontiguousarray(h, dtype=np.float32)
         self._cache_ht = ht
         self._cache_y = y
@@ -216,7 +317,7 @@ class AccelReadout:
         ht, cache_hit = self._lookup_ht(h)
         # y_pre 既可能是设备张量（推荐路径）、numpy（旧接口），或 None（自算）
         if y_pre is None:
-            y = self.W @ ht
+            y = self._matmul(ht)     # P105：int8 模式每步反量化
         elif torch.is_tensor(y_pre):
             y = y_pre if y_pre.device == ht.device else y_pre.to(ht.device)
         elif cache_hit and self._cache_y is not None:
@@ -226,7 +327,7 @@ class AccelReadout:
             y = self._cache_y
         else:
             y = torch.as_tensor(np.ascontiguousarray(y_pre, dtype=np.float32),
-                                device=ht.device, dtype=self.tdtype)
+                                device=ht.device, dtype=self._cdtype)
         y32 = y.float()
         # P40：target 两种来源——`target_idx`（int，推荐）在**设备上**构造 onehot，
         # 省掉每步 289 KiB 的 host onehot 构造 + H2D；`target`（host 数组）为
@@ -293,8 +394,17 @@ class AccelReadout:
         _ct = cp.to(y32.device, non_blocking=True)
         nll_dev = torch.nn.functional.cross_entropy(
             y32.reshape(1, -1), _ct).reshape(())
-        # P84：更新主副本是 fp16（fp8 模式）→ dp/ht 必须同 dtype，否则 addmm_
-        # 退回慢路径或直接报错。
+        if self._int8:
+            # P105：int8 模式的更新走 **fp32 域** dp⊗ht + 重量化写回（精度约束
+            # 与知情取舍见 _int8_update 的 docstring）。p 已用完（nll 先取），
+            # clone 后就地改目标行，语义与 P45「p[c] -= 1」一致。
+            dp32 = p.clone() if t is None else (p - t)
+            if t is None:
+                dp32[correct] -= 1.0
+            self._int8_update(dp32, ht.float(), -eta)
+            return nll_dev
+        # P84：更新主副本是 fp16（低精度回落场景）→ dp/ht 必须同 dtype，否则
+        # addmm_ 退回慢路径或直接报错。int8 模式已在上面提前返回，不会到这里。
         _upd_dtype = (torch.float16
                       if self.W.dtype == torch.float16 else self.tdtype)
         if t is None:                     # P45：p 就地变成 dp（p − t）
@@ -332,8 +442,12 @@ class AccelReadout:
           准；同时已把该回退分支改正，两条路径现语义一致。
         """
         ht, _ = self._lookup_ht(h)
-        y = (self.W @ ht).to(self.tdtype)
-        t = self._to_dev(target).to(self.tdtype)
+        y = self._matmul(ht)
+        t = self._to_dev(target)
+        if self._int8:
+            # P105：int8 模式 → fp32 域更新 + 重量化写回（语义同 learn_softmax）
+            self._int8_update(t.float() - y.float(), ht.float(), eta)
+            return
         # P28：rank-1 AXPY（W += η·(t − y)⊗h），不物化 (n_out×n_in) 临时张量
         self.W.addmm_((t - y).reshape(-1, 1), ht.reshape(1, -1),
                       alpha=float(eta))
@@ -372,6 +486,8 @@ class AccelReadout:
 
     @property
     def dtype_name(self) -> str:
+        if self._int8:
+            return "int8"          # 存储口径（回落 fp16 后 _int8=False → 走下面）
         return {torch.float32: "fp32", torch.float16: "fp16",
                 torch.bfloat16: "bf16"}.get(self.W.dtype, str(self.W.dtype))
 
@@ -385,30 +501,43 @@ class AccelReadout:
                 "storage_MB": self.W.numel() * self.W.element_size() / 1e6}
 
     def W_cpu(self) -> np.ndarray:
-        """权重拉回主机（检查点 / 统计用）。"""
-        return self.W.detach().float().cpu().numpy()
+        """权重拉回主机（检查点 / 统计用）。int8 模式返回**反量化后的实值**。"""
+        W = self.W.detach().float()
+        if self._int8:
+            W = W * self._wscale   # 码本值 × scale = 实值（否则 ckpt 全是码）
+        return W.cpu().numpy()
 
     def load_W(self, arr: np.ndarray) -> None:
-        """从主机矩阵灌入（检查点恢复；形状须匹配）。"""
+        """从主机矩阵灌入（检查点恢复；形状须匹配）。int8 模式重量化。"""
         a = np.ascontiguousarray(arr, dtype=np.float32)
         if a.shape != (self.n_out, self.n_h):
             raise ValueError(f"形状不符：期望 {(self.n_out, self.n_h)}，"
                              f"收到 {a.shape}")
+        if self._int8:
+            # P105：实值 → 码本（同一 scale 语义；越界 clamp 饱和，不回绕）。
+            # scale 不随灌入的 W 重标定——保持与训练期同一把尺子。
+            t = torch.as_tensor(a, device=self.device, dtype=torch.float32)
+            self.W.copy_(torch.clamp(torch.round(t / self._wscale),
+                                     -_INT8_QMAX, _INT8_QMAX).to(torch.int8))
+            return
         self.W.copy_(torch.as_tensor(a, device=self.device, dtype=self.tdtype))
 
     # ---------- 内部 ----------
     def _to_dev(self, x):
+        # P105：matmul 参与者的 dtype 跟随 **_cdtype**（int8 模式 = fp16，
+        # 绝不能是 int8——ht 是实值向量，跟码本 dtype 无关）。
         if torch.is_tensor(x):
-            return x.to(device=self.device, dtype=self.tdtype)
+            return x.to(device=self.device, dtype=self._cdtype)
         return torch.as_tensor(np.ascontiguousarray(x, dtype=np.float32),
-                               device=self.device, dtype=self.tdtype)
+                               device=self.device, dtype=self._cdtype)
 
     def _staged_to_dev(self, h):
         """P58（fhz「CPU 预计算还要更加提前」）：pinned 暂存 + non_blocking H2D。
 
         pageable H2D 会阻塞 CPU 直到拷贝完成——CPU 算完 h 后干等传输。pinned
         暂存让 H2D 真异步：CPU 提交后立即回去算下一步的 M1–M5，NPU 流按 FIFO
-        消化（设备内再 cast 到 tdtype，与原 host-cast 语义同为 RNE 舍入）。
+        消化（设备内再 cast 到 _cdtype——int8 模式下是 fp16，与原 host-cast
+        语义同为 RNE 舍入）。
         缓冲池轮转 + Event 覆写保护（pinned 复用前必须确认上次拷贝已完成；
         每步 CPU 几 ms ≫ H2D 几 µs，实际零等待）。pin 不可用（CPU-only torch
         / 驱动限制）时回落同步路径，数值逐位一致。
@@ -423,7 +552,7 @@ class AccelReadout:
             except Exception:                           # noqa: BLE001
                 self._pin_ok = False
         if not self._pin_ok:
-            return torch.as_tensor(a, device=self.device, dtype=self.tdtype)
+            return torch.as_tensor(a, device=self.device, dtype=self._cdtype)
         idx = self._pin_next % self._pin_cap
         if len(self._pin_bufs) <= idx:                  # 首轮：扩池
             self._pin_bufs.append((torch.empty(self.n_h, dtype=torch.float32,
@@ -435,7 +564,7 @@ class AccelReadout:
         if ev is None:
             ev = torch.Event()
             self._pin_bufs[idx] = (buf, ev)
-        dev_t = buf.to(self.device, non_blocking=True).to(self.tdtype)
+        dev_t = buf.to(self.device, non_blocking=True).to(self._cdtype)
         ev.record()
         self._pin_next += 1
         return dev_t
@@ -466,7 +595,11 @@ def _unsupported_reason(cfg) -> str | None:
     if _rd in ("int4", "fp4"):
         return ("readout_dtype=int4（910B 无 INT4 矩阵乘单元，只能反量化→FP16 "
                 "再算，省存储不省算力；int4 请用 --accel cpu 的 4-bit 打包核）")
-    if _rd in ("fp8",):          # 旧名 → int8 的兼容路径
+    # P105：int8 已实现（存储 int8 + fp16 计算，构造期探测失败时在 AccelReadout
+    # 内部**永久回落 fp16**，不走 numba 回落）。旧名 fp8 是 int8 的别名（P100
+    # 正名），同样放行。加新 dtype 时务必同步这张能力表（P92 就是漏了 int8 才
+    # 导致默认配置静默回落 numba CPU）。
+    if _rd in ("int8", "fp8"):
         return None
     if bool(getattr(cfg, "lognormal_init", False)):
         return None                            # 初始化分布不同但结构兼容，不阻断
