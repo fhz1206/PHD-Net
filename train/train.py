@@ -203,16 +203,13 @@ def main() -> None:
                          "sft 分片同样适用）。词表扫描不受影响（词表是训练流的"
                          "超集，OOV 恒 0）")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
-    ap.add_argument("--readout-dtype", default="int8",
+    ap.add_argument("--readout-dtype", default="fp16",
                     choices=["fp32", "fp16", "bf16", "fp8", "fp4", "int8", "int4",
                              "int16", "int32"],
-                    help="读出精度。**默认 int8**（fhz 2026-10-01）：权重量化码本"
-                         "**（存储 1 B/权重，降 4×）。⚠ int8 权重会吞掉 "
-                         "|dp|≈1e-6 的非目标行更新 → 学习退化；因此走**自适应**"
-                         "：更新保持全精度（码本饱和裁剪防回绕），且 "
-                         "`tools/apply_bench.py` 的 PPL 对照可量化退化幅度。"
-                         "int8 在昇腾有原生 INT8 Cube（社区 W8A8 主线）。"
-                         "int16/int32 精度递增（int32 近无损）。fp32 = 精确对照")
+                    help="读出精度。**默认 fp16**（P105, 2026-10-01：昇腾原生 GEMV、"
+                         "保住非目标行更新）。int8 存储省 4× 但反量化吃掉收益且"
+                         "吞掉非目标行更新（学习退化）；int16/int32 供大动态范围；"
+                         "fp8/fp4 为 int8/int4 的兼容别名")
     ap.add_argument("--torch-compile", dest="torch_compile",
                     action="store_true", default=False,
                     help="P58（fhz 2026-09-29「图优化关了吧」）：默认 OFF——"
@@ -699,10 +696,8 @@ def main() -> None:
     _rb = getattr(lm.net, "_readout_backend", "numba-cpu")
     if cfg.readout_dtype in ("bf16", "fp16", "fp8", "fp4"):
         if cfg.readout_dtype == "fp16":
-            print("[readout] compute precision = fp16（P85）。**不是省访存**"
-                  "（与 bf16 同量），而是 **保住非目标行更新**：bf16 半 ULP≈2e-4"
-                  " ≫ |dp|≈1e-6 会把更新舍掉 → 退化为纯 Hebbian。fp8 经实测"
-                  " 昇腾/CPU 均不可用（ERR01007），已降级到这里。")
+            print("[readout] compute precision = fp16（P105 默认）。保住非目标行"
+                  " 更新（bf16 半 ULP 会吞掉它们 → 纯 Hebbian 退化）。")
         print(f"[readout] compute precision = {cfg.readout_dtype} "
               f"(checkpoint storage = {args.ckpt_dtype or 'fp32'}); "
               f"NOTE: half precision rounds away the perceptron's non-target-row "
