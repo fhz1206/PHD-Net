@@ -115,20 +115,28 @@ def main() -> None:
           f"max|Δ|={d_learn:.3e}")
     check("A2 W 为设备张量（保存路径用 W_cpu）", torch.is_tensor(ro_x.W))
 
-    # ── A3：配置不兼容必须回落（两级/稀疏读出未实现）；dtype 能力表直查 ──
+    # ── A3：配置不兼容必须回落（两级读出未实现）；dtype 能力表直查 ──
     # 注（P105）：旧版这里还有一条 `readout_dtype=fp8` 的回落断言，但在无加速器
     # 机器上 pick 走 `auto→numba-cpu`（硬件探测层决定），永远拿不到回落原因，
-    # 是一条环境依赖的假 FAIL。dtype 的能力判断应直查 `_unsupported_reason`：
+    # 是一条环境依赖的假FAIL。dtype 的能力判断应直查 `_unsupported_reason`：
     # fp8 是 int8 的旧名别名（P100 正名），int8 在 P105 已实现 → 两者都放行。
+    #
+    # P111 更新：`readout_conn_k>0` **不再回落**（稀疏 gather-GEMV 已在加速
+    # 后端实现，见 tests/verifiers/verify_accel_sparse.py 的 21 例对拍）。
+    # 只剩 `readout_hidden>0`（两级群体读出）需要回落。
     print("[A3] 配置兼容性 → 强制回落 / dtype 能力表")
-    for label, kw in (("readout_hidden", {"readout_hidden": 8}),
-                      ("readout_conn_k", {"readout_conn_k": 16})):
-        cfg_x = PHDNetConfig(accel_readout="cuda" if has_accel else "auto", **kw)
-        ro_c, backend_c = pick_readout_backend(cfg_x, n_h, n_out, rng)
-        reason = getattr(ro_c, "_accel_fallback_reason", "")
-        check(f"A3 {label} 回落 numba 并记录原因",
-              isinstance(ro_c, Readout) and label.split("=")[0] in reason,
-              f"backend={backend_c} reason={reason[:40]}")
+    cfg_x = PHDNetConfig(accel_readout="cuda" if has_accel else "auto",
+                         readout_hidden=8)
+    ro_c, backend_c = pick_readout_backend(cfg_x, n_h, n_out, rng)
+    reason = getattr(ro_c, "_accel_fallback_reason", "")
+    check("A3 readout_hidden 回落 numba 并记录原因",
+          isinstance(ro_c, Readout) and "readout_hidden" in reason,
+          f"backend={backend_c} reason={reason[:40]}")
+    # P111：稀疏配置不再被拒绝表拦住（无加速器时 backend 仍由硬件探测决定）
+    from phdnet.backends.accel_readout import _unsupported_reason as _usr
+    check("A3 readout_conn_k>0 放行（P111 稀疏已实现，不回落）",
+          _usr(PHDNetConfig(readout_conn_k=16)) is None,
+          f"_unsupported_reason={_usr(PHDNetConfig(readout_conn_k=16))}")
     from phdnet.backends.accel_readout import _unsupported_reason
     check("A3 int8 放行（_unsupported_reason=None，P105 已实现）",
           _unsupported_reason(PHDNetConfig(readout_dtype="int8")) is None)

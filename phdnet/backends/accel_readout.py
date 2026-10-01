@@ -67,7 +67,8 @@ class AccelReadout:
     def __init__(self, n_h: int, n_out: int, rng=None, device: str = "auto",
                  dtype: str = "fp32", w_clip: float = 0.0, w0=None,
                  nll_sync_every: int = 1, compile: bool = False,
-                 compile_mode: str = "default"):
+                 compile_mode: str = "default", conn_k: int = 0,
+                 csr=None, lognormal_init: bool = False, exc_ratio: float = 0.8):
         if torch is None:
             raise RuntimeError("未安装 torch，加速读出不可用")
         dtype = _DTYPE_ALIASES.get(str(dtype), str(dtype))
@@ -119,6 +120,64 @@ class AccelReadout:
                 self._cdtype = torch.float16
                 self._int8 = False
         self.n_out, self.n_h = int(n_out), int(n_h)
+        # ── P111：稀疏（CSR）读出 ────────────────────────────────────────────
+        # 此前`readout_conn_k>0` 命中 `_unsupported_reason` → 整个 NPU 读出
+        # 回落 numba CPU（读出占端到端 ~89%，等于关掉了全部设备加速）。
+        # 本实现在设备侧持有**均匀 k 的 (n_out, k) 稠密 val 张量 + (n_out, k)
+        # 列索引张量**，前向/更新都按 gather 实现：
+        #   前向  y[i] = Σⱼ Wv[i,j] ·h[Wi[i,j]]
+        #   更新  Wv  -= η · dp[i] · h[Wi[i,:]]      （逐行 rank-1）
+        # 流量口径（1B 档 vocab=73,958, k=128, n_h=3,072）：
+        #   稠密 fp32 每步触达 866.7 MiB；稀疏 (val fp32 + idx int64) = 12 B/突触
+        #   → 144.4 MiB，约 1/6。**idx 用 int64 是刻意的**：int32 会让 NPU 侧
+        #   gather 走类型转换，实测口径以verify_accel_sparse 为准。
+        #
+        # ⚠ **只支持均匀 k**（`_random_csr` 的输出）。非均匀行宽（幂律分组）
+        #   不在此路径——那种结构要用变长 CSR + segment sum，语义与实现都不同，
+        #   命中时按P19 纪律回落 numba，不静默走错算法。
+        self._sparse = False
+        self._sparse_k = 0                                    # conn_k 的内部真值源
+        self.Wi = None                                        # (n_out, k) int64 列索引
+        #（`conn_k` 是只读 property —— 它必须与 numba Readout 同为只读，
+        #   否则两边语义不对称，ckpt 的 `net.readout.conn_k` 读法会分叉。）
+        if conn_k and int(conn_k) > 0:
+            k = max(1, min(int(conn_k), self.n_h))
+            if csr is not None:
+                ip, idx, val = csr
+                widths = np.diff(np.asarray(ip, dtype=np.int64))
+                if widths.size != self.n_out or not np.all(widths == widths[0]):
+                    raise ValueError(
+                        f"稀疏读出只支持均匀 k（收到行宽 min={widths.min()} "
+                        f"max={widths.max()}）")
+                if int(widths[0]) != k:
+                    raise ValueError(f"CSR 行宽 {int(widths[0])} != conn_k {k}")
+                _idx = np.asarray(idx, dtype=np.int64).reshape(self.n_out, k)
+                _val = np.asarray(val, dtype=np.float32).reshape(self.n_out, k)
+            else:
+                from ..sparse_pc import _random_csr
+                # fan-in 补偿与 `Readout.__init__` 的稀疏分支同式（否则稀疏臂
+                # 因幅值偏低 √(k/n_in) 被在 PPL 上无谓惩罚）。
+                _ip, _idx, _val = _random_csr(
+                    rng if rng is not None else np.random.default_rng(0),
+                    self.n_out, self.n_h, k,
+                    0.05 * np.sqrt(self.n_h / k), lognormal_init, exc_ratio)
+                _idx = _idx.reshape(self.n_out, k)
+                _val = _val.reshape(self.n_out, k).astype(np.float32)
+            self._sparse_k = k
+            self._sparse = True
+            self.Wi = torch.tensor(_idx, device=self.device, dtype=torch.long)
+            self.W = torch.tensor(_val, device=self.device, dtype=torch.float32)
+            # 稀疏模式**只支持 fp32**：低精度会丢弃非目标行更新（P110 实测），
+            # 而稀疏读出的可用性正是为了省流量，不能再叠加语义损失。
+            self.tdtype = torch.float32
+            self._cdtype = torch.float32
+            self._int8 = False
+            self._wscale = None
+            # 融合核走的是稠密 addmm_，稀疏不适用 → 永久eager（P38/P55 纪律）。
+            self._compiled = False
+            self._fused = None
+        else:
+            self.Wi = None
         self.w_clip = float(w_clip)
         # P34：nll 设备侧累积（消除每步 .item() 同步 → CPU/NPU 重叠）
         self.nll_sync_every = max(1, int(nll_sync_every))
@@ -156,31 +215,49 @@ class AccelReadout:
                 import warnings
                 warnings.warn(f"torch.compile 不可用，回落 eager：{e}",
                               RuntimeWarning)
-        if w0 is None:
+        if w0 is None and not self._sparse:
             g = rng if rng is not None else np.random.default_rng(0)
             init = (g.normal(0.0, 0.05, (self.n_out, self.n_h)) if hasattr(g, "normal")
                     else np.asarray(g).reshape(self.n_out, self.n_h))
+        elif self._sparse:
+            # 稀疏模式下 `w0` 语义是 (n_out, k) 的 val矩阵（列由 Wi 决定）。
+            # 给了就覆盖初始化值；不给则沿用上面 CSR/随机生成的 val。
+            if w0 is not None:
+                _w0s = np.asarray(w0, dtype=np.float32)
+                if _w0s.shape != (self.n_out, self.conn_k):
+                    raise ValueError(
+                        f"稀疏 w0 形状不符：期望 {(self.n_out, self.conn_k)}，"
+                        f"收到 {_w0s.shape}")
+                self.W = torch.tensor(np.ascontiguousarray(_w0s),
+                                      device=self.device, dtype=torch.float32)
+            init = None
         else:
             init = np.asarray(w0, dtype=np.float32)
-        # ⚠ 必须**复制**：torch.as_tensor / torch.from_numpy 会与传入数组共享内存，
-        # 而 W 是原位更新的 → 调用方（例如比较用的参考权重）会被静默改掉。
-        _init_t = torch.tensor(np.ascontiguousarray(init, dtype=np.float32),
-                               device=self.device, dtype=torch.float32)
-        if self._int8:
-            # int8 存储：per-tensor scale = 2*max|W|/127（2× 余量，见上方注释）。
-            # 码本容量 ±127；初始码最大只到 ~63.5，权重涨到 2× 才触饱和（clamp
-            # 裁剪，不回绕）。全零权重退化 wscale=1.0（与 fp 路径同等的退化行为）。
-            _amax = float(_init_t.abs().max().item()) if _init_t.numel() else 0.0
-            self._wscale = (2.0 * _amax / _INT8_QMAX) if _amax > 0.0 else 1.0
-            self.W = torch.clamp(
-                torch.round(_init_t / self._wscale),
-                -_INT8_QMAX, _INT8_QMAX).to(torch.int8)
-        else:
-            self.W = _init_t.to(self.tdtype)
+        # 稀疏路径的self.W 已在上面建好（fp32 (n_out,k)），不再走稠密初始化。
+        if not self._sparse:
+            # ⚠ 必须**复制**：torch.as_tensor / torch.from_numpy 会与传入数组共享内存，
+            # 而 W 是原位更新的 → 调用方（例如比较用的参考权重）会被静默改掉。
+            _init_t = torch.tensor(np.ascontiguousarray(init, dtype=np.float32),
+                                   device=self.device, dtype=torch.float32)
+            if self._int8:
+                # int8 存储：per-tensor scale = 2*max|W|/127（2× 余量，见上方注释）。
+                # 码本容量 ±127；初始码最大只到 ~63.5，权重涨到 2× 才触饱和（clamp
+                # 裁剪，不回绕）。全零权重退化 wscale=1.0（与 fp 路径同等的退化行为）。
+                _amax = float(_init_t.abs().max().item()) if _init_t.numel() else 0.0
+                self._wscale = (2.0 * _amax / _INT8_QMAX) if _amax > 0.0 else 1.0
+                self.W = torch.clamp(
+                    torch.round(_init_t / self._wscale),
+                    -_INT8_QMAX, _INT8_QMAX).to(torch.int8)
+            else:
+                self.W = _init_t.to(self.tdtype)
         # P28：设备侧 (h, y) 缓存，供 forward → learn_softmax 的热路径复用
         self._cache_h: np.ndarray | None = None
         self._cache_ht = None
         self._cache_y = None
+        # P111：稀疏 gather 缓存（(n_out,k) 复用，见 _sp_gather）
+        self._cache_g = None
+        self._cache_g_src = None
+        self._csr_val_host = None                           # P111：_csr 导出缓存
 
     # ---------- 前向 ----------
     def _matmul(self, ht):
@@ -189,11 +266,37 @@ class AccelReadout:
         P105：反量化 = `codes.float() * scale`（fp32 域）→ cast 到 ht 的 dtype
         （fp16）做 matmul。**不缓存 fp16 副本**——W 每 step 都在更新，任何缓存
         下一步就过期（fhz 明确要求每步反量化；1.6 亿元素 ≈ 0.5-1 ms @NPU）。
+
+        P111 稀疏：不做 matmul，改为 gather + 逐行求和
+            y[i] = Σⱼ W[i,j] ·ht[Wi[i,j]]
+        （`_gather` 复用 forward→learn 的缓存，避免同一h 被 gather 两次）。
         """
+        if self._sparse:
+            # y[i] = Σⱼ W[i,j] ·ht[Wi[i,j]] —— **必须逐元素乘 W 再求和**。
+            # （曾经的 bug：写成 `self._sp_gather(ht).sum(dim=1)`，等于把
+            #   权重全丢掉、只把 gather 到的 h 分量相加——数值完全错但形状/
+            #   dtype 都对，只在数值对拍里才暴露。）
+            return (self.W * self._sp_gather(ht)).sum(dim=1)
         if self._int8:
             Wq = (self.W.to(torch.float32) * self._wscale).to(ht.dtype)
             return Wq @ ht
         return self.W @ ht
+
+    def _sp_gather(self, ht):
+        """稀疏行内gather：取每行 k 个h 分量（(n_out,k)），供前向与更新共用。
+
+        缓存判据与 `_lookup_ht` 同源（同一 h 则复用），但缓存的是**gather 结果**
+        而不是 h —— 因为 gather 出的 (n_out,k) 张量比 h 大三个数量级，每步重算
+        才是真正的浪费。
+        """
+        g = self._cache_g
+        if g is not None and self._cache_g_src is not None:
+            if torch.equal(self._cache_g_src, ht):
+                return g
+        g = ht[self.Wi]# (n_out, k) 高级索引 gather
+        self._cache_g = g
+        self._cache_g_src = ht.clone()
+        return g
 
     def _int8_update(self, dp32, ht32, alpha: float) -> None:
         """int8 权重的 rank-1 更新：**fp32 域**计算 dp⊗ht，再重量化写回。
@@ -414,6 +517,15 @@ class AccelReadout:
             dp = (p - t).to(_upd_dtype)
         if ht.dtype != _upd_dtype:
             ht = ht.to(_upd_dtype)
+        if self._sparse:
+            # P111 稀疏 rank-1：W[i,j] -= η·dp[i]·h[Wi[i,j]]
+            # `addmm_` 是稠密 (n_out,n_h) 的；稀疏下等价写法是 gather 后逐行
+            # 外积累加，流量只有 (n_out,k) 而非 (n_out,n_h)。
+            g = self._sp_gather(ht)
+            self.W.add_(dp.reshape(-1, 1) * g, alpha=-float(eta))
+            if self.w_clip > 0.0:
+                self.W.clamp_(-self.w_clip, self.w_clip)
+            return nll_dev
         self.W.addmm_(dp.reshape(-1, 1), ht.reshape(1, -1), alpha=-float(eta))
         if self.w_clip > 0.0:
             self.W.clamp_(-self.w_clip, self.w_clip)
@@ -448,6 +560,13 @@ class AccelReadout:
             # P105：int8 模式 → fp32 域更新 + 重量化写回（语义同 learn_softmax）
             self._int8_update(t.float() - y.float(), ht.float(), eta)
             return
+        if self._sparse:
+            # P111 稀疏 rank-1（见 _eager_step 的同款实现）
+            g = self._sp_gather(ht)
+            self.W.add_((t - y).reshape(-1, 1) * g, alpha=float(eta))
+            if self.w_clip > 0.0:
+                self.W.clamp_(-self.w_clip, self.w_clip)
+            return
         # P28：rank-1 AXPY（W += η·(t − y)⊗h），不物化 (n_out×n_in) 临时张量
         self.W.addmm_((t - y).reshape(-1, 1), ht.reshape(1, -1),
                       alpha=float(eta))
@@ -455,7 +574,7 @@ class AccelReadout:
             self.W.clamp_(-self.w_clip, self.w_clip)
 
     def n_synapses(self) -> int:
-        """稠密读出的「连接数」= 元素数（与 Readout.dense 口径一致）。"""
+        """读出的「连接数」：稀疏 =实际存在的突触；稠密 = 元素数。"""
         return int(self.W.numel())
 
     # ---- 与 Readout 的属性/方法面对齐（P23：三次崩溃的根治）----
@@ -465,19 +584,55 @@ class AccelReadout:
     # 会访问）与 stats（诊断脚本会访问）缺失 → 生产保存检查点时崩溃。
     @property
     def _csr(self):
-        """稀疏读出的内部结构——加速后端**未实现**（稀疏配置会先回落）。
+        """稀疏 CSR 三元组 (indptr, idx, val) —— 与 `Readout._csr` 同口径。
 
-        显式报错优于静默返回 None：真被访问到时能立刻定位，而不是在别处
-        变成一个更费解的 AttributeError/TypeError。
+        P111：检查点保存/恢复（`ckpt_1b`）直接吃这个三元组，故必须导出标准
+        CSR 布局而不是内部的 (n_out,k) 张量。
+        ⚠ **val 返回的是主机副本**（设备张量不能原地写）。恢复侧
+        （`ckpt_1b` 的 `val[:] = ...`）写的是这个 numpy 数组 → 写完不会自动
+        同步回设备张量，故另提供 `sync_csr_from_host()` 并在 ckpt 恢复后调用
+        （已在 ckpt_1b 接入，见该文件稀疏分支）。
         """
-        raise NotImplementedError(
-            "加速读出不提供稀疏 CSR 结构（conn_k>0 / readout_conn_k>0 的配置"
-            "已在 pick_readout_backend 回落 numba 路径）")
+        if not self._sparse:
+            raise NotImplementedError(
+                "稠密读出没有 CSR 结构（conn_k=0；本属性仅稀疏模式可用）")
+        k = self.conn_k
+        n_out = self.n_out
+        indptr = np.arange(0, (n_out + 1) * k, k, dtype=np.int64)
+        idx = self.Wi.detach().cpu().numpy().astype(np.int64).ravel()
+        # ⚠ 必须**记住这次导出的数组**：ckpt 恢复侧做的是 `val[:] = z[...]`
+        # （原地写这个 numpy 数组），随后才调`sync_csr_from_host()`。
+        # 若 sync 里重新 D2H 取一份新拷贝，写入就落在无人引用的临时数组上，
+        # 设备权重从未被更新——恢复「成功」但权重还是旧值（B3 抓到的就是这个）。
+        val = self.W.detach().float().cpu().numpy().astype(np.float64).ravel()
+        self._csr_val_host = val
+        return indptr, idx, val
+
+    def sync_csr_from_host(self) -> None:
+        """把**上次 `_csr` 导出**的主机 val 写回设备张量（ckpt 恢复后必须调用）。
+
+        ⚠ 不能在这里重新 `_csr`：那会取一份全新的 D2H 拷贝，调用方之前对
+        `val[:]` 的原地写入就丢了。必须复用缓存的那一份。
+        """
+        if not self._sparse:
+            return
+        val = self._csr_val_host
+        if val is None:
+            # 没有可用的导出副本 → fail-fast 而不是静默什么都不做
+            # （静默 no-op 会让「检查点恢复成功但权重没变」变成隐形 bug）。
+            raise RuntimeError(
+                "sync_csr_from_host() 在 _csr 之前被调用；请先取 _csr、写入 "
+                "val[:]，再调用本方法（ckpt_1b 的稀疏恢复分支已按此顺序接入）")
+        self.W.copy_(torch.tensor(
+            np.ascontiguousarray(val, dtype=np.float32).reshape(
+                self.n_out, self.conn_k),
+            device=self.device, dtype=torch.float32))
+        self._csr_val_host = None
 
     @property
     def conn_k(self) -> int:
-        """加速后端只实现稠密路径（稀疏路径在 pick_readout_backend 回落）。"""
-        return 0
+        """每输出单元入边数（0 = 稠密）。稀疏模式下为实际 k。"""
+        return int(self._sparse_k)
 
     @property
     def hidden(self) -> int:
@@ -495,13 +650,26 @@ class AccelReadout:
         """统计信息（键与 `Readout.stats` 对齐，供诊断/表格使用）。"""
         n = self.n_synapses()
         dense = self.n_out * self.n_h
-        return {"synapses": n, "dense_equivalent": dense,
-                "connectivity": n / dense if dense else 1.0,
-                "k": self.conn_k, "dtype": self.dtype_name,
-                "storage_MB": self.W.numel() * self.W.element_size() / 1e6}
+        st = {"synapses": n, "dense_equivalent": dense,
+              "connectivity": n / dense if dense else 1.0,
+              "k": self.conn_k, "dtype": self.dtype_name,
+              "storage_MB": self.W.numel() * self.W.element_size() / 1e6}
+        if self._sparse:
+            # P111：稀疏存储还含列索引（int64，设备常驻）。单报 W 会让诊断表
+            # 低估真实显存/内存占用 —— 这正是「稀疏省内存」最容易被高估的地方。
+            st["index_MB"] = (self.Wi.numel()
+                              * self.Wi.element_size() / 1e6)
+            st["storage_MB_total"] = st["storage_MB"] + st["index_MB"]
+            st["layout"] = "csr-uniform-k"
+        return st
 
     def W_cpu(self) -> np.ndarray:
-        """权重拉回主机（检查点 / 统计用）。int8 模式返回**反量化后的实值**。"""
+        """权重拉回主机（检查点 / 统计用）。int8 模式返回**反量化后的实值**。
+
+        P111 稀疏：返回 **(n_out, k) 的 val 矩阵**（不是 (n_out, n_h) 稠密）——
+        稠密化会凭空造出 n_out×(n_h−k)/2 个不存在的突触，语义错。ckpt 的稀疏
+        分支走 `_csr`，不经过本方法。
+        """
         W = self.W.detach().float()
         if self._int8:
             W = W * self._wscale   # 码本值 × scale = 实值（否则 ckpt 全是码）
@@ -510,6 +678,14 @@ class AccelReadout:
     def load_W(self, arr: np.ndarray) -> None:
         """从主机矩阵灌入（检查点恢复；形状须匹配）。int8 模式重量化。"""
         a = np.ascontiguousarray(arr, dtype=np.float32)
+        if self._sparse:
+            # P111 稀疏：期望 (n_out, k) 的 val 矩阵
+            if a.shape != (self.n_out, self.conn_k):
+                raise ValueError(f"稀疏形状不符：期望 {(self.n_out, self.conn_k)}，"
+                                 f"收到 {a.shape}")
+            self.W.copy_(torch.as_tensor(a, device=self.device,
+                                         dtype=torch.float32))
+            return
         if a.shape != (self.n_out, self.n_h):
             raise ValueError(f"形状不符：期望 {(self.n_out, self.n_h)}，"
                              f"收到 {a.shape}")
@@ -584,8 +760,9 @@ def _unsupported_reason(cfg) -> str | None:
     """
     if int(getattr(cfg, "readout_hidden", 0) or 0) > 0:
         return "readout_hidden>0（两级读出未在加速后端实现）"
-    if int(getattr(cfg, "readout_conn_k", 0) or 0) > 0:
-        return "readout_conn_k>0（稀疏读出未在加速后端实现）"
+    # P111：稀疏读出**已在加速后端实现**（均匀 k 的 gather-GEMV），不再回落。
+    # 仍需拒绝的只有非均匀行宽（幂律变长 CSR）——那是另一种结构，见AccelReadout
+    # 的「只支持均匀 k」注释。若将来有人传入变长 CSR，构造期会fail-fast。
     # P86（fhz 2026-09-30：「针对昇腾设备禁用 fp4, fp8」）：加速后端**禁用
     # 量化码本**——昇腾实测 fp8 抛 "Float8_e4m3fn has not been supported"
     # （ERR01007），fp4 的 MX 块缩放同样没有算子。回落 numba CPU 路径，那里
@@ -652,7 +829,11 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
                              compile=bool(getattr(cfg, "torch_compile", False)),
                              compile_mode=str(getattr(cfg,
                                                      "torch_compile_mode",
-                                                     "default"))),
+                                                     "default")),
+                             conn_k=int(getattr(cfg, "readout_conn_k", 0) or 0),
+                             lognormal_init=bool(getattr(cfg, "lognormal_init",
+                                                         False)),
+                             exc_ratio=float(getattr(cfg, "exc_ratio", 0.8))),
                 f"accel:{spec}")
     except Exception as e:                                   # noqa: BLE001
         return _fallback(f"{type(e).__name__}: {e}")
