@@ -262,6 +262,7 @@ class AccelReadout:
         self._cache_g = None
         self._cache_g_epoch = -1                            # P112：主机侧 epoch 判据
         self._ht_epoch = 0                                  # 每次上传新 h 递增
+        self._ht_epoch_at_cache = -1# P122：`_cache_ht` 上传时的 epoch
         self._csr_val_host = None                           # P111：_csr 导出缓存
 
     # ---------- 前向 ----------
@@ -353,6 +354,7 @@ class AccelReadout:
         y = self._matmul(ht)
         self._cache_h = np.ascontiguousarray(h, dtype=np.float32)
         self._cache_ht = ht
+        self._ht_epoch_at_cache = self._ht_epoch   # P122：记下这份 ht 的 epoch
         self._cache_y = y
         return y.float().cpu().numpy()
 
@@ -559,10 +561,31 @@ class AccelReadout:
 
         返回 (设备张量, 是否命中缓存)。h 很小（n_h 个 fp32），逐元素比较成本
         可忽略，换来的是每步少一次 H2D + 一次分配。
+
+        ⚠⚠ **P122 修复（审计抓到的静默数值错误）**：命中缓存时**必须同时把
+        `_ht_epoch` 回退到该 ht 上传时的那一个**，否则 `_sp_gather` 的 epoch
+        判据会错判。
+
+        原 bug 的调用序列（实测复现，`max|Δ|` 不是舍入级而是整个 gather 用错）：
+            ro.forward(hA)              # epoch=1，缓存 gather=G(hA)
+            ro.learn_softmax(hB, ...)   # 未命中 → _staged_to_dev → epoch=2，
+                                        #   gather 缓存变成 G(hB)
+            ro.learn_softmax(hA, ...)   # ← 命中缓存，返回**旧 epoch 的 htA**，
+                                        #   但 epoch 停在 2 → 判据 2==2 命中
+                                        #   → 用 G(hB) 去更新 hA 的输出。
+        生产热路径（每步 forward_dev 紧接 learn_softmax 同一 h）碰不到，
+        但任何「一次 forward + 多次不同 h 学习」的调用方会踩到，
+        且失败模式是**静默的数值错误**（形状/dtype 全对）。
+
+        修法：用 `_ht_epoch_at_cache` 记录「当前 `_cache_ht` 上传时的 epoch」，
+        命中时把 `_ht_epoch` 置回它—— 这样 `_sp_gather` 的判据重新成立。
         """
         if self._cache_ht is not None and self._cache_h is not None:
             ha = np.ascontiguousarray(h, dtype=np.float32)
             if ha.shape == self._cache_h.shape and np.array_equal(ha, self._cache_h):
+                # 命中：epoch 回退到「这份 ht 上传时」的值，使 gather 判据有效
+                self._ht_epoch = getattr(self, "_ht_epoch_at_cache",
+                                         self._ht_epoch)
                 return self._cache_ht, True
         return self._staged_to_dev(h), False
 
@@ -746,6 +769,8 @@ class AccelReadout:
         `torch.equal`。
         """
         self._ht_epoch += 1
+        # P122：本函数**不**更新 `_cache_ht`（它是"取ht"而非"缓存 ht"），
+        # 故不动 `_ht_epoch_at_cache`——缓存那份 ht 的 epoch 仍有效。
         a = np.ascontiguousarray(h, dtype=np.float32)
         if self._pin_bufs is None:                      # 懒初始化（一次）
             self._pin_bufs = []

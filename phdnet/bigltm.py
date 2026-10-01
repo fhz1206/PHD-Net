@@ -135,44 +135,50 @@ class SparseLTM:
             chain.from_iterable([idx_lists[j] for j in dims.tolist()])))
 
     def imprint(self, rate: np.ndarray, amortize: int = 1) -> None:
-        """P116 `amortize>1`：把配对学习摊销到 N 步一次（方案 B）。
+        """事件驱动印迹：编码本步活跃率，与**上一步**配对做学习。
 
-        动机（M4b_imprint 实测 0.40 ms/tok，占 CPU 侧 4.26 ms 的 9.4%）：
-        `imprint` 每步都跑 `table.learn(self._prev, cur)`，而 learn 的代价
-        = |prev| × |cur| 次槽位查找。这是**时间整合**（B7 已在读出侧用
-        `minibatch_size` 做过同思路），脑同构上对应突触巩固的整合。
+        ⚠⚠ **`amortize` 参数已废弃（P122 审计后移除，勿再使用）**
 
-        ⚠⚠ **代价随 N 二次增长**（不是线性）：攒 N 对后一次提交要做
-        N-1 次配对学习（`learn(prev[i], cur[i])`），故总组合数从 N 次变
-        N(N-1)/2。N=2 时 1 次（不增），N=4 时 6 次（3×）。
-        **所以 N 必须很小，且收益上限 = 省掉 (N-1)/N 的 encode+learn，
-        代价是组合数×(N-1)/2。**实测只做 N=2。
+        P116 曾加「配对学习摊销」：`amortize=N` 把 N 步的 (prev,cur) 攒起来
+        一次性提交 N−1 对。**审计证明它是净负面特性，已整体移除**：
 
-        ⚠ **语义等价性**：配对学习的**顺序**变了（原本 (p0,c0),(p0,c1),(p1,c1)
-        逐步；现在攒到第 N 步一次性提交 (p0,c0),(p1,c1)...）。
-        ⚠️ 逐步版在中间步就写了表，摊销版到第 N 步才写 → **中间 N-1 步
-        表的状态不同**。这不是「延迟执行」而是「改变写入时机」，
-        故**默认 amortize=1（旧行为逐位不变）**，N>1 是显式的语义变更。
+        1. **收益为 0**（实测，24 步 n_dim=64/m_out=60）：
+           `cur = self.encode(rate)` 在摊销分支**之前无条件执行**，
+           而摊销只推迟 `learn` 的**时机**、不减少次数：
+
+           | N | learn 调用数 | 缓冲区残留 |
+           |---|---|---|
+           | 1（基线） | 23 | 0 |
+           | 2 | **22** | 1 |
+           | 3 | **21** | 2 |
+           | 4 | **20** | 3 |
+
+           即「提交数 + 残留 == 基线总数」—— 不是提前，是**推迟**。
+           而 `buf[-1:]` 永不 flush（无 flush 路径），尾部 N−1 对**永久丢失**。
+           成本侧实测（1B 档 n_dim=1024/m_out=72）：`encode` 0.054 ms/step、
+           `learn` **6.53 ms/call** —— 摊销动的正是大头，却一头没省。
+
+        2. **N≥2 即污染权重**（实测，**生产参数** n_dim=1024/m_out=72/40 步）：
+           摊销提交循环在**同一个 `step_count`** 下连续调 N−1 次 `learn`，
+           共享神经元 `dt = t - stamp.get(i,0) == 0` → `trace * lam**0 + 1.0`
+           = **该衰减的没衰减**，突破 `sparse_table.py` 里「pre/post 迹共用会
+           Δt=0」的警告。权重偏差：
+           N=2 → `max|Δw| = 7.101`、N=3 → **11.98**、N=4 → 7.101。
+           ⚠ **用小尺寸测会漏掉**（n_dim=64 时差值为 0），必须用生产尺寸测。
+
+        所以：`amortize` 参数**保留签名**（不打断 `LongTermMemory` 与
+        `model.py` 的调用面），但**只接受 1**；传 >1 直接 `ValueError`
+        fail-fast —— 绝不静默走一条已知有害的路径。
         """
+        if amortize and int(amortize) > 1:
+            raise ValueError(
+                f"ltm_imprint_amortize={amortize} 已于 P122 移除：实测收益为 0"
+                "（摊销只推迟 learn 时机、不减少次数，且缓冲区尾部对永不 flush"
+                "→ 持续丢数据），且 N>=2 会因同一 step_count 下多次 learn 造成"
+                " dt=0 → 迹不衰减 → 权重污染（生产尺寸实测 max|Δw| 达 7~12）。"
+                "请保持 1。")
         self._check_sparse(rate)                       # A2：契约校验（稠密模式显式报错）
         cur = self.encode(rate)
-        if amortize and int(amortize) > 1:
-            # 缓存本对的 (prev, cur)；到第 N 对才一次性提交前 N-1 对
-            buf = getattr(self, "_imprint_buf", None)
-            if buf is None:
-                buf = self._imprint_buf = []
-            prev_p = self._prev
-            buf.append((prev_p, cur))
-            self._prev = cur
-            self.table.step_count += 1
-            n_amort = int(amortize)
-            if len(buf) >= n_amort:
-                # 提交前 n_amort-1 对（最后一对留给下次做 prev）
-                for pv, cu in buf[:-1]:
-                    if pv is not None and cu:
-                        self.table.learn(pv, cu)
-                self._imprint_buf = buf[-1:]
-            return
         if self._prev is not None and cur:
             self.table.learn(self._prev, cur)
             # P66 诊断（2026-09-29）：服务器 1B 档 `M4b_ltm` 段从 0.14 涨到

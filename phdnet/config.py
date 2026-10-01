@@ -309,10 +309,12 @@ class PHDNetConfig:
     #   einsum 的收益必须在服务器实测后才能改默认值。
     # ⚠ einsum 非逐位：若采用，验收判据是**容差**（1e-4 相对）而非逐位对拍。
     sparse_fwd_kernel: str = "mulsum"
-    # P116（方案 B）：M4b imprint 的**配对学习摊销**因子 N。
-    # 1 = 每步写入（旧行为，**默认，逐位不变**）；N>1 = 攒 N 对提交 N-1 对。
-    # ⚠ N>1 是**语义变更**（中间 N-1 步表状态不同），不是纯调度优化。
-    # ⚠ 组合代价随 N **二次**增长（N(N-1)/2），故只宜小值（实测候选：2）。
+    # P116 曾加 M4b imprint 配对学习摊销 → **P122 审计后移除**。
+    # 现仅保留 1（旧行为，逐位不变）；传 >1 由 `SparseLTM.imprint` fail-fast。
+    # 移除理由（实测）：① 收益为 0——`encode` 在摊销分支之前无条件执行，
+    #   摊销只推迟 learn 时机不减少调用次数，而缓冲区尾部对永不 flush；
+    # ② N>=2 会因同一 step_count 下多次 learn 造成 dt=0 → 迹不衰减 →
+    #   权重污染（生产尺寸 max|Δw| 达 7~12；小尺寸测会漏掉）。
     ltm_imprint_amortize: int = 1
     # P34：nll 同步周期（AccelReadout）。1=每步同步（旧行为）；N>1 时
     # nll 累积到设备、每 N 步同步一次 → CPU/NPU 重叠（NPU 上端到端约 -30~40%）。

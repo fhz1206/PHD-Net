@@ -112,68 +112,67 @@ def section_a() -> None:
           f"n_keys={s1['n_keys']}")
 
 
-# ── B. 方案 B 语义：N>1 的表状态差异必须被如实量化 ─────────────────────────
+# ── B. 方案 B 已移除（P122）：验证它被 fail-fast 拦住 ────────────────────────
 def section_b() -> None:
-    print("\n[B] 方案 B：N=2 的语义变化（**不是等价变换**，如实量化）")
-    rs = _rates(64, 12, seed=5)
+    print("\n[B] 方案 B（M4b imprint 摊销）**已于 P122 移除** —— 验证 fail-fast")
+    rs = _rates(64, 8, seed=5)
 
-    l_step = _make_ltm()
+    # B1 默认（=1）必须正常工作
+    l1 = _make_ltm()
+    ok = True
+    try:
+        for r in rs:
+            l1.imprint(r)
+    except Exception as e:                                   # noqa: BLE001
+        ok = False
+        print(f"    {type(e).__name__}: {e}")
+    check(ok and l1.table.step_count == len(rs),
+          "B1 amortize=1（默认）正常工作，step_count 每步递增",
+          f"step_count={l1.table.step_count}/{len(rs)}")
+
+    # B2 传 >1 必须**报错退出**，不能静默走有害路径
+    for n_bad in (2, 3, 8, 64):
+        lb = _make_ltm()
+        try:
+            for r in rs:
+                lb.imprint(r, amortize=n_bad)
+            check(False, f"B2 amortize={n_bad} → fail-fast", "竟然没报错！")
+        except ValueError:
+            check(True, f"B2 amortize={n_bad} → ValueError fail-fast")
+        except Exception as e:                               # noqa: BLE001
+            check(False, f"B2 amortize={n_bad} → ValueError", f"抛的是 {type(e).__name__}")
+
+    # B3 摊销缓冲区**不得残留**（旧实现在 buf[-1:] 里永久滞留数据）
+    l3 = _make_ltm()
     for r in rs:
-        l_step.imprint(r, amortize=1)                # 逐步写
+        l3.imprint(r)
+    check(not hasattr(l3, "_imprint_buf"),
+          "B3 无摊销缓冲区残留（旧实现会永久滞留尾部对 = 持续丢数据）")
 
-    l_am = _make_ltm()
-    for r in rs:
-        l_am.imprint(r, amortize=2)                   # 摊销
+    # B4 **生产尺寸**下逐位等于逐步版（用 n_dim=1024/m_out=72 —— 审计发现
+    # 小尺寸测会漏掉污染，故这里必须用真实档位）
+    from phdnet.bigltm import SparseLTM
+    rs_big = _rates(1024, 20, seed=13)
+    a = SparseLTM(1024, n_neurons=1 << 20, m_out=72, k_hash=4, seed=3)
+    b = SparseLTM(1024, n_neurons=1 << 20, m_out=72, k_hash=4, seed=3)
+    for r in rs_big:
+        a.imprint(r, amortize=1)
+        b.imprint(r)          # 不传 → 默认1
+    d = 0.0
+    common = set(a.table.out) & set(b.table.out)
+    for k in common:
+        va = list(a.table.out[k].values())
+        vb = list(b.table.out[k].values())
+        d = max(d, abs(float(sum(va)) - float(sum(vb))))
+    check(d == 0.0, "B4 生产尺寸（n_dim=1024/m_out=72）两臂逐位相同",
+          f"共同键 {len(common)}，max|Δw|={d:.3e}")
+    check(len(a.table.out) == len(b.table.out), "B5 键数相同",
+          f"{len(a.table.out)} vs {len(b.table.out)}")
 
-    s_step, s_am = _table_snapshot(l_step), _table_snapshot(l_am)
-
-    # B1 配对不丢：摊销版的表必须**也**生长（不为空）
-    check(s_am["n_keys"] > 0, "B1 摊销版表也生长（配对未丢）",
-          f"n_keys={s_am['n_keys']}（逐步版 {s_step['n_keys']}）")
-
-    # B2 摊销版的键数应当**少于或等于**逐步版（少写了最后几对）
-    check(s_am["n_keys"] <= s_step["n_keys"],
-          "B2 摊销版键数 ≤ 逐步版（确实少写了缓冲中的对）",
-          f"{s_am['n_keys']} vs {s_step['n_keys']}")
-
-    # B3 ⚠ 明确记录差异的真实形态（实测得到的，不是猜的）：
-    # **差异不在权重值，而在「缓冲区里还没提交的那几对」** ——
-    # 逐步版已写入 171 个键，摊销版只有 168 个（最后 3 对还在缓冲区），
-    # 而共同键的权重值**完全相同**（`learn` 对同一批 prev/cur 是幂等的）。
-    # 这正是「延迟提交」该有的表现：数据没丢，只是写表时机推后。
-    only_step = sorted(set(s_step["wsum"]) - set(s_am["wsum"]))
-    only_am = sorted(set(s_am["wsum"]) - set(s_step["wsum"]))
-    common = set(s_step["wsum"]) & set(s_am["wsum"])
-    d = max((abs(s_step["wsum"][k] - s_am["wsum"][k]) for k in common),
-            default=0.0)
-    check(len(only_step) > 0 and len(only_am) == 0 and d == 0.0,
-          "B3 差异形态：摊销版**只少写**缓冲区里的键，共同键权重逐位相同",
-          f"仅逐步版有 {len(only_step)} 键（例 {only_step[:3]}）；"
-          f"仅摊销版有 {len(only_am)} 键（期望 0）；共同键 max|Δw|={d:.3e}")
-    check(d == 0.0,
-          "B3b 共同键权重逐位相同（说明 learn 幂等，差异纯粹是写入时机）",
-          f"max|Δw|={d:.3e}")
-
-    # B4 摊销不改变 step_count 语义
-    check(s_am["step_count"] == len(rs),
-          "B4 摊销版 step_count 仍每步递增",
-          f"{s_am['step_count']}（期望 {len(rs)}）")
-
-    # B5 N=1 是 N=2 的特例？（N=1 走旧路径，两条分支不应互相污染）
-    l_n1 = _make_ltm()
-    for r in rs:
-        l_n1.imprint(r, amortize=1)
-    check(_table_snapshot(l_n1)["n_keys"] == s_step["n_keys"],
-          "B5 重复跑 amortize=1 结果稳定（摊销状态不泄漏）",
-          f"n_keys={_table_snapshot(l_n1)['n_keys']}")
-
-    # B6 缓冲不会无限增长（否则是内存泄漏）
-    l_mem = _make_ltm()
-    for r in _rates(64, 40, seed=7):
-        l_mem.imprint(r, amortize=2)
-    buf = getattr(l_mem, "_imprint_buf", [])
-    check(len(buf) <= 2, "B6 摊销缓冲不随步数增长（无泄漏）",
-          f"buf 长度={len(buf)}（期望 ≤2）")
+    # B6 config 默认必须是 1
+    from phdnet.config import PHDNetConfig
+    check(int(PHDNetConfig().ltm_imprint_amortize) == 1,
+          "B6 config.ltm_imprint_amortize 默认=1")
 
 
 # ── C. 方案 C 容差：einsum vs mulsum ────────────────────────────────────────

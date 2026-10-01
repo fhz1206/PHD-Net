@@ -9,7 +9,7 @@
 > **未修的条目写明「未修 + 原因」**，不留「应该会修」的空头。
 > **commit 纪律**：历史经过 force push 改写，旧 hash 已失效；此类条目写「commit 见 <P 号的提交信息>」，不编造 hash。
 
-**索引（49 条）**：A 训练入口与可选依赖边界 A1–A9（9）｜B 读出与加速器 B1–B14（14）｜
+**索引（52 条）**：A 训练入口与可选依赖边界 A1–A9（9）｜B 读出与加速器 B1–B17（17）｜
 C M4b/LTM C1–C7（7）｜D 精度与 dtype D1–D7（7）｜E 否决与观测方法论 E1–E6（6）｜
 F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 **最严重的两条是 B3 与 B12**：都不是崩溃、不是变慢，而是**一整轮改造在生产上完全没生效且不报任何错**
@@ -139,6 +139,59 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 - **根因**：探针只测**张量创建** —— CPU torch **能分配** fp8 张量，只是**不能乘**。
 - **修复**：探针改测真实 matmul；`tools/probe_fp8.py` 进一步枚举 `torch.ops` 下的 fp8 算子、torch_npu 的 fp8 属性、设备名与 CANN 版本（区分 910B/910C/A5），输出三档结论：标准 dtype 可用 → 解除拒绝；标准 dtype 阻塞但有专用算子 → 改走 `torch.ops`；什么都没有 → 保持拒绝，并记成「**芯片有 fp8，框架没暴露**」，等 CANN 跟进后一处改动即可翻回。
 - **门禁缺口**：⚠ `probe_fp8.py` 本机跑只验证了 x86 分支（正确报 torch_npu 不可用）。
+
+### B15 主机侧 epoch 判据在「缓存命中」路径上失效 → 静默用错 gather（P122）
+- **症状**：`forward(hA) → learn_softmax(hB) → learn_softmax(hA)` 序列下，
+  第三次的前向与更新**都用了 hB 的 gather 结果**去算 hA 的输出。
+  **不崩、不报错的静默数值错误**（形状/dtype/量纲全对）。
+- **根因**：P112 把 `torch.equal` 换成主机侧 epoch 判据
+  （`_cache_g_epoch == _ht_epoch`）以消除每步设备同步。但 `_ht_epoch` 只在
+  **上传新 h** 时递增，而 `_lookup_ht` 的**缓存命中**路径会返回**上一次上传的
+  ht**却**不把 epoch 回退** → 判据 `2==2` 成立→ 复用了 hB 的 gather。
+- **修复**：新增 `_ht_epoch_at_cache` 记录「当前 `_cache_ht` 上传时的 epoch」，
+  `_lookup_ht` 命中时把 `_ht_epoch` 置回它。
+- **门禁**：`verify_accel_sparse.py` C4c 三例（缓存归属 / 污染后前向与干净实例
+  一致 / 同 h 连续调用仍复用）。**已验证门禁真能抓**——临时撤掉修复后 C4c1 FAIL。
+- **教训**：把「每次都做」的重活换成「按计数器判据」时，**必须枚举计数器
+  不递增的所有路径**，别只检查「值递增的那条」。
+
+### B16 自己写的「import 前设环境变量」纪律被import 链打破（P120→P122）
+- **症状**：P120 加的 CANN 环境治理（TASK_QUEUE_ENABLE=2 等）在真实运行时
+  **可能完全无效**。
+- **根因**：`from phdnet.backends.cann_env import apply_cann_env`会先执行
+  `phdnet/__init__.py`（→ `model.py` → `import numpy`）与
+  `phdnet/backends/__init__.py`（→ `accel_readout.py` → `import torch`）。
+  实测「import 后 `numpy in sys.modules == True`」→ **numpy/torch 在设置
+  环境变量之前就已被导入**，而 CANN/torch_npu 在库初始化时读这些变量。
+- **修复**：改用 `importlib.util.spec_from_file_location` **按文件路径加载**，
+  绕开包 `__init__`；并把调用点移到 `_ROOT` 定义之后（首次插入时`_ROOT`
+  尚未定义，直接报 NameError）。
+- **门禁**：`verify_cann_env.py` 只测 `apply_cann_env()` 函数本身，
+  ⚠ **测不到「调用时机对不对」** ——那是本条漏过的原因。补法：断言
+  `train.py` 里用的是 `spec_from_file_location` 而非 `from ... import`。
+- **教训**：**「在某处之前设置」这类纪律无法靠测函数验证**，只能靠
+  静态检查调用形式（或在函数里加一条「我必须在库导入前被调用」的断言）。
+
+### B17 摊销优化「收益 0 + 污染权重」（P116 设计 → P122 审计推翻）
+- **症状**：`--ltm-imprint-amortize N`（P116 加的方案 B）声称能省 imprint 开销，
+  实测**收益恰为 0**，且 N≥2 时**污染权重**。
+- **根因 1（收益 0）**：`cur = self.encode(rate)` 在摊销分支**之前无条件执行**；
+  而摊销只把 N−1 次 `learn` **攒起来一次性提交**——调用次数一次没少
+  （实测 N=1/2/3/4 → 23/22/21/20 次），「提交数 + 缓冲残留 == 基线」。
+  且 `buf[-1:]` **永不flush** → 尾部 N−1 对**永久丢失**（持续性数据丢失）。
+  成本侧：动的正是大头（`learn` 6.53 ms/call vs `encode` 0.054 ms/step）。
+- **根因 2（污染）**：提交循环在**同一个 `step_count`** 下连续调 N−1 次 `learn`，
+  共享神经元 `dt = t - stamp.get(i,0) == 0` → `trace*lam**0+1.0`
+  = **该衰减的没衰减**。生产尺寸（n_dim=1024/m_out=72）实测 `max|Δw|`：
+  N=2 → **7.10**、N=3 → **11.98**。⚠ **小尺寸测会漏掉**（n_dim=64 时为 0）。
+- **修复**：整体移除；`amortize>1` 改 **fail-fast `ValueError`**（保留签名不破坏
+  调用面），CLI help 写明移除原因。
+- **门禁**：verifier B 组重写为「fail-fast + 生产尺寸逐键比对」。
+  ⚠ **旧 verifier 给了假通过**：它用 `m_out=8` 且比「行内权重和」，
+  恰好把逐键差抵消成 0 → **在最危险的真实配置下静默通过**。
+- **教训**：① 「攒起来批处理」不等于「省下次数」，若每次的**前置计算**在分支外，
+  批处理只改时机；② **验证必须用生产尺寸**——小尺寸会掩盖污染；
+  ③ **门禁的比对口径也会造假**（求和抵消），要逐键比。
 
 ### B14「numba 能上GPU」是**平台绑定**的，换硬件就失效（P121）
 - **症状**：fhz 提出「numba 有 API 能把运算放到 CUDA 上」——**这个 API 确实存在**

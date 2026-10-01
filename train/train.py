@@ -65,21 +65,6 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
 # 因此**默认保持 ACTIVE（原行为）**，改为 `--omp-wait passive` 按需开启——
 # 191 核 + 每步数毫秒的大规模环境里结论可能相反，应由实测决定而非想当然。
 
-# P120：CANN / torch_npu 环境变量（**同样必须在 import numpy / torch 之前**）：
-# TASK_QUEUE_ENABLE=2（算子下发队列 Level 2，掩盖 CPU 下发开销）、
-# COMBINED_ENABLE=1（非连续算子合并下发）、
-# PYTORCH_NPU_ALLOC_CONF=expandable_segments:True（内存池扩展段）、
-# MULTI_STREAM_MEMORY_REUSE=1（跨流内存复用）。
-# 动机：P115 实测读出 7.83 ms是带宽下界（0.300 ms）的 **26.1 倍** → 瓶颈不在
-# 算力也不在带宽，就在这类**下发/调度开销**上。详见 phdnet/backends/cann_env.py
-# （含每条的官方依据与风险说明；显式设过的变量不覆盖）。
-try:
-    from phdnet.backends.cann_env import apply_cann_env as _apply_cann_env
-    _apply_cann_env(verbose=True)
-except Exception as _e:                       # noqa: BLE001
-    print(f"[cann-env] 设置失败（不致命）：{type(_e).__name__}: {_e}",
-          flush=True)
-
 import numpy as np
 
 _HERE = Path(__file__).resolve().parent
@@ -89,6 +74,31 @@ for p in (str(_HERE), str(_ROOT)):
         sys.path.insert(0, p)
 os.environ.setdefault(  # P39：numba 缓存持久化（不被 __pycache__ 清理波及）
     "NUMBA_CACHE_DIR", str(_ROOT / "outputs" / "numba_cache"))
+
+# P120：CANN / torch_npu 环境变量（**同样必须在 import numpy / torch 之前**）：
+# TASK_QUEUE_ENABLE=2（算子下发队列 Level 2，掩盖 CPU 下发开销）、
+# COMBINED_ENABLE=1（非连续算子合并下发）、
+# PYTORCH_NPU_ALLOC_CONF=expandable_segments:True（内存池扩展段）、
+# MULTI_STREAM_MEMORY_REUSE=1（跨流内存复用）。
+# 动机：P115 实测读出 7.83 ms是带宽下界（0.300 ms）的 **26.1 倍** → 瓶颈不在
+# 算力也不在带宽，就在这类**下发/调度开销**上。详见 phdnet/backends/cann_env.py
+# （含每条的官方依据与风险说明；显式设过的变量不覆盖）。
+# ⚠ **必须用文件路径直接加载，不能 `from phdnet.backends.cann_env import ...`**
+#   —— 那会先执行 `phdnet/__init__.py`（→ `model.py` → `import numpy`）与
+#   `phdnet/backends/__init__.py`（→ `accel_readout.py` → `import torch`），
+#   **numpy 与 torch 在设置环境变量之前就已经被导入了**（P122 审计实测确认）。
+#   环境变量在库初始化后设置可能失效，故绕开包 `__init__`，按文件路径加载。
+import importlib.util as _ilu                # noqa: E402
+try:
+    _cann_env_path = _ROOT / "phdnet" / "backends" / "cann_env.py"
+    _spec = _ilu.spec_from_file_location("_cann_env_early", _cann_env_path)
+    _cann_env = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_cann_env)
+    _cann_env.apply_cann_env(verbose=True)
+except Exception as _e:                       # noqa: BLE001
+    print(f"[cann-env] 设置失败（不致命）：{type(_e).__name__}: {_e}",
+          flush=True)
+
 
 from ckpt_1b import (_rebuild_sdrs, load_model, save_model,            # noqa: E402
                      save_model_async, wait_pending_saves)
@@ -270,12 +280,12 @@ def main() -> None:
                          "量化 1.6 亿元素是一次设备算子，摊到 N 步；N 越大越省，"
                          "但 forward 用的 fp8 副本越旧")
     ap.add_argument("--ltm-imprint-amortize", type=int, default=1,
-                    help="P116（方案 B）：M4b imprint 配对学习摊销因子 N。"
-                         "**默认 1 = 每步写入（旧行为逐位不变）**；N>1 攒 N 对"
-                         "提交 N-1 对 → 省掉部分 encode+learn。"
-                         "⚠ N>1 是**语义变更**（中间 N-1 步大空间表状态不同），"
-                         "非纯调度优化；且组合代价随 N **二次**增长"
-                         "（N(N-1)/2），只宜小值。候选值：2")
+                    help="⚠ **已于 P122 移除，仅保留 1**（审计证明净负面："
+                         "实测收益为 0——摊销只推迟 learn 时机不减少次数，"
+                         "而缓冲区尾部对永不 flush；且 N>=2 会因同一 step_count "
+                         "下多次 learn 造成 dt=0 → 迹不衰减 → 权重污染，"
+                         "生产尺寸实测 max|Δw| 达 7~12）。"
+                         "传 >1 会**直接报错退出**而非静默走错路径")
     ap.add_argument("--sparse-fwd-kernel", default="mulsum",
                     choices=["mulsum", "einsum"],
                     help="P116：稀疏读出（conn_k>0）的前向算子。"
@@ -542,8 +552,9 @@ def main() -> None:
     cfg.readout_dtype = args.readout_dtype            # P9 精度（默认 fp32）
     # P116：稀疏读出前向算子
     cfg.sparse_fwd_kernel = args.sparse_fwd_kernel
-    # P116：imprint 摊销因子（默认 1 = 旧行为逐位不变）
-    cfg.ltm_imprint_amortize = max(1, int(args.ltm_imprint_amortize))
+    # P122：imprint 摊销已移除；>1 交给 `SparseLTM.imprint` fail-fast 报错，
+    # 不在这里静默钳成 1（那样用户会以为摊销生效了）。
+    cfg.ltm_imprint_amortize = int(args.ltm_imprint_amortize)
     cfg.encoder_dtype = args.encoder_dtype            # P75：M1 权重精度（平台相关）
     # P99：三态（serial=单核融合 / fused=并行融合 / plain=原始多核调用）
     cfg.pc_fused_kernel = (False if args.m2_kernel == "plain"

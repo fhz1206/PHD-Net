@@ -292,6 +292,48 @@ def main() -> int:
     check(not bool((w_before == ro_ein.W).all()),
           "C4b einsum 臂的更新路径仍生效（W 已变）")
 
+    # C4c. gather 缓存的 epoch 判据（P122 审计抓到的静默数值错误）
+    print("\n[C4c] gather 缓存 epoch 判据（跨不同 h 的调用序列）")
+    # 原bug 调用序列：forward(hA) → learn(hB) → learn(hA)
+    # 第三次时 _lookup_ht 命中缓存（返回 htA），但 epoch 停在 hB 那次，
+    # 于是 _sp_gather 判据「命中」→ 用G(hB) 去更新 hA 的输出。
+    _, ro_ep, _, _ = build_pair(n_h, n_out, k, seed=37)
+    tgt_ep = np.zeros(n_out, dtype=np.float32)
+    tgt_ep[0] = 1.0
+    hA = rng.normal(0.0, 1.0, n_h).astype(np.float32)
+    hB = rng.normal(0.0, 1.0, n_h).astype(np.float32)
+    ro_ep.forward(hA)
+    ro_ep.learn_softmax(hB, tgt_ep, 0.0)
+    ro_ep.learn_softmax(hA, tgt_ep, 0.0)
+    Wi = ro_ep.Wi.detach().cpu().numpy()
+    cached_g = ro_ep._cache_g.detach().cpu().numpy()# noqa: SLF001
+    gA = hA[Wi]
+    gB = hB[Wi]
+    check(np.allclose(cached_g, gA, atol=1e-6),
+          "C4c1 缓存 gather 对应 hA（而非被污染的 hB）",
+          f"==hA:{np.allclose(cached_g, gA, atol=1e-6)} "
+          f"==hB:{np.allclose(cached_g, gB, atol=1e-6)}")
+    # 更强：被污染后再用 hA 前向，y 必须与干净实例一致
+    _, ro_c1, _, _ = build_pair(n_h, n_out, k, seed=37)
+    _, ro_c2, _, _ = build_pair(n_h, n_out, k, seed=37)
+    ro_c1.forward(hA)
+    ro_c1.learn_softmax(hB, tgt_ep, 0.0)
+    y_after = np.asarray(ro_c1(hA))
+    y_clean = np.asarray(ro_c2(hA))
+    d = float(np.abs(y_after - y_clean).max())
+    sc = max(1.0, float(np.abs(y_clean).max()))
+    check(d <= 1e-5 * sc,
+          "C4c2 污染后用 hA 前向，y 与干净实例**数值一致**（无静默错误）",
+          f"max|Δ|={d:.3e}")
+    # 正向：单h 连续调用不应误判为「变了」
+    _, ro_same, _, _ = build_pair(n_h, n_out, k, seed=37)
+    ro_same.forward(hA)
+    g_before = ro_same._cache_g.detach().cpu().numpy().copy()   # noqa: SLF001
+    ro_same.learn_softmax(hA, tgt_ep, 0.0)      # 同一 h → 应命中并复用
+    g_after = ro_same._cache_g.detach().cpu().numpy()          # noqa: SLF001
+    check(np.array_equal(g_before, g_after),
+          "C4c3 同一 h 连续调用仍复用 gather（判据未过度失效）")
+
     # ── D. 零回归 ─────────────────────────────────────────────────────────
     print("\n[D] 零回归：conn_k=0 稠密路径未被污染")
     dense_ref = AccelReadout(n_h, n_out, np.random.default_rng(23), device="cpu",
