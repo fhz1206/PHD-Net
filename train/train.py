@@ -203,13 +203,14 @@ def main() -> None:
                          "sft 分片同样适用）。词表扫描不受影响（词表是训练流的"
                          "超集，OOV 恒 0）")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
-    ap.add_argument("--readout-dtype", default="fp16",
+    ap.add_argument("--readout-dtype", default="fp32",
                     choices=["fp32", "fp16", "bf16", "fp8", "fp4", "int8", "int4",
                              "int16", "int32"],
-                    help="读出精度。**默认 fp16**（P105, 2026-10-01：昇腾原生 GEMV、"
-                         "保住非目标行更新）。int8 存储省 4× 但反量化吃掉收益且"
-                         "吞掉非目标行更新（学习退化）；int16/int32 供大动态范围；"
-                         "fp8/fp4 为 int8/int4 的兼容别名")
+                    help="读出计算精度。**默认 fp32**（P110, 2026-10-01：实测 "
+                         "低精度会丢弃感知器 p − t 的非目标行更新 → 学习退化为"
+                         "纯 Hebbian，见 tools/probe_readout_precision.py）。"
+                         "fp16/bf16 保留率仅 26.7%%/5.8%%（|dp|~1e-6 档），"
+                         "提速有限而语义有损；int8 更差。需低精度请显式指定")
     ap.add_argument("--torch-compile", dest="torch_compile",
                     action="store_true", default=False,
                     help="P58（fhz 2026-09-29「图优化关了吧」）：默认 OFF——"
@@ -697,16 +698,17 @@ def main() -> None:
           f" | vocab workers={vw} | data prefetch=multiproc×{dl_w}{'+zh filter' if args.data == 'pretrain_zh' else ''}"
           f" | build time {time.perf_counter() - t0:.1f}s")
     _rb = getattr(lm.net, "_readout_backend", "numba-cpu")
-    if cfg.readout_dtype in ("bf16", "fp16", "fp8", "fp4"):
-        if cfg.readout_dtype == "fp16":
-            print("[readout] compute precision = fp16（P105 默认）。保住非目标行"
-                  " 更新（bf16 半 ULP 会吞掉它们 → 纯 Hebbian 退化）。")
-        print(f"[readout] compute precision = {cfg.readout_dtype} "
-              f"(checkpoint storage = {args.ckpt_dtype or 'fp32'}); "
-              f"NOTE: half precision rounds away the perceptron's non-target-row "
-              f"updates (|dp| ~1e-6 vs bf16 half-ULP ~2e-4), so learning "
-              f"degenerates toward pure Hebbian. Use --readout-dtype fp32 to "
-              f"restore the exact rule.", flush=True)
+    if cfg.readout_dtype in ("bf16", "fp16", "fp8", "fp4", "int8", "int4"):
+        print(f"[readout] compute precision = {cfg.readout_dtype}"
+              f" (checkpoint storage = {args.ckpt_dtype or 'fp32'}); "
+              f"WARNING: 半精度会舍入丢弃感知器 p − t 的非目标行更新 "
+              f"(实测保留率 fp16 26.7% / bf16 5.8% @ |dp|~1e-6)，"
+              f"学习规则退化为纯 Hebbian。生产请用 --readout-dtype fp32。",
+              flush=True)
+    else:
+        print(f"[readout] compute precision = {cfg.readout_dtype}"
+              f" (checkpoint storage = {args.ckpt_dtype or 'fp32'})"
+              f" — 精确 p − t 规则", flush=True)
     print(f"[readout] backend={_rb}"
           + (f" (device {lm.net.readout.device})"
              if _rb.startswith("accel:") else "")
