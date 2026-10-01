@@ -1,226 +1,396 @@
 # PHD-Net 扩展指南
 
-> 面向要**扩展 PHD-Net** 的开发者：加机制、加后端、加精度、加数据通路、加训练阶段。
-> 每节给出「改哪里 → 怎么验证 → 门禁在哪」，并标注 2026-09-29~30 实战中反复踩到的坑（标 ⚠）。
-> 配套：`BUGS.md`（缺陷台账，本文所有 ⚠ 都能在那里查到完整症状与根因）、
-> `docs/PHD-Net_硬件后端适配报告.md`（后端矩阵与昇腾真机踩坑）。
+> **适用范围**：要**扩展 PHD-Net** 的开发者——加机制、加后端、加精度、加数据通路、加训练阶段、加验证器。
+> **数据截止**：2026-10-01。与代码冲突时**一律以代码为准**，并回头修本文。
+> **配套**：[`BUGS.md`](../BUGS.md)（缺陷台账，本文每条 ⚠ 都能在那里查到完整症状与根因）、
+> [`PHD-Net_架构设计.md`](PHD-Net_架构设计.md)（机制与容量账）、
+> [`PHD-Net_性能评估与迭代方案.md`](PHD-Net_性能评估与迭代方案.md)（**所有**性能数字的唯一出处）、
+> [`PHD-Net_硬件后端适配报告.md`](PHD-Net_硬件后端适配报告.md)（后端矩阵与昇腾真机踩坑）。
+
+本文是**操作手册**：每节给出「改哪里 → 怎么验证 → 门禁在哪 → 门禁缺口」。
+所有 ⚠ 标记都是本项目**真实发生过**的事，不是假想风险。
+
+---
 
 ## 0. 五分钟速查表
 
-| 你要做的事 | 改哪个文件 | 必过哪个门禁 |
+| 你要做的事 | 改哪些文件 | 必过门禁 |
 |---|---|---|
-| 加一个新机制（如 M7） | `phdnet/<新模块>.py` + `phdnet/model.py::step` 接入 | fast 9/9 + **新写逐位对拍**（§2.3） |
-| 加一个新设备后端 | `phdnet/backends/` + `resolve_accel_device()` | `verify_accel_readout.py` + `verify_accel_readout_p55.py`（2×2 矩阵） |
-| 加一种 dtype | **三处**：`accel_readout.py::_DT` + `sparse_encoder.py::resolve_model_dtype` + `model.py::to_numpy` | 对拍 + `verify_ms_stream.py`（检查点往返） |
-| 加一个数据源 | `phdnet/corpus.py`（统一接口）+ `corpus_stream.py` | `verify_stream_tokenize.py`、`verify_ms_stream.py` |
-| 加一个训练阶段 | `train/train.py`（复用 `lm.net.step`） | fast 9/9 + 阶段语义对拍 |
+| 加一个新机制（如 M7） | 新模块 + `phdnet/model.py::step` 接入 + 计时段 | fast 9/9 + **新写数值对拍**（§2.3） |
+| 加一个读出后端 / 换设备 | `phdnet/backends/accel_readout.py` + `resolve_accel_device()` | `verify_accel_readout.py`（全PASS）+ `verify_accel_sparse.py`（22/22，若涉及稀疏） |
+| 加一种 dtype | **三处**（见 §4.1） | `verify_accel_readout.py` + `verify_ms_stream.py`（检查点往返） |
 | 改一个 numba 核 | `phdnet/ltm_kernel.py` 等 | 对拍（**逐位优先**）+ `verify_ltm_kernels.py` |
-| 动读出 / 精度 | `phdnet/backends/accel_readout.py` | ⚠ **必须同步 `_unsupported_reason()` 能力表**（§3.3） |
-| 调一个已有开关 | 见 §6 速查表 | 对应 verifier |
+| 加一个数据源 | `phdnet/corpus.py`（统一接口）+ `train/corpus_stream.py` | `verify_stream_tokenize.py`、`verify_ms_stream.py` |
+| 加一个训练阶段（SFT/RL） | `tools/train_rl.py` 模式 + `phdnet/rl.py` | 阶段语义对拍 + fast 9/9 |
+| 加一个 CLI 参数 | `train/train.py` argparse | **`--help` 实际能跑**（§5，含 6 次踩坑） |
+| 加一个 verifier | `tests/verifiers/verify_*.py` | 自己先跑；别把自己扫进去（§6.4） |
+| 加一个工具脚本 | `tools/`（标注生产轨/非生产轨） | 注明平台 + commit（§7） |
+| 调一个已有开关 | 见 §9 速查表 | 对应 verifier |
 
-**架构铁律（不可违反）**：① 禁自注意力 / 位置编码 / 堆叠层；② 每个机制必须有神经认知对应物；
-③ 逐 token 语义（状态跨 token/shard/epoch 连续演化，`W` 每步原地更新 → **不允许批处理**）；
-④ 行为变更以 config 开关承载且**默认关闭**，唯一例外是 `csr_online`/`k_sparse`（项目特例，default-on）。
+### 架构铁律（不可违反）
+
+① 禁自注意力 / 位置编码 / 堆叠层；
+② 每个机制必须有神经认知对应物；
+③ **逐 token 语义**——状态跨 token/shard/epoch 连续演化，`W` 每步原地更新 → **不允许批处理**；
+④ 行为变更以 config 开关承载且**默认关闭**。
+
+> ⚠ ④的**例外**（fhz 明确指令，default-on）：`sparse_conn=True`、`k_sparse=16`、`csr_online=True`。
+> 库默认值与 CLI 默认值**可以不一致**（例：`config.encoder_dtype=fp64` 而生产 CLI 覆盖为 `fp32`），
+> 但**必须是有意的**，且文档要写明是哪一个在生效。
+
+---
 
 ## 1. 代码地图与 M1–M6 接入点
 
 ```
 phdnet/
-  model.py           PHDNet.step —— 唯一的机制编排入口（六段 + 状态演化）；to_numpy 在文件末尾
-  sparse_encoder.py  M1 稀疏分布式编码（k-WTA）；resolve_model_dtype / _gemv_rows
-  sparse_pc.py       M2 预测编码主干（CSR 稀疏 + 可选融合核）
-  plasticity.py      M3 STDP 侧向连接
-  wm.py              M4a 工作记忆（PFC 漏整合）
-  bigltm.py          M4b 大容量事件驱动表（适配器；存储在 sparse_table.py）
-  readout.py         M6 读出（numba CPU 原路径）
-  sparse_table.py    M4b 存储本体（dict 版 + 在线 CSR 版）
-  ltm_kernel.py      M4b 的 numba 核（learn 批量 / recall 投影）
-  telemetry.py       设备/GC 遥测；i18n.py 终端语言
-  backends/          加速后端（torch / 多设备 / 读出 accel）+ README 有踩坑表
+  model.py                PHDNet.step —— 唯一的机制编排入口；to_numpy/_nelem 在文件末尾
+  sparse_encoder.py       M1 稀疏分布式编码（k-WTA）；resolve_model_dtype / _gemv_rows（P77 平台自适应 GEMV）
+  sparse_pc.py            M2 预测编码主干（CSR）；_csr_matvec（行级 prange）/ _pc_infer_fused_serial
+  plasticity.py           M3 STDP（只走 numba CPU）
+  wm.py                   M4a 工作记忆（PFC 漏整合 + 摘要槽）
+  bigltm.py + sparse_table.py   M4b 大容量事件驱动稀疏表
+  modulator.py            M5 神经调制（ACh/NE/DA/5-HT 四通道）
+  readout.py              M6 读出（numba 路径：稠密W 或 CSR）
+  config.py               全部配置项 —— 注释即设计意图的权威来源
+  sparse_alloc.py         幂律连接数分配器（**尚未接入 readout**，见 §8）
+  backends/
+    accel_readout.py      加速器读出（M6 上设备）
+    multi_device.py       多设备（模型并行）
+    torch_backend.py      torch 基础层
+  telemetry.py            CPU/NPU/HBM/GC遥测（npu-smi 零同步查询）
+  i18n.py                 终端输出语言（zh/en）
 train/
-  train.py           唯一生产训练入口（argparse 全部开关都在这里）
-  tokenizer_core.py  分词器热路径（CSR-trie + numba nogil）
-  corpus_stream.py   流式数据（PrefetchChars 多进程 + StreamingTokenizer）
-  ckpt_1b.py         检查点（同步 save_model + 异步 save_model_async）
-tests/
-  run_tests.py fast  零回归门槛（9 项）
-  verifiers/         18 个专项对拍（逐位 / 容差各自有约定）
+  train.py                生产训练入口（单轨）
+  infer.py                生产推理入口
+  ckpt_1b.py              检查点保存/恢复
+  config_1b.py            四档预设 + 容量账
+  tokenizer_core.py       分词热路径（numba nogil）
+tests/verifiers/          21 个专项验证器
+tools/                    工具脚本
 ```
 
-**M1–M6 接入点对照**：M1 `SparseEncoder.encode` ｜M2 `SparsePC.step`（+ `learn` 侧融合核）｜
-M3 `Plasticity.step` ｜M4a `WM.step` ｜M4b `SparseLTM.{encode,recall,learn}` + `OnlineCSRTable`｜
-M6 `Readout`（CPU）/ `AccelReadout`（设备）。**新机制一律加在 `PHDNet.step` 里**，按 M1→M6 顺序调用。
+### M1–M6 在 `step` 里的接入顺序
 
-## 2. 加一个新机制
+`phdnet/model.py::PHDNet.step` 是**唯一**的机制编排入口。接入新机制时在既有机制之间插入，
+并用 `_prof_t` / `_prof_end` 加计时段（`--step-profiling` 会按耗时降序输出前 6 段）。
 
-### 2.1 接入模板
-```python
-# 1) 写模块：phdnet/<your>.py
-class YourMechanism:
-    def __init__(self, cfg, rng): ...
-    def step(self, cache: dict, *, learn: bool) -> dict:   # 不跨步持有设备张量
-        ...
-    def learn(self, cache: dict) -> None: ...
-```
-```python
-# 2) 接入 model.py：构造期建实例，step 里按顺序调用
-self.your = YourMechanism(cfg, rng)
-...
-_p = self._prof_t('M7_your')        # ① 分段计时（--step-profiling 可见）
-ctx = self.your.step(cache, learn=learn)
-self._prof_end('M7_your', _p)
-```
+⚠ **不要重排既有机制的顺序**：机制之间有数据依赖（s0 → M2 推理 → e0/e1 → M3/M4 → 读出）。
+顺序即语义，`verify_*` 的数值对拍会立刻抓到。
 
-### 2.2 四条硬性要求
-1. **不做设备同步**：`step` 里不 `.item()` / `.cpu()` / `.numpy()`。需要标量时走
-   「设备侧累积 + 每 N 步取一次」（照 `accel_readout._nll_sum` 写，默认 `nll_sync_every=8`）。
-2. **跨 token 状态**：跨步持有的东西只能是 numpy/设备张量，**不要缓存设备张量的 numpy 视图**
-   （`accel_readout._cache_h` 用 `np.ascontiguousarray` 拷贝）。异步交接前必须 `.copy()` ——
-   `to_numpy` 返回的是**共享视图**，`addmm_`/`learn` 会原地写它，后台写盘线程会序列化到撕裂数据。
-3. **逐位优先**：能用相同表达式就不重排（BLAS 归约顺序、prange 分块都会改 1–2 ulp）。
-   若必须改，**在 verifier 里写明容差口径与原因**。
-   ⚠ **逐位对拍的基线必须是同一库、同一 fastmath 口径的串行实现** —— 用纯 Python 当基线会产生
-   满屏假阳性，而假阳性比没测试更危险（它会让人去「修」正确代码）。
-4. **numba 核必须 `cache=True`**：`@njit(cache=True, nogil=True, ...)`，否则每次启动重编译。
-   `inline="always"` 与 `cache` 互斥（`readout.py` 里 7 个内联 helper 是设计上的例外）。
-   另：⚠ **别让计算落在计时缝隙里**（曾有一段 30 µs 的代码漏在段外，浪费一轮排查）。
+---
 
-### 2.3 对拍必须覆盖的六种情形
-写 `tests/verifiers/verify_<your>_equiv.py`，逐位或容差对拍，且必须覆盖：
+## 2. 检查单：加一个新机制
 
-| 维度 | 必覆盖 | 为什么 |
+| # | 步骤 | 落点 | 验证方式 |
+|---|---|---|---|
+| 1 | 加配置字段 + 注释（写动机与**数值影响**） | `phdnet/config.py` | 编译 |
+| 2 | 实现模块 | `phdnet/<新模块>.py` | 单模块自测 |
+| 3 | 接入编排 + 计时段 | `phdnet/model.py::step` | `run_tests.py fast` |
+| 4 | 铁律声明（这个机制的神经认知对应物是什么） | `docs/PHD-Net_架构设计.md` 机制表 | 人工评审 |
+| 5 | fast 测试断言 | `tests/checks_*.py` | fast 9/9 |
+| 6 | 专项 verifier | `tests/verifiers/verify_<新机制>.py` | 新写的对拍 |
+
+### 2.1 命名与默认值
+
+- 机制编号 `M<N>`，配置字段 snake_case，CLI 参数 `--<kebab-case>`。
+- 配置默认值与 CLI 默认值**尽量一致**；不一致必须是有意的（例：`encoder_dtype` 库默认 fp64 因为它是形状参数，生产 CLI 覆盖为 fp32）。
+
+### 2.2 逐 token 语义的红线
+
+新机制**不得**引入 batch 维或梯度。原因不是保守，是本项目的架构约束：
+`step` 每步原地更新 `W`、M3 的迹、M4a 的槽位、M4b 的 CSR，状态跨 token 连续演化。
+一旦能批处理，整个训练语义与所有基线锚点全部作废。
+
+### 2.3 ⚠ 门禁：必须写**数值对拍**，形状断言抓不到 bug
+
+真实事故：稀疏读出前向写成 `gather(...).sum(1)` —— **把权重整个丢掉**，
+只把 gather 到的 h 分量相加。**形状对、dtype 对、量纲对**，只有逐元素对拍能抓到。
+
+对拍写法：与**独立的参考实现**逐元素比，打印实测 `max|Δ|`，不要只打 PASS/FAIL。
+
+---
+
+## 3. 检查单：加一个读出后端 / 换设备
+
+这是本项目**最贵的教训区**。读出占端到端 **~89%**，后端错了整轮改造等于没做。
+
+### 3.1 完整调用面（少一个就崩）
+
+| 成员 | 类型 | 缺失后果 |
 |---|---|---|
-| 精度 | **fp64 / int8 量化**（或你的机制涉及的各档） | 量化路径的舍入顺序与浮点路径不同 |
-| 开关 | **关键开关两态**（on/off） | 开关分支常年只测默认值 |
-| 序列 | **多步序列**（≥6 步，含状态增长/衰减） | ⚠ P67 的首版就是**只在单步逐位、多步不一致** |
-| 规模 | **满规模行/槽**（不是小表） | 核的固定开销、容量边界只在满规模暴露 |
-| 键序 | **键顺序打乱** | ⚠ 按 append 顺序填键会让槽位查找总命中首项，把优化**测成负收益** |
-| 形状/顺序 | 若改了 CSR 段序或索引布局 | 段序错位**纯计时看不出来**，结果仍「跑得动」 |
+| `__call__` / `forward` | 方法 | 前向崩 |
+| `forward_dev` | 方法 | 无设备内路径 → 退回同步，热路径被打断 |
+| `learn` / `learn_softmax` | 方法 | 训练崩 |
+| `W` | 属性 | 权重访问崩 |
+| `W_cpu` / `load_W` | 方法 | **保存/恢复检查点时崩** |
+| `n_synapses` | 方法 | 参数统计崩 |
+| `conn_k` / `hidden` | **只读 property** | 检查点与统计崩 |
+| `stats()` | 方法 | 诊断脚本崩 |
+| `dtype_name` | property | 日志/ckpt 元信息崩 |
+| `_csr` | property | 稀疏检查点崩 |
+| `_to_dev` / `_staged_to_dev` | 方法 | H2D 路径缺失 |
 
-## 3. 加一种 dtype（最容易出事的地方）
+> ⚠ **`conn_k` 必须是只读 property**。若写成可写属性，两侧后端语义不对称，
+> `ckpt_1b` 的 `net.readout.conn_k` 读法会分叉。
+> ⚠ 若不实现稀疏，`_csr` 应**显式抛 `NotImplementedError`**，而不是返回 `None` ——
+> 显式报错能立刻定位，而不是在别处变成更费解的 `AttributeError`。
 
-### 3.1 ⚠ dtype 必须**两端同时**对齐
-2026-09-30 连续踩了两次「混合 dtype 脱离 BLAS」：fp32 权重 @ fp64 输入（慢 5.9×，`c8148b4`）、
-fp64 权重 @ fp32 输入（昇腾慢约 70×，`77f9b78`）。两次的成因一模一样：**各自修对了一侧，没人对齐两端**。
-```python
-# 错：只转一边
-u = self._w_fp32() @ np.asarray(x, dtype=np.float32)
-# 对：输入跟随权重
-u = self._w_fp32() @ np.asarray(x, dtype=self._w_fp32().dtype)
+### 3.2 ⚠⚠ 三处能力表必须一致（本项目最大的静默失效来源）
+
+| 位置 | 内容 | 不一致的后果 |
+|---|---|---|
+| CLI `choices` | `train/train.py::--readout-dtype` | 用户能选到后端不支持的值 |
+| `accel_readout.py::_DT` | 支持的 dtype 名集合 | 构造期 `ValueError` → 兜底回落 |
+| `accel_readout.py::_unsupported_reason` | 拒绝原因（**带说明**） | 回落但**原因丢失** |
+
+真实事故链（三次，一次比一次隐蔽）：
+
+1. **fp8 能力表遗漏** → `--readout-dtype fp8`（当时的默认值）被静默回落到 numba CPU，
+   整个 P84 精度改造在生产上**完全没生效且不报任何错**。
+2. **`readout_conn_k>0` 撞拒绝表** → NPU 读出加速全程回落 CPU 也不报错
+   （读出占端到端 89%）。**默认值撞拒绝表 = 静默关掉全部加速。**
+3. **int16/int32 在 `choices` 放行但 `_DT` 没有** → 构造期 `ValueError` →
+   `pick_readout_backend` 的 `except Exception` 兜底回落，且
+   **`_accel_fallback_reason=None`（原因丢失）**。已于 P112 修：在能力表显式拒绝并说明原因。
+
+**改dtype 时三处一起改，并跑 `verify_accel_readout.py` 的能力表用例。**
+
+### 3.3 未实现的配置：回落 + 记原因
+
+不允许「能跑但语义不同」。回落必须：
+
+- 静默安全（不崩、不改数值语义）；
+- **把原因写进 `readout._accel_fallback_reason`**，并在训练日志里打印：
+  `[readout] backend=numba-cpu(回落) | fallback reason: ...`。
+
+### 3.4 跨设备等价：用容差，不用逐位
+
+torch CPU 与 numpy BLAS 的**归约顺序不同**，fp32 下 `max|Δ| ≈ 4e-06` 属正常。
+跨库逐位相等**不是**正确性要求。同设备（torch CPU vs torch CPU）才逐位。
+
+### 3.5 ⚠ 设备张量三条禁令
+
+| 禁止 | 原因 | 正确做法 |
+|---|---|---|
+| 裸 `np.asarray(设备张量)` | 昇腾 `npu:0` 直接抛错 | 走 `phdnet.model.to_numpy()` / `_nelem()` |
+| `torch.as_tensor(numpy数组)` 当权重 | **共享内存** + W 原地更新 → 调用方的参考权重被静默改掉 | `torch.tensor(...)`（复制） |
+| 热路径上 `.item()` / `bool(tensor)` / `torch.equal` / `.cpu()` | **强制设备同步**，把P34 用 `nll_sync_every` 消除掉的同步又加回来 | 主机侧标记（如 epoch 整数）；`.item()` 改累积到设备、每 N 步同步 |
+
+> ⚠ 真实事故：稀疏 gather 的缓存判据用 `torch.equal(cache_src, ht)` 判「是不是同一个 h」——
+> 它逐元素比较后返回 Python bool，在 NPU 上是**每步一次硬同步**，发生在最热路径。
+> 改为主机侧 epoch 整数后，**判据必须覆盖所有上传路径**：
+> `forward()` 走 `_to_dev`、`forward_dev()` 走 `_staged_to_dev`，
+> 漏掉一处就会把上一步的 gather 结果静默复用给新 h（实测：`max|Δ|=1.45`）。
+
+### 3.6 ⚠ 门禁缺口
+
+**「三处能力表一致」在 CI 上是验不全的**：CI 机器通常没有昇腾，`accel_readout="auto"`
+会走硬件探测回落 numba，拿不到真实后端。可靠做法是直查 `_unsupported_reason`（纯函数、可测），
+本项目已如此。**真正的确认只有一条**：服务器日志里 `[readout] backend=` 显示真在设备上。
+
+---
+
+## 4. 检查单：加一种精度 / dtype
+
+### 4.1 三处 + 一致性
+
+| # | 落点 | 说明 |
+|---|---|---|
+| 1 | `phdnet/readout.py::RO_DTYPES` | CPU 路径支持的 dtype 名 |
+| 2 | `phdnet/backends/accel_readout.py::_DT` + `_unsupported_reason` | 加速路径（见 §3.2） |
+| 3 | `train/train.py::--readout-dtype` 的 `choices` + `phdnet/sparse_encoder.py::resolve_model_dtype` | CLI 与编码器 |
+| 4 | 检查点存/取（位模式） | `train/ckpt_1b.py`，低精度存 uint8/uint16，加载侧按 `ckpt_dtype` 解码闭环 |
+
+### 4.2 ⚠ 低精度不是免费的速度收益：它会破坏学习规则
+
+这是本项目最重要的精度结论（实测 `tools/probe_readout_precision.py`）。
+判据：**同精度舍入后，元素是否真的变了**（变了 = 更新被保留）。
+
+| 精度 | 非目标行更新保留率（`\|W\|~1e-2, \|dp\|~1e-6`） | 目标行 |
+|---|---|---|
+| **fp32** | **99.95%** | 100% |
+| fp16 | 26.67% | 100% |
+| bf16 | 5.79% | 100% |
+
+目标行三者都 100%（目标更新 ~1e-2 ≫ 半 ULP），意味着低精度下
+「**只有目标行的提升被保留**」= 学习规则退化为**纯 Hebbian**。
+这是**语义损失，不是速度收益**。
+
+> ⚠ 曾有判断「fp16 半 ULP 只有 bf16 的 1/8，能保住非目标行更新」——**实测推翻**：
+> fp16 只是比 bf16 好，离正确还差一个数量级（26.67% vs 99.95%）。
+> **半 ULP 的数量级估算不能替代实测。**
+>
+> ⚠ 判据本身的坑：基线必须经过**同一精度**的归约。
+> 拿 fp32 值与 fp16 值直接比，会得到「fp16 保留 100%」的**反向假阳性**。
+
+### 4.3 ⚠ 平台 × 版本相关的 dtype 支持
+
+`numba` 的 dtype 支持**不是统一的**。真实事故：aarch64 numba **没有 float16 ArrayModel**
+→ 在数据模型管理器里就拒绝 float16 数组 → numba GEMV 内部**必须用 fp32**。
+（曾把 GEMV 内部改成 fp16，服务器直接崩，回滚。）
+
+**加速器上也不统一**：fp8/fp4 在昇腾 910B + CANN 8.5 全 ERR01007（能建张量不能乘）；
+int4 无矩阵乘单元。只有 int8 码本在加速后端是真实实现的。
+
+---
+
+## 5. 检查单：加一个 CLI 参数
+
+argparse 在 `train/train.py`（生产）、`train/infer.py`、`tools/*.py`。
+
+### 5.1 ⚠⚠ help 文本里的裸 `%` 会让 `--help` 崩 —— 已发生 6 次
+
+`argparse._expand_help` 会对 help 文本做 `help % params`。任何未转义的 `%` 都会抛
+`ValueError: unsupported format character`。必须写 `%%`。
+
+**门禁已升级**：`tests/verifiers/verify_ms_stream.py` 现在会**跑遍全仓库每个 argparse 入口的
+`--help`**（36 个文件），任何入口崩了都会被抓到。
+（另有静态扫描辅助，但**只作提示不作判据**——AST 片段提取在跨行格式化表达式上会误报。）
+
+改完参数**自己先跑一遍**：
+
 ```
-**自检**：任何 `A @ b` 前断言 `A.dtype == b.dtype`。⚠ 混合 dtype **不报错、结果正确，只是慢** ——
-它在所有正确性门禁下都是隐形的，只能靠断言或 review 抓。
+python train/train.py --help ; echo "exit=$?"
+```
 
-### 3.2 三处必须同步
-| 位置 | 内容 |
+### 5.2 ⚠ `default=` 与 help 文本必须一致
+
+现存两个已修的例子：`--m2-kernel` 实际 `serial` 而 help 曾写「默认 plain」；
+`--encoder-dtype` 实际 `fp32` 而 help 曾写 `fp64`。**help 里不要重复陈述默认值**，
+或确保陈述与 `default=` 一致。
+
+### 5.3 其它
+
+- 百分比、倍数写在 help 里一律 `%%`（如「占 39%%」）。
+- 新参数若影响热路径，加一个开关默认关闭，让用户显式开启。
+
+---
+
+## 6. 检查单：加一个验证器
+
+放 `tests/verifiers/verify_*.py`。`python tests/verifiers/verify_<名>.py` 即可运行。
+
+### 6.1 分层结构（照这个写）
+
+| 层 | 验什么 | 失败意味着 |
+|---|---|---|
+| A 数值等价 | 与独立参考实现逐元素对拍 | **实现算错了** |
+| B 调用面完整 | 属性/方法存在且语义对 | 生产某条路径会崩 |
+| C 拒绝路径 | 不支持的配置 fail-fast | 会「能跑但语义不同」 |
+| D 零回归 | 未涉及的路径行为不变 | 你改坏了别的地方 |
+
+### 6.2 ⚠ 必须打印实测数字
+
+每条 check 打印 `max|Δ|`，例如 `PASS A1 前向一致 [max|Δ|=8.103e-08]`。
+**不要只打 PASS/FAIL** —— 数字是下一个人判断「这是否在容差内」的唯一依据。
+
+### 6.3 ⚠ 容差判据的基线
+
+基线必须经过**同一精度/同一路径**的归约。见 §4.2 的反向假阳性事故。
+尺度也要用**当前**值的量级（更新后就更新后的量级，不是更新前的副本）。
+
+### 6.4 ⚠ 写门禁时别把自己扫进去
+
+真实事故：给 `verify_ms_stream.py` 加「跑遍所有 argparse 入口」的检查，
+而它自己含 `add_argument` 文本且有 `__main__` → **自我递归调用把自己跑超时**。
+排除 `os.path.abspath(__file__)` 与 `tools/archive/`（归档脚本不是活代码入口）。
+子进程调用要加 `try/except TimeoutExpired`。
+
+### 6.5 ⚠ 门禁红了先归因
+
+`门禁红了必须归因，不能等它变绿`。先问两个问题：
+① 它什么时候开始红的？② **它断言的是不是已废弃的行为？**
+
+真实案例：`verify_accel_readout.py` 的 A3 长期断言「稀疏必须回落 numba」——
+P111 恰恰是要取消这个回落。改代码前若不看清断言，**会把正确的修复当成回归**，
+或者反过来——为了让门禁绿而把修复改回去。
+
+---
+
+## 7. 检查单：加一个工具脚本
+
+放 `tools/`，argparse，文件头注明**生产轨 / 非生产轨**。
+
+性能测量脚本的**诚实话术**（缺一条结论就不可信）：
+
+| 要求 | 原因 |
 |---|---|
-| `phdnet/backends/accel_readout.py::_DT` | dtype 名 → torch dtype（⚠ P92 后只有 `{fp32, fp16, bf16}`；fp8/fp4 连构造都不允许） |
-| `phdnet/sparse_encoder.py::resolve_model_dtype` | 存储 dtype（含 bf16 缺 `ml_dtypes` 时的回落） |
-| `phdnet/model.py::to_numpy` | **检查点**：numpy 没有 bf16/fp8 → 必须走**位模式**（`view(uint16/uint8)`）并与加载侧 `ckpt_1b.py` 的 `view()` 解码闭环 |
+| 只测量**不推荐** | 建议会变成无实测支撑的论断 |
+| 读出精度**锁 fp32** 并说明理由 | 否则构成「bf16 稠密 vs fp32 稀疏」的混淆对比 |
+| 数字一律 **best-of-N** | 本机单次噪声可达 3× |
+| 注明**平台 + 档位 + commit** | 脱离口径的数字无意义 |
+| 消融计时**不可信** | 会被 JIT 编译时间污染（需先预热） |
+| 检测发散并标 `diverged` | 不能把爆掉的数字当正常结果打出去 |
+| **欠训练告警必须打** | 小 token 预算下稀疏臂「PPL 更优」是**预算不足的伪影**，不是稀疏的结构优势 |
 
-⚠ **torch 缺失是常态**：`phdnet/model.py` **不 import torch**（只有 accel 读出路径才有张量）。
-任何用到 torch 的代码都要**惰性 import**，否则纯 numpy 训练会 NameError（P83b，`4666870`）。
+`tools/bench_local.py` 已明确「**不产出文档数字**」并提供三个 A/B 开关——
+这是「x86 结论不构成昇腾证据」纪律的落地。
 
-### 3.3 ⚠ 加 dtype 必须同步**能力表**
-`accel_readout.py::_unsupported_reason()` 是一张「加速读出未实现项」黑名单。
-P84 把 fp8 实现出来并设为默认，**却忘了从这张表里删掉它** → 生产日志一直是
-`numba-cpu(回落)`，**一整轮改造没生效且不报任何错**（BUGS B3，本台账最严重一条）。
+---
 
-**规则**：加 dtype 时同步 `_DT` + `_unsupported_reason()` + docstring；并在 verifier 里加一条
-「声明支持 ⇒ `_unsupported_reason()` 返回 None」的断言。
+## 8. 检查单：文档与记忆同步
 
-### 3.4 ⚠ 选默认精度的判据不是「更省访存」
-bf16 半 ULP ≈ 2e-4 是非目标行更新 `|dp| ≈ 1e-6` 的约 200 倍 → 更新被舍入，训练**退化为纯
-Hebbian**（PPL 震荡不降的根因）。fp8 forward + fp16 更新买到的是**学习精度**，不是带宽
-（更新侧反而让总访存 +42%）。⚠ 这类「数值语义退化」**不崩、门禁不报警**，比崩溃难查得多。
+| 改动类型 | 要更新的文档 |
+|---|---|
+| 加机制 / 改容量 | `docs/PHD-Net_架构设计.md` 机制表 + 容量账 |
+| 性能数字 | **只更新** `docs/PHD-Net_性能评估与迭代方案.md`（唯一出处），别处链接引用 |
+| 后端 / dtype / 昇腾坑 | `docs/PHD-Net_硬件后端适配报告.md` |
+| 并行度 / 线程 / 加速器上限 | `docs/PHD-Net_并行与加速架构分析.md` |
+| CLI 参数 | `train/README.md` |
+| 任何跨会话硬约束 | `.workbuddy/memory/MEMORY.md` |
+| 当天做了什么 | `.workbuddy/memory/YYYY-MM-DD.md`（append-only） |
 
-## 4. 加一个设备后端
+写文档的硬规则见 [`文档写作规范.md`](文档写作规范.md)：**一个事实只在一处写**、
+数字必带口径、历史值必须显式标注、参数以源码为准（写前先 `grep add_argument` 核）。
 
-```python
-# phdnet/backends/resolve_accel_device(spec) —— 优先级：昇腾 → ROCm → CUDA → … → CPU
-```
-1. **`--accel auto` 必须安全回落**到 numba CPU，并把原因记在 `readout._accel_fallback_reason`，
-   启动日志打印（P19 纪律：回落 + 记原因，不静默）。**以启动日志的实际行为为准，不以「探测到设备」为准。**
-2. **对齐完整调用面**（P23 教训）：`__call__` / `learn` / `learn_softmax` / `W` / `n_synapses` /
-   `conn_k` / `hidden` / `stats()` / `W_cpu` / `load_W` —— 只实现主方法会在生产第一个 step 崩。
-3. **未实现的配置要 fail-fast**：`readout_hidden>0`（两级读出）、`readout_conn_k>0`（稀疏读出）
-   在加速后端未实现，显式回落并记原因，绝不「能跑但语义不同」。跨后端行为分叉比报错更危险。
-4. **`torch.compile` 是惰性的**：构造期不编译、**首次调用**才编译 → 失败要捕获并**永久回落 +
-   告警**（P58）。`--torch-compile` 默认关。
-5. **能力探测要用真实算子**：`torch.float8_e4m3fn` 在 CPU 上**能分配但不能乘** —— 只测创建会得到
-   假通过（P85）。要测 matmul。
-6. **失败要在使用点兜底**：探测是乐观的、使用点兜底是悲观的，两手都要有。旧机器上的旧代码
-   不会自动获得新防护（P90：直接崩在 `W.to(float8_e4m3fn)`）。
-7. 新后端要有 `verify_<backend>.py`，覆盖 **eager/compile × target/target_idx** 的 2×2 矩阵
-   （P55 的崩就藏在 target_idx × compiled 这一格）。
+---
 
-## 5. 数据源与训练阶段
+## 9. 常用开关速查（调参时先看这里）
 
-- **数据源**：实现 `phdnet/corpus.py` 的统一接口（txt / parquet / jsonl 一套），在 `corpus_stream.py`
-  挂上；远程源走 `ms://`（`phdnet/ms_stream.py`，HTTP Range seekable 流）。若涉及分词动
-  `tokenizer_core.py` 热路径，必须保持 `nogil` + 线程安全（P13/P18）。
-  ⚠ 走远程时把预取进程数**封顶**（`REMOTE_MAX_PROCS=4`）：8 个进程各持独立 aiohttp 池会被限流。
-- **SFT 双标记状态机**：用 `assistant_marker` 分段，**prompt 段 `learn=False` 只推进状态**。
-  ⚠ 只取「最后一个 marker 之后」会**漏掉 99.8% 的步** —— 必须是双标记（段内逐 token 判定）。
-- **RL（REINFORCE）**：直接复用读出感知器（`η ← rl_lr × advantage`），**零新增算子**。
-  ⚠ 奖励稀疏 → 优势恒 0 → 无学习，入口必须有诊断（否则「RL 不学」无法与「RL 写错了」区分）。
-- **两阶段训练**：预训练（zh+en）→ SFT，走 `--remote-fraction` 分片前缀采样。
-  ⚠ `--lang` 过滤**依赖 parquet 的 `lang` 列**，过滤是否真生效看日志里的 `[sample lang=…]`。
-
-## 6. 已有扩展点速查（CLI）
-
-| 开关 | 默认 | 说明 |
+| 开关 | 作用 | 动它要注意 |
 |---|---|---|
-| `--readout-dtype {fp32,fp16,bf16,fp8,fp4}` | **fp16** | ⚠ fp8/fp4 在**加速后端全禁**（P92）；`--accel cpu --readout-dtype fp8` 仍可用（位算法量化核） |
-| `--readout-conn-k K` | 0 | 读出 CSR 稀疏化（>0 时加速后端未实现 → fail-fast 回落） |
-| `--m2-kernel {fused,plain}` | **plain** | 昇腾上 fused 退化 3–4×；两者对拍 1–2 ulp（fused 用 fastmath，不逐位） |
-| `--encoder-dtype {fp32,fp64,fp16,bf16}` | **fp64** | M1 权重存储；aarch64 走自写 numba GEMV，x86 走 BLAS |
-| `--accel {auto,npu,cuda,rocm,cpu}` | auto | 读出后端；auto 优先级 昇腾 → ROCm → CUDA → DirectML → CPU |
-| `--nll-sync-every N` | **8** | nll 设备侧累积周期（消除每步 `.item()` 同步；PPL 统计滞后 N 步） |
-| `--numba-threads N` | **8** | numba prange 上限（0=用 numba 默认=全部核） |
-| `--omp-proc-bind` / `--no-omp-proc-bind` | **on** | 只设 `OMP_PROC_BIND=close`；⚠ **不要设 `OMP_PLACES`**（191 核上反噬 8×，P74 已回滚） |
-| `--torch-compile` | **off** | 读出热路径融合（inductor 在部分平台不稳；惰性编译，失败永久回落） |
-| `--devices auto` | — | 多卡：读出列并行 + host 线程收敛 |
-| `--lang {all,zh,en}` | all | 按 parquet `lang` 列过滤训练流（`[sample lang=…]` 日志自检） |
-| `--remote-data --remote-fraction F` | off / 0.3 | 直读 ModelScope（HTTP Range 流式，零落盘） |
-| `--step-profiling` | off | 九段 + 主循环三段耗时分解 |
-| `--ckpt-every N` | 50000 | 异步保存（主线程快照 `.copy()` + 后台写盘） |
-| `--fp8-refresh N` | 8 | ⚠ 仅 numba CPU 路径有意义（加速后端已禁 fp8） |
+| `--readout-conn-k` | M6 稀疏化入边数（默认 128） | >0 时加速后端走 gather-GEMV；**只支持均匀 k**，非均匀行宽 fail-fast |
+| `--readout-dtype` | 读出计算精度（默认 **fp32**） | 低精度破坏 p − t 规则（§4.2） |
+| `--encoder-dtype` | M1 权重存储精度（默认 fp32） | 昇腾走平台自适应 GEMV，与 dtype 无关 |
+| `--m2-kernel` | M2 推理核（默认 **serial** 单核） | `plain` 走 `_csr_matvec`（**有**行级 prange，从未被否），是待 A/B 候选 |
+| `--nll-sync-every` | nll 同步周期（默认 8） | N>1 时消除每步硬同步 |
+| `--numba-threads` | prange 线程上限（默认 8） | 191 核上 P22 实测 1→6 线程仅 1.16×（带宽饱和） |
+| `--accel` | 读出设备（默认 auto） | `cpu/off/numba` = 强制 numba 路径 |
+| `--omp-proc-bind` | 绑核（默认**开**，只设 `OMP_PROC_BIND=close`） | **不要**加 `OMP_PLACES`（191 核实测慢 8×，已回滚） |
+| `--ckpt-dtype` | 检查点存储精度（默认 fp16） | 位模式存取，加载侧解码闭环 |
+| `--torch-compile` | 图优化（默认**关**） | 只在首次调用编译 → 首次执行时捕获失败并永久回落 eager |
+| `--step-profiling` | 九段耗时分解 | 判断优化是否生效看这个，不看「检测到设备」 |
 
-## 7. 提交前检查单（⚠ 全是实战踩出来的）
+---
 
-- [ ] `python tests/run_tests.py fast` = 9/9
-- [ ] 改动文件 `py_compile`；改 `train/*.py` 另跑 `python train/train.py --help`
-      （⚠ fast 门禁**从不 import** 训练入口；argparse help 里的裸 `%` 会让 `--help` 崩）
-- [ ] **断言补丁真的落盘**：`Edit`/字符串 replace 后 `grep` 断言新文本存在
-      —— ⚠ `str.replace` **无匹配是静默成功**，`print('patched')` 照常打印（本组已连踩 4 次）
-- [ ] **「不确定就从 git 历史逐字取回」** —— ⚠ 凭记忆重写历史实现是错的（P75 的 plain 版）
-- [ ] **dtype 两端对齐**（§3.1）；新 dtype 已加 `_DT` + `resolve_model_dtype` + `to_numpy` 位模式
-      **+ 加载侧解码 + 能力表**（§3.2/§3.3）
-- [ ] **可选依赖边界**：用到 torch 的分支在「缺 torch」时仍可导入（惰性 import）
-- [ ] **平台假设**：不要把 x86 的性能结论当昇腾证据 —— 已实测三个方向相反的案例（§8）
-- [ ] **计时口径**：满规模 + 键顺序打乱 + best-of-N；⚠ 本机与目标机差一个数量级时本机结论作废
-- [ ] **异步/并发路径**：交给后台线程的数据先 `.copy()`（`to_numpy` 是共享视图，会被撕裂）
-- [ ] **诊断代码的成本**：诊断也在热路径上（曾有一次 `np.diff` 每次物化 134 MB 只为打一行数）；
-      门槛要考虑**触发频率**（条件触发的事件按「每 1000 次」永远打不出来）
-- [ ] **numba 核有 `cache=True`**；启动日志的 `[numba] cache dir/size` 确认真被命中
-- [ ] **门禁红了要归因**，不要当成「已知噪声」放着（一条 NLL 容差断言长期红着没人问它何时开始红）
-- [ ] `BUGS.md` 记一条（症状→根因→修复→门禁缺口）
-- [ ] 提交前清 `__pycache__` / `*.nbc,*.nbi` / 临时日志
+## 10. 收尾四步（fhz 固定要求）
 
-## 8. 性能定位速查（先测再改）
+1. **对拍 / 回归 / 冒烟验证**——fast 9/9 + 相关 verifier + `py_compile` + `--help` 实跑。
+2. **写记忆日志**——当天做的事追加到 `.workbuddy/memory/YYYY-MM-DD.md`；
+   跨会话硬约束才写进 `MEMORY.md`。
+3. **commit + push**。⚠ **push 必须绕过凭据助手**，否则永久挂起：
+   ```
+   git -c credential.helper= -c credential.helper="!C:/Users/ASUS/.workbuddy/binaries/PortableGit/versions/1.2.0/mingw64/bin/git-credential-wincred.exe" push origin main
+   ```
+   （原因：便携 git 的首个 helper `git-credential-helper-selector.exe` 在非交互 shell 下永久挂起。）
+   push 后 `git fetch origin main` 同步跟踪引用。
+4. **报告工作树干净**（`git status -sb` 显示 `## main...origin/main`）。
 
-```bash
-python train/train.py … --step-profiling      # 九段 + loop: 三段
-python tools/bench_local.py --compare             # 本机回归基准（不产出文档数字）
-python tools/accel_doctor.py                      # 设备探针 + 试分配 + 一次前向
-```
-- **段之和 ≠ 总耗时** → 先查「主循环三段」和**落在计时缝隙里的代码**（P72 就是为此加的）。
-- **单段随训练变长** → 该段的数据结构在长；用 `[ltm-diag]` 看规模。
-- **「只用 1 核」** → 多半是纯 Python 热点（GIL）。考虑 numba 化，但 ⚠ **小规模上 gather+prange
-  常是负收益**（实测 0.96×、0.84×、0.91×、0.73× 四次）：**先算核的固定开销，再在服务器规模上测**。
-- **「NPU 闲逛」** → 看 `nll_sync_every`、是否有隐式 `.item()` / pageable H2D。
-- **「读出占比 < 50%」** → 瓶颈已转移到 CPU 侧（PC 栈 / STDP / `big_ltm` 随机访问），继续优化读出精度收益有限。
-- ⚠ **x86 与昇腾方向相反的三个案例**：M1 fp32（x86 快 1.80× / 昇腾慢约 70×）、M2 融合核
-  （x86 快 1.15–2.16× / 昇腾慢 3–8×）、`OMP_PLACES=cores`（x86 无感 / 昇腾慢 8×）。
-  → 任何优化都要留一个 A/B 开关，让目标机器上一个 flag 就能复测。
+### 收尾清缓存（fhz 明确要求，不等提醒）
+
+清：`__pycache__`、`*.pyc`、`*.nbc`/`*.nbi`、`*_*.log`、`.tmp_*`、临时克隆目录。
+**保留**：`outputs/numba_cache`（numba 持久化编译缓存，冷启动 3.96s → 2.60s）、
+被文档引用的证据日志、数据集、生产模型产物（删前先确认）。
+
+---
+
+## 11. 三条最容易重犯的错误
+
+| 错误 | 后果 | 根治 |
+|---|---|---|
+| **补丁未落盘**（`str.replace` 无匹配静默成功） | 以为改了其实没改，测的是旧代码 | 每次 replace 后 `grep` 断言新文本存在 |
+| **改多行源码用 heredoc** | `\n` 变成真换行 → 语法错 | **只用 Edit/Write 工具** |
+| **形状断言代替数值对拍** | 权重被丢掉这类 bug 全程绿灯 | §2.3 / §6.1 的 A 层 |
+
+（第一条在 BUGS.md 里是**最高频家族**，5 次以上；第二条 3 次；第三条见 §3.5 的 `torch.equal` 事故。）

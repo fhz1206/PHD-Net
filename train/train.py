@@ -249,16 +249,21 @@ def main() -> None:
                          "但 forward 用的 fp8 副本越旧")
     ap.add_argument("--m2-kernel", default="serial",
                     choices=["serial", "fused", "plain"],
-                    help="P76：M2 推理核。**默认 plain**（原始 5 次核调用）——"
-                         "服务器 A/B 实测：fused 20-27 ms/tok vs plain 6.7-11.9"
-                         "（plain 快 3-4×，prange+fastmath 在昇腾退化）；x86 上 "
-                         "fused 快 2.1×，跨平台训练请按机器选择")
+                    help="P76/P99：M2 推理核。**默认 serial**（单核融合核）——"
+                         "服务器 A/B 实测：fused(prange) 20-27 ms/tok vs plain "
+                         "6.7-11.9（prange fork/join 屏障在昇腾上主导开销）；"
+                         "P99 因fused 慢 3-4× 而改出单核 serial 核。"
+                         "⚠ plain 走 _csr_matvec（**有**行级 prange，从未被否），"
+                         "是待服务器 A/B 的候选：M2_infer 占端到端 39%% 且跑单核，"
+                         "而进程只用 1.1/191 核。x86 上 fused 快 2.1×，跨平台请按机器选")
     ap.add_argument("--encoder-dtype", default="fp32",
                     choices=["fp32", "fp64", "fp16", "bf16"],
-                    help="P74/P75：M1 编码器权重存储精度（迭代恒 fp32）。"
-                         "**默认 fp64**：昇腾 aarch64 上 fp32 sgemv 实测慢约 70 倍"
-                         "（58 vs 0.85 ms/tok，该平台 sgemv 内核未针对此尺寸调优）；"
-                         "x86 上 fp32 快 1.80×，若在 x86 上训练可显式 --encoder-dtype fp32")
+                    help="P74/P75/P107：M1 编码器权重存储精度（迭代量恒 fp32）。"
+                         "**默认 fp32**：x86 上 fp32 比 fp64 快 1.80×；昇腾 aarch64 "
+                         "上两者都不慢——P77 的平台自适应 GEMV 核（_gemv_rows numba "
+                         "核）绕开了BLAS，故与 dtype 无关。"
+                         "注：库config.encoder_dtype 仍默认 fp64（形状参数默认），"
+                         "生产 CLI 覆盖为 fp32，两者不一致是事实")
     ap.add_argument("--numba-threads", type=int, default=8,
                     help="P62：numba prange 线程上限（0=用 numba 默认=全部核）。"
                          "服务器实测 191 核上主循环只用 1.3 核、CS/s 250 万+"
@@ -384,9 +389,11 @@ def main() -> None:
         _cap = capability_report(verbose=False)
         if _cap["accelerators_present"]:
             print(f"[capability] accelerator(s) detected {_cap['accelerators_present']}, "
-                  f"but production training runs on numba/CPU (numba only compiles to "
-                  f"CPU machine code); to use accelerators use the torch stack: "
-                  f"tools/train_torch_lm.py --device auto (weights not interchangeable)")
+                  f"but production training runs on numba/CPU for M1-M5 (numba only "
+                  f"compiles to CPU machine code); the readout (M6, ~89% of step "
+                  f"time) does run on the accelerator - see the [readout] backend "
+                  f"line below. No full-torch training stack exists (P30 removed "
+                  f"tools/train_torch_lm.py: it lacked 7 mechanisms incl. big_ltm)")
             try:
                 from phdnet.backends.accel_readout import resolve_accel_device
                 _rd = resolve_accel_device("auto")

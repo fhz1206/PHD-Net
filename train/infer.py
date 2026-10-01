@@ -218,8 +218,9 @@ def main() -> None:
                          "推理词表始终取自检查点；不一致即报错退出")
     ap.add_argument("--devices", type=str, default="auto",
                     help="设备探测（P14）：打印加速器清单与多卡计划。"
-                         "注意本入口为 numba CPU 生产路径（单路），"
-                         "多卡加速见 torch 栈 tools/train_torch_lm.py")
+                         "注意本入口推理为 numba CPU 生产路径（单路）；"
+                         "P30 已删除 torch 全栈（tools/train_torch_lm.py，缺 7 项机制），"
+                         "当前无可用的多卡/加速器推理轨")
     ap.add_argument("--lang", choices=["zh", "en"], default="zh",
                     help="终端输出语言（zh=默认全中文 / en=all English）")
     args = ap.parse_args()
@@ -244,8 +245,9 @@ def main() -> None:
                   f"{plan_parallel(devs, 0, 0)['strategy']}")
         _cap = capability_report(verbose=False)
         print(f"[infer] 本入口推理走 numba CPU 生产路径（numba 只能编译到 CPU 机器码；"
-              f"探测到的加速器 {_cap['accelerators_present'] or '无'} 仅 torch 栈可用）"
-              f"；多卡/加速器推理见 tools/train_torch_lm.py --devices auto，两者权重不通用。")
+              f"探测到的加速器 {_cap['accelerators_present'] or '无'} 仅训练时的读出段"
+              f"会用上——推理侧无加速轨：P30 已删除 torch 全栈"
+              f"（tools/train_torch_lm.py，缺 7 项机制含 big_ltm，权重亦不通用）。")
     except Exception as e:                                   # noqa: BLE001
         print(f"[infer] 设备探测不可用（{type(e).__name__}: {e}），"
               "按 CPU 单路继续。")

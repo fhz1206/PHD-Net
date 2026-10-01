@@ -135,6 +135,90 @@ def _main() -> int:
           r.returncode == 0 and "--remote-data" in r.stdout
           and "--remote-fraction" in r.stdout)
 
+    # P112：裸 `%` 让 --help 崩（ValueError: unsupported format character）已经
+    # 发生 **6 次**（BUGS #2 家族）。根因是 help 文本里的百分号被argparse 当成
+    # 旧式格式符（`_expand_help` 会做`help % params`）。单点门禁挡不住：每次
+    # 改别的参数都可能新引入一个裸 %。故加两条**全仓库**检查：
+    #   ① 静态扫所有 argparse 文件的 help 文本里的裸 %（非 %%、非 %s 等格式符）
+    #   ② 对每个有 argparse 的入口实际跑 --help
+    # 这两条是「整类问题」的闸门，而不是逐个参数的补丁。
+    import ast
+    import io
+    import re as _re
+
+    def _bare_percent_hits(path):
+        """返回该文件里 help 文本中的裸 % 位置（静态启发式）。"""
+        try:
+            tree = ast.parse(io.open(path, encoding="utf-8").read())
+        except SyntaxError:
+            return []
+        src = io.open(path, encoding="utf-8").read()
+        hits = []
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and getattr(node.func, "attr", "") == "add_argument"):
+                continue
+            for kw in node.keywords:
+                if kw.arg != "help":
+                    continue
+                # 取该 help 表达式的源码片段，检查字面量里的裸 %
+                seg = ast.get_source_segment(src, kw.value) or ""
+                # 去掉 %% 与合法格式符 %s %d %f %r %% 后，剩下的 % 即为裸
+                resid = _re.sub(r"%%|%[-+ #0-9.]*[sdrf]", "", seg)
+                if "%" in resid:
+                    ln = getattr(kw.value, "lineno", 0)
+                    hits.append(f"{path}:{ln}")
+        return hits
+
+    import glob as _glob
+    # ⚠ 排除本门禁自己（它也含 add_argument 调用文本，且 `__main__` 里会真跑
+    #   入口）——否则会自我递归调用把自己跑超时。
+    _SELF = os.path.abspath(__file__)
+    ap_files = [f for f in _glob.glob(str(_ROOT / "**" / "*.py"), recursive=True)
+                if "numba_cache" not in f and "datasets" not in f
+                and os.sep + "archive" + os.sep not in f
+                and os.path.abspath(f) != _SELF
+                and _re.search(r"add_argument", io.open(f, encoding="utf-8",
+                                                          errors="ignore").read())]
+    # ⚠ 静态检查只作**提示**，不作为门禁判据：AST 源码片段提取在「help= 文本
+    #   … % var」这种跨行格式化表达式上会漏掉 %s，产生误报（第一版就误报了
+    #   train.py:192的合法 `% MS_DATA_REPO`）。**真正的判据是下面那条实际跑
+    #   --help** —— 裸 % 必然让它崩，静态扫不准只是噪音。
+    all_hits = []
+    for f in ap_files:
+        all_hits += _bare_percent_hits(f)
+    if all_hits:
+        print(f"  · 静态提示（不参与判据）：疑似裸 % 于 "
+              f"{', '.join(os.path.relpath(h, str(_ROOT)) for h in all_hits[:5])}"
+              f" —— 请以实际 --help 是否通过为准")
+
+    # 实际跑每个入口的 --help
+    bad_help = []
+    for f in ap_files:
+        rel = os.path.relpath(f, str(_ROOT))
+        # 只跑看起来像入口的（有 __main__ 或顶层 argparse）
+        try:
+            txt = io.open(f, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            continue
+        if "__main__" not in txt:
+            continue
+        try:
+            rr = subprocess.run([sys.executable, f, "--help"],
+                                capture_output=True, text=True,
+                                cwd=str(_ROOT), timeout=120)
+        except subprocess.TimeoutExpired:
+            bad_help.append(f"{rel} (timeout)")
+            continue
+        if rr.returncode != 0:
+            tail = (rr.stderr or "").strip().splitlines()
+            bad_help.append(f"{rel} (exit={rr.returncode}"
+                            + (f": {tail[-1][:60]}" if tail else "") + ")")
+    _n2 = f"所有 argparse 入口 --help 均可执行（{len(ap_files)} 个候选文件）"
+    if bad_help:
+        _n2 += "← 失败: " + ", ".join(bad_help)
+    check(_n2, not bad_help)
+
     n_ok = sum(1 for _, ok in CASES if ok)
     print(f"\n通过 {n_ok}/{len(CASES)}")
     return 0 if n_ok == len(CASES) else 1
