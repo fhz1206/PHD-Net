@@ -252,7 +252,7 @@ def main() -> None:
                          "服务器 A/B 实测：fused 20-27 ms/tok vs plain 6.7-11.9"
                          "（plain 快 3-4×，prange+fastmath 在昇腾退化）；x86 上 "
                          "fused 快 2.1×，跨平台训练请按机器选择")
-    ap.add_argument("--encoder-dtype", default="fp64",
+    ap.add_argument("--encoder-dtype", default="fp32",
                     choices=["fp32", "fp64", "fp16", "bf16"],
                     help="P74/P75：M1 编码器权重存储精度（迭代恒 fp32）。"
                          "**默认 fp64**：昇腾 aarch64 上 fp32 sgemv 实测慢约 70 倍"
