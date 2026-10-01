@@ -3,296 +3,1305 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PHD-Net · 预测编码 × Hebbian × 双记忆网络</title>
+<title>PHD-Net 架构 3D 导览 · 预测编码 × Hebbian/STDP × 双记忆</title>
+<meta name="description" content="PHD-Net：完全不依赖自注意力的类脑神经网络架构。3D 交互式架构导览：M1 稀疏编码 / M2 预测编码主干 / M3 STDP / M4a 工作记忆 / M4b 大容量印迹 / M5 神经调制 / M6 读出。">
 <style>
-:root{
-  --bg:#0b0f16; --bg2:#111826; --card:#151d2c; --card2:#1b2436;
-  --line:#243044; --txt:#e6edf7; --dim:#9aa9bf; --dim2:#6f8098;
-  --cyan:#38bdf8; --teal:#2dd4bf; --purple:#a78bfa; --amber:#fbbf24;
-  --green:#34d399; --red:#f87171;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--txt);font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;line-height:1.7;-webkit-font-smoothing:antialiased}
-a{color:var(--cyan);text-decoration:none}
-.wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+  :root{
+    --bg:#04060f; --panel:rgba(10,16,32,.74); --line:rgba(120,160,255,.18);
+    --txt:#dce6f7; --muted:#8ea3c4; --dim:#64769a;
+    --m1:#57e6d9; --m2:#9d8bff; --m3:#ffb85c; --m4a:#6fe3a5; --m4b:#ffd166; --m5:#ff6fa5; --m6:#6ea8ff; --out:#ffffff;
+    --panel-top:188px; --badge-top:96px;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--txt);
+    font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased; line-height:1.7;
+  }
+  a{color:#9fc4ff; text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono); font-size:.9em; background:rgba(110,168,255,.10); border:1px solid var(--line);
+    padding:.08em .38em; border-radius:6px; color:#cfe0ff}
 
-nav{position:sticky;top:0;z-index:50;background:rgba(11,15,22,.9);border-bottom:1px solid var(--line)}
-nav .wrap{display:flex;align-items:center;gap:22px;height:54px;overflow-x:auto}
-nav .brand{font-weight:700;letter-spacing:.5px;white-space:nowrap}
-nav .brand span{color:var(--cyan)}
-nav a{color:var(--dim);font-size:14px;white-space:nowrap}
-nav a:hover{color:var(--txt)}
+  /* ============ HERO / 3D ============ */
+  #hero{position:relative; width:100%; height:100vh; height:100dvh; min-height:600px; overflow:hidden;
+    background:radial-gradient(120% 90% at 50% 10%, #0a1230 0%, #04060f 55%, #02030a 100%)}
+  #scene{position:absolute; inset:0; width:100%; height:100%; display:block}
+  .label-layer{position:absolute; inset:0; pointer-events:none; z-index:3}
+  .lbl{font-size:11.5px; letter-spacing:.02em; padding:3px 9px; border-radius:9px; white-space:nowrap;
+    background:rgba(5,10,24,.62); border:1px solid rgba(120,160,255,.22); color:var(--muted);
+    backdrop-filter:blur(6px); box-shadow:0 4px 18px rgba(0,0,0,.35)}
+  .lbl b{font-weight:600; font-size:12px}
+  .lbl span{opacity:.75; margin-left:6px}
 
-header{padding:60px 0 40px;border-bottom:1px solid var(--line);
-  background:radial-gradient(1000px 320px at 20% -10%,rgba(56,189,248,.15),transparent),
-             radial-gradient(800px 300px at 85% 0%,rgba(167,139,250,.13),transparent)}
-h1{font-size:36px;line-height:1.25;letter-spacing:-.5px}
-h1 em{font-style:normal;color:var(--cyan)}
-.sub{color:var(--dim);margin-top:14px;font-size:16px;max-width:780px}
-.tagline{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}
-.chip{font-size:12.5px;padding:5px 12px;border:1px solid var(--line);border-radius:999px;color:var(--dim);background:var(--bg2)}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-top:30px}
-.stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
-.stat b{display:block;font-size:25px;color:var(--cyan);letter-spacing:-.5px}
-.stat small{color:var(--dim2);font-size:12.5px;display:block;margin-top:4px}
+  .hud{position:absolute; z-index:5; top:0; left:0; right:0; padding:18px 22px; display:flex; gap:18px;
+    align-items:flex-start; justify-content:space-between; pointer-events:none}
+  .hud > *{pointer-events:auto}
+  .brand{display:flex; flex-direction:column; gap:6px; max-width:min(560px,60vw)}
+  .brand .kicker{font-size:11px; letter-spacing:.28em; text-transform:uppercase; color:var(--m6); opacity:.9}
+  .brand h1{margin:0; font-size:clamp(22px,3.1vw,38px); line-height:1.15; letter-spacing:.01em;
+    background:linear-gradient(96deg,#ffffff 10%,#a9c8ff 55%,#57e6d9 95%); -webkit-background-clip:text;
+    background-clip:text; color:transparent}
+  .brand p{margin:0; font-size:13.5px; color:var(--muted)}
+  .brand .tags{display:flex; flex-wrap:wrap; gap:6px; margin-top:4px}
+  .tag{font-size:11px; padding:3px 9px; border-radius:999px; border:1px solid var(--line);
+    background:rgba(110,168,255,.08); color:#bcd2f5}
+  .nav{display:flex; flex-wrap:wrap; gap:4px; justify-content:flex-end; max-width:46vw}
+  .nav a{font-size:12px; color:var(--muted); padding:6px 10px; border-radius:8px; border:1px solid transparent}
+  .nav a:hover{color:#fff; background:rgba(110,168,255,.12); border-color:var(--line); text-decoration:none}
 
-section{padding:48px 0;border-bottom:1px solid var(--line)}
-h2{font-size:23px;margin-bottom:6px;letter-spacing:-.3px}
-h2 .n{color:var(--dim2);font-weight:400;margin-right:8px;font-variant-numeric:tabular-nums}
-.lead{color:var(--dim);margin-bottom:22px;max-width:840px;font-size:15px}
-h3{font-size:17px;margin:26px 0 12px}
+  /* ---------- 左侧图例 / 控制面板 ---------- */
+  .legend{position:absolute; z-index:5; left:22px; top:var(--panel-top); width:230px;
+    max-height:calc(100% - var(--panel-top) - 122px);
+    overflow-y:auto; overflow-x:hidden; padding:11px 11px 12px; border-radius:14px; background:var(--panel);
+    border:1px solid var(--line); backdrop-filter:blur(10px); box-shadow:0 18px 50px rgba(0,0,0,.45);
+    scrollbar-width:none; -ms-overflow-style:none}
+  .legend::-webkit-scrollbar{width:0; height:0; display:none}
+  .legend h3{margin:1px 0 6px; font-size:11px; letter-spacing:.18em; color:var(--dim); text-transform:uppercase; font-weight:600}
+  .legend .read{margin:0 0 2px; font-size:10.5px; color:var(--dim); line-height:1.6}
+  .legend .read em{color:#9fe8ff; font-style:normal}
+  .lg-group{font-size:9.5px; letter-spacing:.16em; color:var(--dim); text-transform:uppercase; font-weight:600;
+    margin:11px 2px 3px; display:flex; align-items:center; gap:6px}
+  .lg-group::after{content:""; flex:1; height:1px; background:var(--line)}
+  .lg-item{display:flex; gap:8px; align-items:flex-start; width:100%; text-align:left; cursor:pointer;
+    background:transparent; border:1px solid transparent; border-radius:9px; padding:6px 7px; color:var(--txt);
+    font:inherit; font-size:12.5px; transition:.16s}
+  .lg-item:hover{background:rgba(110,168,255,.10); border-color:var(--line)}
+  .lg-item.on{background:rgba(110,168,255,.16); border-color:rgba(140,180,255,.4)}
+  .lg-dot{width:8px; height:8px; border-radius:50%; margin-top:5px; flex:0 0 auto; box-shadow:0 0 10px currentColor}
+  .lg-item small{display:block; color:var(--dim); font-size:10.5px; line-height:1.35}
 
-.grid{display:grid;gap:14px}
-.g2{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
-.g3{grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px}
-.card:hover{border-color:#2f3d55}
-.card h4{font-size:15.5px;margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.card .mod{font-size:11.5px;font-weight:700;color:var(--bg);background:var(--cyan);border-radius:5px;padding:2px 6px}
-.card p{color:var(--dim);font-size:14px}
-.card .brain{margin-top:10px;font-size:13px;color:var(--teal)}
-.card .brain b{color:var(--teal);font-weight:600}
-.sparse{display:inline-block;margin-top:10px;font-size:12.5px;color:var(--amber);
-  border:1px solid rgba(251,191,36,.35);background:rgba(251,191,36,.1);border-radius:6px;padding:3px 8px}
-.sparse.bad{color:var(--red);border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.1)}
+  /* 速度调节 */
+  .speed{margin-top:1px}
+  .speed-top{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:5px}
+  .speed-top span{font-size:10.5px; color:var(--dim); letter-spacing:.06em}
+  .speed-top b{font-family:var(--mono); font-size:14px; color:#9fe8ff; font-weight:600}
+  input[type=range]{-webkit-appearance:none; appearance:none; width:100%; height:20px; background:transparent;
+    cursor:pointer; margin:0; display:block}
+  input[type=range]::-webkit-slider-runnable-track{height:4px; border-radius:99px;
+    background:linear-gradient(90deg,#57e6d9 0%,#6ea8ff var(--p,50%),rgba(120,160,255,.16) var(--p,50%),rgba(120,160,255,.16) 100%)}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none; width:14px; height:14px; margin-top:-5px;
+    border-radius:50%; background:#eaf6ff; border:2px solid #57e6d9; box-shadow:0 0 12px rgba(87,230,217,.6)}
+  input[type=range]::-moz-range-track{height:4px; border-radius:99px; background:rgba(120,160,255,.16)}
+  input[type=range]::-moz-range-progress{height:4px; border-radius:99px; background:linear-gradient(90deg,#57e6d9,#6ea8ff)}
+  input[type=range]::-moz-range-thumb{width:12px; height:12px; border-radius:50%; background:#eaf6ff; border:2px solid #57e6d9}
+  .speed-scale{display:flex; justify-content:space-between; font-family:var(--mono); font-size:9px; color:#4d5f80; margin-top:-1px}
+  .speed-presets{display:flex; gap:5px; margin-top:8px}
+  .sp-btn{flex:1; font:inherit; font-size:11px; color:var(--muted); background:rgba(110,168,255,.06); cursor:pointer;
+    border:1px solid var(--line); border-radius:8px; padding:5px 0; transition:.15s}
+  .sp-btn:hover{color:#fff; background:rgba(110,168,255,.16)}
+  .sp-btn.on{color:#04121a; background:linear-gradient(180deg,#8fe9ff,#57e6d9); border-color:transparent; font-weight:600}
 
-table{width:100%;border-collapse:collapse;font-size:14px}
-th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
-th{color:var(--dim2);font-weight:600;font-size:12.5px;letter-spacing:.4px}
-td b{color:var(--txt)}
-.ok{color:var(--green)}
-.bad{color:var(--red)}
-.note{color:var(--dim2);font-size:12.5px;margin-top:10px}
-.rules{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px}
-.rule{padding:12px 0;border-bottom:1px dashed var(--line)}
-.rule:last-child{border-bottom:none}
-.rule .name{color:var(--txt);font-weight:600;font-size:15px}
-.rule .desc{color:var(--dim);font-size:14px;margin-top:4px}
-.rule code{color:var(--amber);font-family:ui-monospace,Consolas,monospace;font-size:13px}
+  .detail{position:absolute; z-index:5; right:22px; top:var(--panel-top); width:330px;
+    max-height:calc(100% - var(--panel-top) - 122px);
+    overflow:auto; padding:16px 16px 14px; border-radius:14px; background:var(--panel); border:1px solid var(--line);
+    backdrop-filter:blur(10px); box-shadow:0 18px 50px rgba(0,0,0,.45); scrollbar-width:none; -ms-overflow-style:none}
+  .detail::-webkit-scrollbar{width:0; height:0; display:none}
+  .detail .d-kick{font-size:10.5px; letter-spacing:.2em; color:var(--dim); text-transform:uppercase}
+  .detail h2{margin:4px 0 2px; font-size:19px}
+  .detail .d-cog{font-size:12px; color:var(--m1); margin-bottom:10px}
+  .detail p{font-size:12.8px; color:#c3d2ea; margin:0 0 12px}
+  .d-row{display:flex; gap:8px; font-size:12px; padding:6px 0; border-top:1px solid rgba(120,160,255,.12)}
+  .d-row b{flex:0 0 62px; color:var(--dim); font-weight:600; font-size:11px; padding-top:2px}
+  .d-row span{color:#c9d8f2}
+  .detail .d-hint{margin-top:10px; font-size:11px; color:var(--dim)}
+  .d-close{position:absolute; top:10px; right:12px; background:transparent; border:0; color:var(--dim);
+    font-size:18px; cursor:pointer; line-height:1}
+  .d-close:hover{color:#fff}
 
-.docs{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px}
-.doc{display:block;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;color:var(--txt)}
-.doc:hover{border-color:var(--cyan)}
-.doc small{display:block;color:var(--dim2);font-size:12.5px;margin-top:4px}
-footer{padding:32px 0;color:var(--dim2);font-size:13px}
-@media(max-width:640px){h1{font-size:27px}}
+  .dock{position:absolute; z-index:5; left:50%; transform:translateX(-50%); bottom:22px; display:flex;
+    gap:6px; flex-wrap:wrap; justify-content:center; padding:8px; border-radius:14px;
+    background:var(--panel); border:1px solid var(--line); backdrop-filter:blur(10px); max-width:min(960px,94vw)}
+  .pill{font:inherit; font-size:12px; color:var(--muted); background:rgba(110,168,255,.06); cursor:pointer;
+    border:1px solid var(--line); border-radius:999px; padding:6px 13px; transition:.15s; white-space:nowrap}
+  .pill:hover{color:#fff; background:rgba(110,168,255,.16)}
+  .pill.on{color:#04121a; background:linear-gradient(180deg,#8fe9ff,#57e6d9); border-color:transparent; font-weight:600}
+  .tele{position:absolute; z-index:5; left:22px; bottom:22px; font-family:var(--mono); font-size:11px;
+    color:var(--dim); background:rgba(5,10,24,.55); border:1px solid var(--line); border-radius:10px;
+    padding:9px 11px; line-height:1.85; backdrop-filter:blur(6px)}
+  .tele b{color:#9fe8ff; font-weight:600}
+  .tele .k{color:#ffd166}
+  .scrollcue{position:absolute; z-index:5; right:24px; bottom:26px; font-size:11.5px; color:var(--dim);
+    display:flex; align-items:center; gap:7px}
+  .scrollcue i{width:1px; height:26px; background:linear-gradient(180deg,transparent,#6ea8ff); display:block;
+    animation:cue 1.8s ease-in-out infinite}
+  @keyframes cue{0%,100%{opacity:.25; transform:translateY(-4px)}50%{opacity:1; transform:translateY(4px)}}
+  #tip{position:absolute; z-index:6; pointer-events:none; opacity:0; transition:opacity .12s; transform:translate(12px,-50%);
+    background:rgba(6,12,26,.92); border:1px solid var(--line); border-radius:10px; padding:7px 10px; font-size:12px;
+    color:#dbe7fb; max-width:240px; box-shadow:0 10px 30px rgba(0,0,0,.5)}
+  #tip b{display:block; font-size:12.5px}
+  #tip small{color:var(--dim)}
+  .badge-schematic{position:absolute; z-index:5; right:22px; top:var(--badge-top); font-size:10.5px; color:#8fe9ff;
+    border:1px dashed rgba(87,230,217,.4); border-radius:8px; padding:4px 9px; background:rgba(5,10,24,.5)}
+
+  /* ============ 正文 ============ */
+  main{max-width:1080px; margin:0 auto; padding:0 22px 90px}
+  section{padding:64px 0 8px; scroll-margin-top:20px}
+  .sec-kick{font-size:11px; letter-spacing:.26em; text-transform:uppercase; color:var(--m6); margin-bottom:8px}
+  h2.sec-title{font-size:clamp(21px,2.6vw,29px); margin:0 0 10px; letter-spacing:.01em}
+  .sec-lead{color:var(--muted); font-size:14.5px; max-width:80ch; margin:0 0 26px}
+  .grid{display:grid; gap:14px}
+  .g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+  @media(max-width:900px){.g3,.g4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media(max-width:620px){.g2,.g3,.g4{grid-template-columns:1fr}}
+  .card{background:linear-gradient(180deg,rgba(13,21,42,.85),rgba(8,13,28,.85)); border:1px solid var(--line);
+    border-radius:16px; padding:18px 18px 16px; position:relative; overflow:hidden}
+  .card::before{content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--ac,#6ea8ff); opacity:.85}
+  .card h3{margin:0 0 6px; font-size:16.5px; display:flex; align-items:center; gap:8px}
+  .card h3 .chip{font-family:var(--mono); font-size:11px; color:var(--ac,#6ea8ff); border:1px solid var(--line);
+    border-radius:6px; padding:1px 6px; background:rgba(110,168,255,.08)}
+  .card .cog{font-size:12px; color:var(--ac,#6ea8ff); opacity:.95; margin-bottom:8px}
+  .card p{font-size:13px; color:#c1d0e9; margin:0 0 10px}
+  .card .meta{font-size:11.5px; color:var(--dim); border-top:1px dashed var(--line); padding-top:8px;
+    display:flex; flex-direction:column; gap:3px}
+  .card .meta b{color:#a9bcd9; font-weight:600}
+  .law .num{font-family:var(--mono); font-size:12px; color:var(--m5); letter-spacing:.1em}
+
+  table{width:100%; border-collapse:collapse; font-size:13px; margin:6px 0 4px}
+  th,td{text-align:left; padding:9px 11px; border-bottom:1px solid rgba(120,160,255,.12); vertical-align:top}
+  th{font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--dim); font-weight:600}
+  td b{color:#e6eeff}
+  td .mono{font-family:var(--mono); font-size:12px; color:#9fe8ff}
+  tr.total td{background:rgba(110,168,255,.07); font-weight:600}
+  .bar{height:7px; border-radius:99px; background:rgba(120,160,255,.12); overflow:hidden; min-width:70px}
+  .bar i{display:block; height:100%; border-radius:99px}
+
+  .flow{display:flex; flex-wrap:wrap; gap:8px; align-items:stretch; margin:8px 0 4px}
+  .stage{flex:1 1 150px; min-width:140px; background:rgba(13,21,42,.8); border:1px solid var(--line);
+    border-radius:12px; padding:11px 12px; font-size:12px; color:#c1d0e9; position:relative}
+  .stage b{display:block; font-size:13px; color:#eaf1ff; margin-bottom:3px}
+  .stage small{color:var(--dim); font-family:var(--mono); font-size:10.5px}
+  .arrow{align-self:center; color:var(--dim); font-size:15px}
+
+  pre{margin:0; background:#060b18; border:1px solid var(--line); border-radius:14px; padding:16px 18px;
+    overflow:auto; font-family:var(--mono); font-size:12.5px; line-height:1.75; color:#cfe0ff}
+  pre .c{color:#5f7396}
+  pre .k{color:#8fe9ff}
+  ul.tight{margin:8px 0 0; padding-left:20px; font-size:13.5px; color:#c1d0e9}
+  ul.tight li{margin:5px 0}
+  .note{border-left:3px solid var(--m3); background:rgba(255,184,92,.07); border-radius:0 12px 12px 0;
+    padding:12px 15px; font-size:13px; color:#e3d3b8; margin:16px 0}
+  .note.warn{border-color:var(--m5); background:rgba(255,111,165,.07); color:#f0d3de}
+  .note.ok{border-color:var(--m4a); background:rgba(111,227,165,.07); color:#cfe9da}
+  footer{border-top:1px solid var(--line); padding:26px 22px 40px; text-align:center; color:var(--dim); font-size:12px}
+  .kbd{font-family:var(--mono); font-size:11px; border:1px solid var(--line); border-bottom-width:2px;
+    border-radius:6px; padding:1px 6px; color:#bcd2f5; background:rgba(110,168,255,.08)}
+
+  @media(max-width:860px){
+    .legend{top:auto; bottom:96px; left:12px; width:206px; max-height:44vh}
+    .detail{top:auto; bottom:96px; right:12px; left:12px; width:auto; max-height:44vh}
+    .badge-schematic{top:auto; display:none}
+    .tele{display:none}
+    .nav{display:none}
+    .scrollcue{display:none}
+  }
 </style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
 </head>
 <body>
 
-<nav>
-  <div class="wrap">
-    <div class="brand">PHD<span>-Net</span></div>
-    <a href="#pos">定位</a>
-    <a href="#mech">六机制</a>
-    <a href="#sparse">稀疏性</a>
-    <a href="#laws">铁律</a>
-    <a href="#docs">文档</a>
-  </div>
-</nav>
+<!-- ================= 3D HERO ================= -->
+<section id="hero">
+  <canvas id="scene"></canvas>
 
-<header>
-  <div class="wrap">
-    <h1>预测编码 × Hebbian × 双记忆<br><em>一个完全不依赖自注意力的类脑架构</em></h1>
-    <p class="sub">PHD-Net 把「关联」交给突触局部可塑性（STDP）、把「记忆」交给事件驱动的稀疏突触表
-    （海马快印迹 + 皮层慢巩固）、把「抽象」交给预测编码层级——全程无自注意力、无位置编码、无堆叠层，
-    每个机制都有明确的神经认知对应，<b>稀疏性是架构原则而不是优化手段</b>。</p>
-    <div class="tagline">
-      <span class="chip">无 Self-Attention</span>
-      <span class="chip">无位置编码</span>
-      <span class="chip">无堆叠层</span>
-      <span class="chip">无反向传播（学习规则全部局部化）</span>
-      <span class="chip">事件驱动稀疏计算</span>
+  <header class="hud">
+    <div class="brand">
+      <div class="kicker">Brain-inspired Architecture · Interactive 3D</div>
+      <h1>PHD-Net 架构 3D 导览</h1>
+      <p><b>预测编码 × Hebbian/STDP × 双记忆</b>——一个完全不依赖自注意力的类脑模型。逐 token 流式训练，学习规则全部局部化（无反向传播），计算事件驱动稀疏。</p>
+      <div class="tags">
+        <span class="tag">无自注意力 / 位置编码 / 无堆叠层</span>
+        <span class="tag">逐 token 流式</span>
+        <span class="tag">Python + numba + PyTorch/昇腾 NPU</span>
+        <span class="tag">总容量 ≈ 1.37e9</span>
+      </div>
     </div>
-    <div class="stats">
-      <div class="stat"><b>394.4687 / 359.2603</b><small>字符归一 PPL 锚点（默认 256 维栈 / eta_readout=0.15；分别为 4,000 字符段与全语料 21,924 字符口径，bpc 8.624 / 8.489；评测语料 2026-09-28 更换，旧口径不可混用）</small></div>
-      <div class="stat"><b>1.317e9</b><small>1B 档总突触参数容量（容量上限口径，非已用量；M4b 大空间表 2²⁴×72 ≈ 1.208e9 占 ≈88%，稠密读出 ≈11.6%，编码器 ≈0.16%）</small></div>
-      <div class="stat"><b>12.5% / 1.56%</b><small>M2 预测编码主干 CSR 连接率（conn_k=128 / n_in=1024）与 M3 STDP 稀疏拓扑连接率（16 出边 / 1024）；M4b 为事件驱动，M1 输出 12.5% 稀疏</small></div>
-      <div class="stat"><b>20–110 ms/tok</b><small>1B 档实测区间（昇腾 191 核 + NPU；本轮修平台差异期间波动大。全部性能数字与口径见《性能评估与迭代方案.md》）</small></div>
-    </div>
-  </div>
-</header>
+    <nav class="nav" id="nav">
+      <a href="#laws">四条铁律</a>
+      <a href="#mechanisms">六机制</a>
+      <a href="#capacity">容量账</a>
+      <a href="#flow">数据流</a>
+      <a href="#precision">精度</a>
+      <a href="#perf">性能</a>
+      <a href="#quickstart">快速开始</a>
+      <a href="#structure">代码结构</a>
+      <a href="#terms">术语</a>
+    </nav>
+  </header>
 
-<section id="pos">
-  <div class="wrap">
-    <h2><span class="n">01</span>它解决什么问题</h2>
-    <p class="lead">Transformer 把「关联」建模为全局成对相似度（QKᵀ，O(T²·d)）、把「记忆」建模为无学习的
-    KV 缓存、把「学习」寄托于非局部的反向传播。这三点都与生物智能的工作方式相去甚远，PHD-Net 逐条换成了类脑机制。</p>
-    <div class="grid g3">
-      <div class="card"><h4>突触局部可塑性</h4><p>每个突触只看自己两端，无需全局梯度</p><p class="brain"><b>对应</b>：全部学习规则局部化，无反向传播</p></div>
-      <div class="card"><h4>稀疏放电</h4><p>皮层任一时刻仅约 1–5% 神经元活跃，计算随活跃度而非总规模增长</p><p class="brain"><b>对应</b>：k-WTA 稀疏编码（SDR）+ 结构性稀疏连接</p></div>
-      <div class="card"><h4>双系统记忆</h4><p>海马快速一次性印迹，皮层缓慢统计巩固（互补学习系统 CLS）</p><p class="brain"><b>对应</b>：事件驱动稀疏表 + 双速率巩固</p></div>
-      <div class="card"><h4>有限容量工作记忆</h4><p>前额叶有限槽位，基底核门控决定「什么值得记住」</p><p class="brain"><b>对应</b>：有界槽位工作记忆 + 调制门控</p></div>
-      <div class="card"><h4>层级预测</h4><p>高层级向低层级发预测，低层级只上传预测误差（自由能原理）</p><p class="brain"><b>对应</b>：生成-识别闭环的预测编码层级</p></div>
-      <div class="card"><h4>神经调制</h4><p>DA / NE / ACh 依意外与奖赏门控可塑性与编码-检索切换</p><p class="brain"><b>对应</b>：surprise z 分数全局调制标量</p></div>
+  <div class="badge-schematic">亮点 = 此刻正在计算的神经元</div>
+
+  <aside class="legend" id="legend">
+    <h3>模块图例</h3>
+    <div class="read">
+      <em>亮点</em> = token 流过时正在计算的神经元；<em>暗点</em> = 存在但本步未参与。<br>
+      金色流点 = M3 突触迹，只沿 token 走过的通路流动；底部网格 = M4b 印迹表，点亮即被写入。<br>
+      拖拽旋转 · 滚轮缩放 · 点击模块看详情。
     </div>
+
+    <div class="lg-group">主干路径</div>
+    <div id="legendMain"></div>
+
+    <div class="lg-group">记忆与学习</div>
+    <div id="legendMem"></div>
+
+    <div class="lg-group">动画速度</div>
+    <div class="speed">
+      <div class="speed-top"><span>token 流过速度</span><b id="speedVal">1.0×</b></div>
+      <input type="range" id="speedRange" min="0.2" max="3" step="0.1" value="1" aria-label="动画速度">
+      <div class="speed-scale"><span>0.2×</span><span>1×</span><span>3×</span></div>
+      <div class="speed-presets">
+        <button class="sp-btn" data-s="0.35">🐢 慢</button>
+        <button class="sp-btn on" data-s="1">常速</button>
+        <button class="sp-btn" data-s="2.5">⚡ 快</button>
+      </div>
+    </div>
+  </aside>
+
+  <aside class="detail" id="detail" hidden>
+    <button class="d-close" id="dClose" aria-label="关闭">×</button>
+    <div class="d-kick" id="dKick">MODULE</div>
+    <h2 id="dTitle">—</h2>
+    <div class="d-cog" id="dCog">—</div>
+    <p id="dDesc">—</p>
+    <div class="d-row"><b>实现</b><span id="dImpl">—</span></div>
+    <div class="d-row"><b>规模</b><span id="dScale">—</span></div>
+    <div class="d-hint">再次点击空白处或其它模块可切换 · <span class="kbd">Esc</span> 取消选择</div>
+  </aside>
+
+  <div class="dock">
+    <button class="pill on" id="btnRotate">⟳ 自动旋转</button>
+    <button class="pill on" id="btnFlow">token 流</button>
+    <button class="pill on" id="btnLinks">活跃通路</button>
+    <button class="pill" id="btnPause">⏸ 暂停</button>
+    <button class="pill" id="btnReset">重置视角</button>
   </div>
+
+  <div class="tele" id="tele">
+    <div>token 流过 <b id="tTok">0</b> · FPS <b id="tFps">–</b></div>
+    <div>M4b 印迹点亮 <b id="tLtm">0</b> 格</div>
+  </div>
+
+  <div class="scrollcue">向下滚动看完整架构<i></i></div>
+  <div id="tip"></div>
 </section>
 
-<section id="mech">
-  <div class="wrap">
-    <h2><span class="n">02</span>六机制与神经认知对应</h2>
-    <p class="lead">每个机制都必须说得出对应的真实神经现象——这是准入条件，不是事后修饰。
-    认知层（M7–M13：词汇涌现、情景缓冲、语义关联图、分层摘要、生成解码、联想链推理、上下文漂移记忆）
-    在六机制之上覆盖 LLM 的四项核心功能。</p>
+<!-- ================= 正文 ================= -->
+<main>
+
+  <section id="overview">
+    <div class="sec-kick">Overview</div>
+    <h2 class="sec-title">它是什么</h2>
+    <p class="sec-lead">PHD-Net 是一个用 NumPy/Numba 实现、可跑到 PyTorch / 昇腾 NPU 上的类脑语言模型架构：预测编码提供表示，Hebbian/STDP 提供局部学习，工作记忆 + 大容量印迹表提供长程依赖。<b>唯一的注意力机制是不存在的</b>——长程依赖由记忆机制承担，而不是架构 shortcuts。</p>
+    <div class="grid g4">
+      <div class="card" style="--ac:var(--m1)"><h3>无自注意力</h3><p>禁自注意力 / 位置编码 / 堆叠层。长程依赖交给 M4a/M4b 记忆机制。</p></div>
+      <div class="card" style="--ac:var(--m2)"><h3>局部学习</h3><p>Hebbian / STDP 全部局部化，没有反向传播，也没有全局损失对权重的梯度。</p></div>
+      <div class="card" style="--ac:var(--m4b)"><h3>事件驱动</h3><p>只触碰活跃通路；每步计算量只正比于活跃神经元数，与 1B 总容量解耦。</p></div>
+      <div class="card" style="--ac:var(--m6)"><h3>逐 token 语义</h3><p>一次前向 = 一个 token，状态跨 token / 分片 / epoch 连续演化，W 每步原地更新。</p></div>
+    </div>
+  </section>
+
+  <section id="laws">
+    <div class="sec-kick">Four Iron Laws</div>
+    <h2 class="sec-title">四条铁律</h2>
+    <p class="sec-lead">这不是风格偏好，是写进仓库的架构约束。任何新部件都要先过这四关。</p>
     <div class="grid g2">
-      <div class="card">
-        <h4><span class="mod">M1</span>稀疏分布式编码</h4>
-        <p>输入经感受野投影后做 k-WTA 竞争，只保留 top-k 胜者得到 SDR。相似输入 → 重叠支撑集，
-        这是稀疏分布式编码承载泛化的方式。</p>
-        <p class="brain"><b>大脑</b>：初级感觉皮层稀疏放电 + SST/PV 中间神经元侧抑制与 WTA 竞争</p>
-        <span class="sparse">稀疏性：输出 12.5% 活跃（k-WTA）</span>
+      <div class="card law" style="--ac:var(--m5)"><div class="num">LAW 01</div><h3>禁自注意力 / 位置编码 / 堆叠层</h3><p>长程依赖由记忆机制承担，不由架构 shortcuts 承担。人脑没有全局 softmax，也不需要它。</p></div>
+      <div class="card law" style="--ac:var(--m5)"><div class="num">LAW 02</div><h3>每个机制必须有神经认知对应</h3><p>不接受「工程上好用但无认知对应」的部件。六机制各有一条脑科学依据（见下表）。</p></div>
+      <div class="card law" style="--ac:var(--m5)"><div class="num">LAW 03</div><h3>逐 token 语义，不允许批处理</h3><p>状态跨 token / 跨分片 / 跨 epoch 连续演化，读出 W 每步原地更新。这是语义约束，不是性能取舍。</p></div>
+      <div class="card law" style="--ac:var(--m5)"><div class="num">LAW 04</div><h3>行为变更走 config 开关，默认关闭</h3><p>新增行为一律以 config 开关承载且默认关闭；例外仅两个：<code>csr_online</code> / <code>k_sparse</code> 默认开启。</p></div>
+    </div>
+  </section>
+
+  <section id="mechanisms">
+    <div class="sec-kick">Six Mechanisms</div>
+    <h2 class="sec-title">六机制速览</h2>
+    <p class="sec-lead">每个机制都对应一类神经认知现象，并落到具体文件。稀疏性是架构原则，不只是优化：人脑长程连接率约 2e-8、平均每神经元约 1744 条突触；本项目 M2 = 12.5%、M3 = 1.56%、M4b = 事件驱动、M1 输出 k-WTA 12.5%。</p>
+    <div class="grid g3">
+      <div class="card" style="--ac:var(--m1)"><h3><span class="chip">M1</span>稀疏编码器</h3><div class="cog">皮层稀疏发放 + 侧抑制 WTA</div><p>把组合输入编码成稀疏分布式表示（SDR），每步只点亮约 1/8 的神经元，侧抑制完成竞争。另有无词典分词的 M7 词涌现，给出词级 SDR。</p><div class="meta"><span><b>实现</b> phdnet/sparse_encoder.py</span><span><b>稀疏性</b> k-WTA，输出 12.5% 活跃</span></div></div>
+      <div class="card" style="--ac:var(--m2)"><h3><span class="chip">M2</span>预测编码主干</h3><div class="cog">dense representation + sparse connectivity</div><p>不堆层、不自注意力。每层基于当前表示预测下一表示，预测误差驱动更新；连接以 CSR 结构性稀疏存储，不存在的突触不存储、不计算。</p><div class="meta"><span><b>实现</b> phdnet/sparse_pc.py（SparsePCStack）</span><span><b>稀疏性</b> 12.5% 连接率，4 层</span></div></div>
+      <div class="card" style="--ac:var(--m3)"><h3><span class="chip">M3</span>STDP 时序预测</h3><div class="cog">稀疏拓扑突触迹</div><p>局部学习规则：发放时间序决定突触增强 / 抑制，突触迹沿活跃通路累积，是 "fire together, wire together" 的算术形式。无反向传播。</p><div class="meta"><span><b>实现</b> phdnet/plasticity.py + stdp_kernels.py</span><span><b>稀疏性</b> 1.56% 连接率，m_lateral=16</span></div></div>
+      <div class="card" style="--ac:var(--m4a)"><h3><span class="chip">M4a</span>工作记忆</h3><div class="cog">WM 锚定</div><p>跨 token 保持当前上下文的锚点，让预测带有「此刻在意什么」的偏置。容量小、生命周期短。</p><div class="meta"><span><b>实现</b> phdnet/wm.py</span><span><b>稀疏性</b> —</span></div></div>
+      <div class="card" style="--ac:var(--m4b)"><h3><span class="chip">M4b</span>大容量长期记忆</h3><div class="cog">长程印迹 · 事件驱动稀疏表</div><p>2<sup>24</sup> 神经元 × 72 出边上限的事件驱动印迹表，随经验生长而非构建即存在。每步计算量只正比于活跃神经元数。</p><div class="meta"><span><b>实现</b> phdnet/bigltm.py + sparse_table.py</span><span><b>稀疏性</b> 1.208e9 容量，≈88% 总容量</span></div></div>
+      <div class="card" style="--ac:var(--m5)"><h3><span class="chip">M5</span>神经调制</h3><div class="cog">surprise z 分数门控 / 四通道</div><p>用预测误差的 z 分数（意外程度）门控学习与写入：意外大时多学、符合预期时少动，四通道对应不同调质功能。</p><div class="meta"><span><b>实现</b> phdnet/modulator.py</span><span><b>稀疏性</b> —</span></div></div>
+    </div>
+    <div class="note warn">
+      <b>稀疏化已落地，但仍是欠账：</b>M6 读出<b>已稀疏化</b>——<code>--readout-conn-k</code> 默认 <b>128</b>（每输出单元 128 条入边 =<b>4.2% 连接率</b>，词表 73,958 × 4.2%），访存从稠密 fp32 的 866.7&nbsp;MiB 降到 <b>113.6&nbsp;MB</b>（<b>8.0×</b>，含列索引开销），且已在加速器上实现均匀 k 的 gather-GEMV（读出真正跑在 NPU 上）。<b>但它仍是均匀 k-conn，不是幂律异质分配</b>——幂律分配器（<code>phdnet/sparse_alloc.py</code>）已实现但<b>未接入</b>读出，加速器对非均匀行宽 fail-fast。与人脑 ~2e-8 连接率仍差约 <b>6 个数量级</b>。
+    </div>
+  </section>
+
+  <section id="capacity">
+    <div class="sec-kick">Capacity Ledger</div>
+    <h2 class="sec-title">容量账（1B 档，<code>--preset 1b</code>，width=1024）</h2>
+    <p class="sec-lead">「1B」= <b>总突触参数容量 ≥ 1.0×10⁹</b>（容量上限口径，非已用量）。启动时由 <code>train_1b/config_1b.py::capacity_report()</code> 打印验算表。</p>
+    <div class="card" style="--ac:var(--m4b); padding:8px 18px 14px">
+      <table>
+        <thead><tr><th>组成</th><th>规模</th><th>占比</th><th style="width:32%">容量条</th></tr></thead>
+        <tbody>
+          <tr><td><b>M4b</b> 大空间事件驱动表</td><td class="mono">2²⁴ × 72 = 1,207,959,552</td><td>≈ 99.2%</td><td><div class="bar"><i style="width:88%;background:linear-gradient(90deg,#ffd166,#ffb85c)"></i></div></td></tr>
+          <tr><td><b>M6</b> 读出（稀疏 k=128）</td><td class="mono">6,651,136<br><span style="opacity:.6">稠密等价 159,627,264</span></td><td>计入固定侧</td><td><div class="bar"><i style="width:6%;background:linear-gradient(90deg,#6ea8ff,#9d8bff)"></i></div></td></tr>
+          <tr><td><b>M1</b> 编码器</td><td class="mono">2,098,176</td><td>计入固定侧</td><td><div class="bar"><i style="width:2%;background:linear-gradient(90deg,#57e6d9,#6fe3a5)"></i></div></td></tr>
+          <tr><td><b>M2 / M3</b> 主干 CSR / STDP 核</td><td class="mono">524,288 / 16,384</td><td>计入固定侧</td><td><div class="bar"><i style="width:1%;background:linear-gradient(90deg,#9d8bff,#ff6fa5)"></i></div></td></tr>
+          <tr><td><b>固定突触小计</b></td><td class="mono">9,289,984</td><td>≈ 0.8%</td><td><div class="bar"><i style="width:1%;background:linear-gradient(90deg,#57e6d9,#6ea8ff)"></i></div></td></tr>
+          <tr class="total"><td>总容量<br><span style="opacity:.6;font-weight:400">（生产配置 conn_k=128）</span></td><td class="mono">≈ 1.217e9</td><td>100%</td><td><div class="bar"><i style="width:100%;background:linear-gradient(90deg,#57e6d9,#6ea8ff,#ff6fa5)"></i></div></td></tr>
+        </tbody>
+      </table>
+      <ul class="tight">
+        <li><b>容量 ≠ 已用量</b>：M4b 突触不是构建即存在，而是随经验生长（"fire together, wire together"）；<code>count_params</code> 计的是已生长突触数，训练初期利用率低。</li>
+        <li><b>算力解耦</b>：每步计算量只正比于活跃神经元数（事件驱动），与 1B 总容量无关。</li>
+        <li>1.317e9 是 <code>big_ltm_m=60</code> 时代的旧值，已作废；现行 <code>big_m=72</code>。</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="flow">
+    <div class="sec-kick">Data Flow</div>
+    <h2 class="sec-title">一个 token 的旅程</h2>
+    <p class="sec-lead">3D 视图左侧到右侧就是这条路径。记忆机制（M3/M4a/M4b/M5）不是旁路装饰，而是长程依赖与学习信号的来源。</p>
+    <div class="flow">
+      <div class="stage"><b>语料</b><small>corpus_stream · SFT 掩码</small></div><div class="arrow">→</div>
+      <div class="stage"><b>分词 / onehot</b><small>tokenizer_core · fp16 缓冲</small></div><div class="arrow">→</div>
+      <div class="stage" style="border-color:rgba(87,230,217,.4)"><b>M1 稀疏编码</b><small>k-WTA · SDR</small></div><div class="arrow">→</div>
+      <div class="stage" style="border-color:rgba(157,139,255,.4)"><b>M2 四层预测编码</b><small>CSR 主干</small></div><div class="arrow">→</div>
+      <div class="stage" style="border-color:rgba(110,168,255,.4)"><b>M6 读出</b><small>感知器 + softmax</small></div><div class="arrow">→</div>
+      <div class="stage"><b>下一 token</b><small>infer.py --chat</small></div>
+    </div>
+    <div class="grid g4" style="margin-top:14px">
+      <div class="card" style="--ac:var(--m3)"><h3>M3 沿通路写迹</h3><p>token 经过的连路上，突触迹按发放时序累积，决定后续权重更新方向。</p></div>
+      <div class="card" style="--ac:var(--m4a)"><h3>M4a 提供锚点</h3><p>工作记忆给当前上下文一个锚，让预测有短期偏置。</p></div>
+      <div class="card" style="--ac:var(--m4b)"><h3>M4b 按事件生长</h3><p>被激活的印迹格才存在、才被计算，长程依赖从这里来。</p></div>
+      <div class="card" style="--ac:var(--m5)"><h3>M5 按 surprise 门控</h3><p>预测误差的 z 分数调制学习强度与写入概率。</p></div>
+    </div>
+  </section>
+
+  <section id="precision">
+    <div class="sec-kick">Precision</div>
+    <h2 class="sec-title">精度口径</h2>
+    <p class="sec-lead">这个项目对精度的取舍理由几乎都与「学习」而非「省显存」有关，而且随硬件平台变化——x86 与昇腾的加速方向常常相反，不可混用。</p>
+    <div class="grid g2">
+      <div class="card" style="--ac:var(--m6)">
+        <h3>读出：<b>fp32</b>（默认）—— 低精度会破坏学习规则</h3>
+        <p>取舍理由是<b>学习正确性</b>，不是访存收益。感知器 <code>p − t</code> 的<b>非目标行</b>更新量 ≈1e-6，被低精度舍入吞掉后学习规则退化为「只提升目标行」的<b>纯 Hebbian</b>。实测非目标行更新保留率（<code>tools/probe_readout_precision.py</code>，|W|~1e-2 / |dp|~1e-6 档，判据=同精度舍入后元素是否真的变了）：</p>
+        <div class="meta"><span><b>fp32 99.95%</b>（精确 p − t）｜<b>fp16 26.67%</b>｜<b>bf16 5.79%</b>；目标行三者都 100%（目标更新 ~1e-2 ≫ 半 ULP）→ 低精度下「只有目标行被提升」正是纯 Hebbian 的定义。故默认 fp32，低精度降级为显式 opt-in。<b>低精度不是免费的速度收益。</b></span></div>
+        <div class="meta"><span><b>fp8 / fp4 在所有加速器已禁用</b>（昇腾 Ascend 910B + CANN 8.5 实测 ERR01007：能建张量不能乘）。仅 <code>--accel cpu</code> 走 numba 的位算法量化核——那是量化码本路径，不是加速能力</span></div>
       </div>
-      <div class="card">
-        <h4><span class="mod">M2</span>预测编码层级</h4>
-        <p>每层含识别（上行）与生成（下行）权重：高层发预测、低层只上传误差，推理时迭代精炼逼近自由能最小。
-        权重以 CSR 承载，<b>不存在的突触不存储、不计算</b>。</p>
-        <p class="brain"><b>大脑</b>：V1→V2→V4→IT 层级预测编码（Rao &amp; Ballard 1999；Friston 自由能原理）</p>
-        <span class="sparse">稀疏性：CSR 结构性稀疏，连接率 12.5%</span>
+      <div class="card" style="--ac:var(--m1)">
+        <h3>编码器与分词</h3>
+        <p>M1 编码器 <code>--encoder-dtype</code> 默认 <b>fp32</b>：x86 上 fp32 比 fp64 快 1.80×；昇腾 aarch64 上两者都不慢——平台自适应走自写 numba GEMV 核（<code>_gemv_rows</code>）绕开了 BLAS，故与 dtype 无关。<b>⚠ x86 与昇腾的加速方向常常相反</b>，不可混用。分词 onehot 缓冲 <b>fp16</b>：值只有 0/1 无损，1B 词表每步缓冲/传输 208 KB → 104 KB。</p>
+        <div class="meta"><span><b>检查点</b> 低精度存位模式（uint16/uint8），加载侧按 meta["ckpt_dtype"] 无损解码；词表快照自包含，无需外部词表</span></div>
       </div>
-      <div class="card">
-        <h4><span class="mod">M3</span>STDP 时序预测</h4>
-        <p>稀疏固定拓扑 + 突触迹：Δw = η·(P_pre·post − P_post·pre)₊，截断于 [0, w_max]。
-        直觉是「先响后响则增强，后响先响则抑制」——网络自发学到时间因果结构。</p>
-        <p class="brain"><b>大脑</b>：海马 CA3 递归可塑性 + 皮层局部突触的脉冲时序依赖可塑性（Bi &amp; Poo 1998）</p>
-        <span class="sparse">稀疏性：每神经元 16 条出边 → 连接率 1.56%</span>
+      <div class="card" style="--ac:var(--m5)">
+        <h3>fp8 / fp4 在加速器上被禁用</h3>
+        <p>实测昇腾 Ascend910B4 + CANN 8.5 + torch_npu 2.9 对 float8_e4m3fn/e5m2 的建张量 / cast / matmul 全部报错，<code>torch.ops</code> 零个 fp8 算子；CPU torch 能建张量但无 fp8 addmv。<b>numba CPU 路径仍可用量化码本</b>（<code>--accel cpu --readout-dtype fp8</code>）。</p>
       </div>
-      <div class="card">
-        <h4><span class="mod">M4a</span>工作记忆</h4>
-        <p>有界槽位 + 每步漏衰减（模拟持续放电的漏积分）+ 调制门控写入：只有「意外」的信息才占槽。
-        另有免衰减的摘要槽，对应前额叶对重要内容的主动维持。</p>
-        <p class="brain"><b>大脑</b>：背外侧前额叶 dlPFC 延迟期持续放电 + 基底核-丘脑门控</p>
-        <span class="sparse">稀疏性：槽位硬上限 4（+1 摘要槽）</span>
-      </div>
-      <div class="card">
-        <h4><span class="mod">M4b</span>大容量事件驱动稀疏表</h4>
-        <p>表示经确定性哈希接入大空间，共激活神经元之间生长新突触（结构可塑性），检索由线索收敛到记忆。
-        每神经元出边数是硬容量约束；在线可写 CSR 存储与 dict 版逐位等价。</p>
-        <p class="brain"><b>大脑</b>：海马快速印迹 + 新皮层慢速巩固（CLS）；CA3 自动联想、齿状回模式分离</p>
-        <span class="sparse">稀疏性：事件驱动（只触碰已生长条目）；1B 档容量 2²⁴×72 ≈ 1.208e9</span>
-      </div>
-      <div class="card">
-        <h4><span class="mod">M5</span>神经调制</h4>
-        <p>底层预测误差范数经在线 Welford 标准化为 z 分数，门控学习率并切换编码/检索模式——
-        「先见者学，重复者忘」。可选四通道版本把单标量细化为 ACh / NE / DA / 5-HT。</p>
-        <p class="brain"><b>大脑</b>：蓝斑 NE 与 VTA DA 的意外与奖赏信号；基底前脑 ACh 的模式切换（Hasselmo）</p>
-        <span class="sparse">稀疏性：零突触、零参数的全局标量广播</span>
-      </div>
-      <div class="card">
-        <h4><span class="mod">M6</span>读出头</h4>
-        <p>h = [顶层表示 ; 工作记忆 ; 时序预测特征]，softmax 感知器输出词表分布。
-        监督信号仅存在于最末端，主干完全无监督。</p>
-        <p class="brain"><b>大脑</b>：IT → 前额叶 / 前运动皮层的决策读出；皮层→输出是多级中继 + 群体编码</p>
-        <span class="sparse bad">稀疏性：❌ 目前 100% 稠密 —— 明确的架构欠账（见下节）</span>
+      <div class="card" style="--ac:var(--m3)">
+        <h3>fp4 MX 核心（实验线）</h3>
+        <p>e2m1 半字节打包 + MX 块缩放（K=16）+ 确定性随机舍入（SR）：e2m1 块内动态范围仅 12×，RNE 下小更新恒被吞导致训练中期漂移，SR 期望无偏且跨运行逐位可复现。端到端 4K ppl 较 fp32 锚点 +1.15%。</p>
       </div>
     </div>
-  </div>
-</section>
+  </section>
 
-<section id="sparse">
-  <div class="wrap">
-    <h2><span class="n">03</span>稀疏性是架构原则</h2>
-    <p class="lead">「稀疏即效率」在本项目不是事后优化选项，而是从第一版就定下的组织原则：
-    人脑皮层的连接率约 <b>2e-8</b>、平均每神经元约 <b>1744</b> 条突触，任一时刻约 1–5% 神经元活跃。
-    既然如此声称脑同构，就必须逐项交代本架构的稀疏性账——包括不达标的那一项。</p>
-    <table>
-      <thead><tr><th>部件</th><th>当前稀疏性</th><th>状态</th></tr></thead>
-      <tbody>
-        <tr><td>M1 编码输出</td><td>k-WTA 稀疏，<b>12.5%</b> 活跃</td><td class="ok">✅ 成立</td></tr>
-        <tr><td>M2 预测编码主干</td><td>CSR 结构性稀疏，连接率 <b>12.5%</b>（conn_k=128 / n_in=1024）</td><td class="ok">✅ 成立</td></tr>
-        <tr><td>M3 STDP 时序核</td><td>每神经元 16 出边，连接率 <b>1.56%</b></td><td class="ok">✅ 成立</td></tr>
-        <tr><td>M4a 工作记忆</td><td>槽位硬上限 4（+1 免衰减摘要槽）</td><td class="ok">✅ 成立（有界）</td></tr>
-        <tr><td>M4b 大容量表</td><td><b>事件驱动</b>：只触碰已生长条目，未触碰不存不计算</td><td class="ok">✅ 成立</td></tr>
-        <tr><td><b>M6 读出</b></td><td><b>100% 稠密</b>（对照人脑连接率 2e-8、每神经元约 1744 条突触）</td><td class="bad">❌ 明确的架构欠账</td></tr>
-      </tbody>
-    </table>
-    <h3>关于 M6 的欠账，必须直说</h3>
-    <p class="note" style="font-size:14px;color:var(--dim)">
-    读出是全项目唯一没有稀疏化的部件，与人脑连接率差 4 个数量级。
-    稀疏读出的朴素版本（每输出单元 k 条入边，CSR 承载）<b>已经存在但未启用为默认</b>——
-    这是「吞吐换精度」的<b>配方选择</b>，不能替代架构上的稀疏化。
-    <b>幂律稀疏化方案（把读出稀疏到 5–12% 活跃度）已设计、未实施</b>，
-    是当前最高优先级的架构开放项。在它落地之前，任何「本架构稀疏度已达标」的说法都不成立。
-    </p>
-    <h3>1B 档容量账（≈1.317e9 的构成）</h3>
-    <table>
-      <thead><tr><th>组成</th><th>规模</th><th>占比</th></tr></thead>
-      <tbody>
-        <tr><td>M4b 大空间事件驱动表（稀疏）</td><td>2²⁴ × 72 ≈ 1.208e9（<b>容量上限</b>，随经验生长）</td><td>≈ 88%</td></tr>
-        <tr><td>M6 读出（稠密，<b>欠账</b>）</td><td>词表 × 三拼维度</td><td>≈ 11.6%</td></tr>
-        <tr><td>M1 编码器（稠密）</td><td>组合输入 2048 → 1024 + 偏置</td><td>≈ 0.16%</td></tr>
-        <tr><td>M2 CSR + M3 STDP（稀疏）</td><td>12.5% / 1.56% 连接率</td><td>计入稀疏侧</td></tr>
-      </tbody>
-    </table>
-    <p class="note">
-      口径：<code>train/config_1b.py::capacity_report()</code>，<code>--preset 1b</code>（width=1024）。
-      三点提醒：① 稀疏侧占绝对多数（≈88%）；② 稠密读出的 11.6% 就是 M6 欠账在容量账上的直接体现；
-      ③ <b>1.208e9 是容量上限不是已用量</b>——突触随经验生长，统计口径是已生长突触数，不做虚标。
-      每步计算量只正比于活跃神经元数，与总容量无关。
-    </p>
-  </div>
-</section>
-
-<section id="laws">
-  <div class="wrap">
-    <h2><span class="n">04</span>四条铁律</h2>
-    <p class="lead">违反任何一条就不是 PHD-Net。新增机制必须同时满足它们。</p>
-    <div class="rules">
-      <div class="rule">
-        <div class="name">① 禁自注意力、禁位置编码、禁堆叠层</div>
-        <div class="desc">不出现 QKV 投影与全局成对相似度；不注入位置（「第 k 个位置」不存在于任何向量中，
-        顺序由 STDP 因果链承载）；不堆叠同构层（抽象由预测编码层级与分层摘要实现）。
-        代价是失去「任意两 token 一步直达」，收益是每步 O(活跃×m) 而非 O(T²·d)。</div>
-      </div>
-      <div class="rule">
-        <div class="name">② 每个机制必须有明确的神经认知对应</div>
-        <div class="desc">不允许「工程上方便」的机制进主干。准入条件：能说清对应哪个真实神经现象、
-        为什么这个现象需要它。</div>
-      </div>
-      <div class="rule">
-        <div class="name">③ 逐 token 语义 → 不允许批处理</div>
-        <div class="desc">状态跨 token / 分片 / epoch 连续演化，读出权重每步原地更新。
-        batch 化会破坏「每个样本都写同一份记忆」的记忆语义。并行只能来自部件内的稀疏结构，
-        不来自样本维。</div>
-      </div>
-      <div class="rule">
-        <div class="name">④ 行为变更以 config 开关承载，且默认关闭</div>
-        <div class="desc">使「机制是否贡献」与「机制是否存在」成为两个可独立回答的问题。
-        两个例外（default-on）：<code>sparse_conn</code>（稠密 PC 栈已删除，传 False 直接 fail-fast）、
-        <code>k_sparse</code>（稀疏默认开启；评测脚本显式传自己的值，不影响既有口径）。</div>
-      </div>
+  <section id="perf">
+    <div class="sec-kick">Performance</div>
+    <h2 class="sec-title">性能区间（1B 档，昇腾 191 核 + NPU）</h2>
+    <div class="grid g3">
+      <div class="card" style="--ac:var(--m6)"><h3>12.09 ms/tok</h3><p>2026-10-01 实测（1b 档，昇腾 191 核 + NPU，52k token 稳态）。区间 <b>20–110</b> ms/tok 是<b>历史</b>对照。ms/tok 必带平台与档位。</p></div>
+      <div class="card" style="--ac:var(--m6)"><h3>读出 7.83 ms/tok（64.7%）</h3><p><b>不是带宽受限</b>：稀疏臂每步触达 229.15&nbsp;MiB，按 ~800&nbsp;GB/s 算下界 0.300&nbsp;ms → 实测是下界的 <b>26.1×</b>，瓶颈在<b>算子效率</b>而非访存。</p></div>
+      <div class="card" style="--ac:var(--m5)"><h3>191 核用不满</h3><p><b>架构性 + 配置性各半</b>：逐 token 语义禁止数据并行（架构性）；M2 曾跑单核 6.92 ms（配置性，已由 <code>--m2-kernel plain</code> 解决 → 1.28 ms，5.41×）。剩余 CPU 侧 4.26 ms 中<b>只有 M1 可安全与读出重叠</b>（M2 依赖 PC 权重、PC_learn 在读出之后）。</p></div>
     </div>
-  </div>
-</section>
-
-<section id="docs">
-  <div class="wrap">
-    <h2><span class="n">05</span>文档</h2>
-    <p class="lead">同一事实只有一处权威出处，数字永远带口径。下面的文档各管一段，不重复抄数字。</p>
-    <div class="docs">
-      <a class="doc" href="./PHD-Net_架构设计.md"><b>架构设计</b><small>最权威设计文档：六机制与脑同构、稀疏性账与容量账、四条铁律、数据流与状态演化、语料口径、精度体系</small></a>
-      <a class="doc" href="./PHD-Net_性能评估与迭代方案.md"><b>性能评估与迭代方案</b><small><b>所有性能数字的唯一出处</b>：平台差异铁律、访存与带宽口径、精度实测</small></a>
-      <a class="doc" href="./PHD-Net_并行与加速架构分析.md"><b>并行与加速架构分析</b><small>为什么吃不满多核与 NPU（架构性论证）；M6 幂律稀疏化的访存杠杆</small></a>
-      <a class="doc" href="./PHD-Net_竞争力与脑同构性评估.md"><b>对标 Transformer 优化路线图</b><small>五轨道结论与开放项（含 M6 幂律稀疏化编号与数据集语种矛盾）</small></a>
-      <a class="doc" href="./PHD-Net_竞争力与脑同构性评估.md"><b>竞争力与脑同构性评估</b><small>与 Transformer / 大脑对比的结论；稀疏性逐项对照表；实现级差异层</small></a>
-      <a class="doc" href="../BUGS.md"><b>缺陷台账 BUGS.md</b><small>34 条缺陷：症状 → 根因 → 门禁缺口，含结构性教训汇总</small></a>
-      <a class="doc" href="./PHD-Net_硬件后端适配报告.md"><b>硬件后端适配报告</b><small>后端矩阵、昇腾适配的坑、迁移路径</small></a>
-      <a class="doc" href="./PHD-Net_扩展指南.md"><b>扩展指南</b><small>怎么加机制 / 后端 / dtype / 数据，加机制前的检查单</small></a>
-      <a class="doc" href="./文档写作规范.md"><b>文档写作规范</b><small>全项目事实基线与禁写项；写任何文档前必读</small></a>
-      <a class="doc" href="../README.md"><b>README</b><small>项目一句话、怎么跑、任务导向文档地图、状态摘要</small></a>
-      <a class="doc" href="../BUGS.md"><b>BUGS</b><small>缺陷台账：症状 → 根因 → 门禁缺口</small></a>
+    <div class="note ok">
+      <b>门禁与 CI：</b><code>python tests/run_tests.py fast</code> = 9/9（零回归门槛），专项 verifier <b>23 个</b>（<code>tests/verifiers/</code>）；<code>verify_ms_stream</code> 会对改动文件 <code>py_compile</code> 并真跑 <code>train.py --help</code>。CI 两套：<code>.gitcode/workflows/ci.yml</code> 与 <code>.github/workflows/ci.yml</code>（镜像）——仓库<b>没有 Jenkinsfile</b>。
     </div>
-    <p class="note">
-      冻结评测基准位于仓库根 <code>eval_corpus/</code>（<code>internal_corpus.txt</code> 实测原文长度
-      27,034 字符，训练段 18,803 / 评估段 4,701 是划分后口径；<code>ood_wiki.txt</code> 为远域探针）。
-      <b><code>docs/*.md</code> 不是数据集</b>——编辑架构文档不改变语料，也不改变任何基线。
-    </p>
-  </div>
-</section>
+    <div class="note">
+      <b>评测基线：</b>口径 256 维栈、<code>eta_readout=0.15</code>；现行锚点 <b>4K 段 394.4687 / 全语料 359.2603</b>（评测语料 2026-09-28 起换为中文维基条目合集，<code>eval_corpus/internal_corpus.txt</code> 实测 27,034 字符）。复测入口 <code>python tools/rebaseline.py</code>（无命令行参数）。旧口径 78.16 / 90.2480 / 73.1166 只存于 git 历史，<b>不可混用</b>。
+    </div>
+    <div class="note warn">
+      <b>已知开放项：</b>M4b 复测归因 · fp16 下 PPL 是否下降 · 数据集语种（远程分片实测中文仅 2%、unk 47%，是代码问题，与旧记录矛盾）· 检查点 <code>compact_csr</code> 向量化后仍 3.9 s/10 万行 · <b>M6 幂律稀疏化（架构欠账）</b> · GitHub Actions 仍红。
+    </div>
+  </section>
+
+  <section id="quickstart">
+    <div class="sec-kick">Quick Start</div>
+    <h2 class="sec-title">跑起来</h2>
+    <p class="sec-lead">唯一生产训练入口是 <code>train_1b/train.py</code>。全部开关、默认值与「为什么是这个值」见 <code>train_1b/README.md</code>。</p>
+    <pre><span class="c"># 安装（numpy/numba/psutil/pyarrow 必装，torch 可选段）</span>
+<span class="c"># 注意：numpy 需 &lt; 2.3（新版与 numba 不兼容），numba ≥ 0.61</span>
+pip install -r requirements.txt
+
+<span class="c"># 最小可跑（冒烟，分钟级，只验管线）</span>
+python train_1b/train.py <span class="k">--preset</span> smoke <span class="k">--data</span> sft <span class="k">--tokens</span> 2000
+
+<span class="c"># 门禁：fast 9/9 零回归</span>
+python tests/run_tests.py fast
+
+<span class="c"># 标准 1B 档训练（本地 datasets/ 入口）</span>
+python train_1b/train.py <span class="k">--preset</span> 1b <span class="k">--data</span> pretrain <span class="k">--tokens</span> 1000000
+
+<span class="c"># ModelScope 远程流式入口（HTTP Range，零本地落盘）</span>
+python train_1b/train.py <span class="k">--preset</span> 1b <span class="k">--data</span> pretrain <span class="k">--remote-data</span>
+
+<span class="c"># 推理 / 对话</span>
+python train_1b/infer.py <span class="k">--model</span> outputs/models/phdnet1b_1b_pretrain_final.npz <span class="k">--chat</span>
+<span class="c"># 终端 TUI（ANSI 轻量界面，word 与 1B 双后端，可 --selftest）</span>
+python chat/tui.py</pre>
+    <p class="sec-lead" style="margin-top:14px">训练数据两入口：本地 <code>datasets/</code>（gitignore 的独立仓库，由 <code>tools/</code> 转换脚本生成）；<code>--remote-data</code> 走 ModelScope HTTP Range 流式直读，零落盘。</p>
+  </section>
+
+  <section id="structure">
+    <div class="sec-kick">Code Map</div>
+    <h2 class="sec-title">目录结构</h2>
+    <pre>train/
+├── <span class="k">train_1b/</span>               1B 生产训练子项目（唯一训练入口）
+│   ├── train.py            生产训练主入口（流式 / SFT / 续训 / 远程数据）
+│   ├── config_1b.py        1B 档预设与容量验算 capacity_report()
+│   ├── corpus_stream.py    字符流 → token 流、SFT 掩码状态机
+│   ├── vocab_parallel.py   词表并行构建 / 全量扫描
+│   ├── tokenizer_core.py   分词核心
+│   ├── ckpt_1b.py          检查点存取（异步 / 位模式 / 词表快照）
+│   ├── infer.py            推理 / 对话
+│   └── README.md           训练目录说明（开关表在此）
+├── <span class="k">phdnet/</span>                 核心包
+│   ├── config.py           PHDNetConfig（全部超参与开关；新增默认关闭）
+│   ├── sparse_encoder.py   M1 稀疏编码器（k-WTA / SDR）
+│   ├── sparse_pc.py        M2 预测编码 CSR 栈
+│   ├── stdp_kernels.py     M3 STDP 计算核（numba + numpy 回退）
+│   ├── plasticity.py       M3 时序关联核容器
+│   ├── wm.py / ltm.py      M4a 工作记忆 / M4b 长期记忆
+│   ├── bigltm.py           M4b 容量层适配器
+│   ├── sparse_table.py     1B 印迹表 + 在线可写 CSR
+│   ├── modulator.py        M5 神经调制器
+│   ├── readout.py          M6 读出头（局部感知器 + softmax + 精度码本）
+│   ├── model.py            组装与调度（PHDNet.step）
+│   ├── word_encoder.py     M7 词涌现（无词典分词）+ 词级 SDR
+│   ├── word_lm.py / lm.py  词级 / 字符级语言模型
+│   ├── ms_stream.py        ModelScope HTTP Range 流式读取
+│   ├── device.py           后端探测（cuda / cann·昇腾 / rocm / dml / cpu）
+│   ├── i18n.py             终端文案语言切换（zh / en）
+│   ├── telemetry.py        系统 / 设备遥测
+│   └── backends/           硬件后端子包（accel_readout / multi_device / …）
+├── <span class="k">eval_corpus/</span>            冻结评测基准（27,034 字符）+ OOD 探针
+├── tests/                  回归门禁（run_tests.py）+ demo + verifiers/
+├── tools/                  语料制备 / 评测审计 / 硬件诊断（索引见 tools/README.md）
+├── docs/                   架构、扩展、性能、并行、后端、竞争力评估
+├── chat/                   对话前端（TUI / OpenAI 兼容 / websearch 工具）
+├── outputs/                产物（test/ experiments/ 入库；smoke/ models/ 不入库）
+├── datasets/               训练语料（独立仓库，gitignore）
+└── BUGS.md                 缺陷台账</pre>
+  </section>
+
+  <section id="terms">
+    <div class="sec-kick">Terminology</div>
+    <h2 class="sec-title">术语口径</h2>
+    <div class="card" style="--ac:var(--m2); padding:8px 18px 14px">
+      <table>
+        <tbody>
+          <tr><td style="width:130px"><b>逐 token</b></td><td>一次前向 = 一个 token，状态连续演化。批处理在本架构下是语义错误。</td></tr>
+          <tr><td><b>容量 vs 已用量</b></td><td>容量是突触上限（<code>--report</code> / <code>[big-ltm]</code> 日志查利用率），已用量是已生长数。</td></tr>
+          <tr><td><b>稠密 / 稀疏连接率</b></td><td>不存在的突触<b>不存储、不计算</b>。</td></tr>
+          <tr><td><b>ms/tok</b></td><td>单 token 毫秒数，必带平台与档位。x86 与昇腾的加速方向常常相反，不可混用。</td></tr>
+          <tr><td><b>终端语言</b></td><td><code>--lang zh</code>（默认）全中文、<code>--lang en</code> 全英文，只影响文案不影响数据。</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note">
+      <b>仓库：</b><a href="https://atomgit.com/fhz1206/PHD-Net" target="_blank" rel="noopener">AtomGit · fhz1206/PHD-Net</a> ·
+      <a href="https://github.com/fhz1206/PHD-Net" target="_blank" rel="noopener">GitHub 镜像 · fhz1206/PHD-Net</a><br>
+      想搞懂六机制为什么这么设计 → <code>docs/PHD-Net_架构设计.md</code>；看性能数字 → <code>docs/PHD-Net_性能评估与迭代方案.md</code>；加新机制 / 扩后端 → <code>docs/PHD-Net_扩展指南.md</code>。
+    </div>
+  </section>
+
+</main>
 
 <footer>
-  <div class="wrap">PHD-Net · 预测编码 × Hebbian/STDP × 双记忆网络 · 无自注意力 / 无位置编码 / 无堆叠层 · 数据截止 2026-09-30</div>
+  本页内容整理自 PHD-Net 仓库 README（数据截止 2026-09-30）· 3D 视图为结构示意，节点数与连接为等比缩样，非真实规模<br>
+  PHD-Net · 预测编码 × Hebbian/STDP × 双记忆 · 不依赖自注意力的类脑架构
 </footer>
 
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+/* ============================================================
+   0. 基础
+   ============================================================ */
+const hero   = document.getElementById('hero');
+const canvas = document.getElementById('scene');
+let W = hero.clientWidth, H = hero.clientHeight;
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, powerPreference:'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(W, H);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.setSize(W, H);
+labelRenderer.domElement.className = 'label-layer';
+hero.appendChild(labelRenderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x04060f);
+scene.fog = new THREE.FogExp2(0x04060f, 0.0105);
+
+const camera = new THREE.PerspectiveCamera(46, W/H, 0.1, 600);
+camera.position.set(23, 14.5, 29);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.07;
+controls.target.set(0, 0.4, 0);
+controls.minDistance = 13;
+controls.maxDistance = 78;
+controls.maxPolarAngle = Math.PI * 0.94;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.38;
+
+/* 后处理（可选，失败则回退普通渲染） */
+let composer = null, bloomPass = null;
+try{
+  const [EC, RP, UB, OP] = await Promise.all([
+    import('three/addons/postprocessing/EffectComposer.js'),
+    import('three/addons/postprocessing/RenderPass.js'),
+    import('three/addons/postprocessing/UnrealBloomPass.js'),
+    import('three/addons/postprocessing/OutputPass.js')
+  ]);
+  composer = new EC.EffectComposer(renderer);
+  composer.addPass(new RP.RenderPass(scene, camera));
+  bloomPass = new UB.UnrealBloomPass(new THREE.Vector2(W, H), 0.62, 0.75, 0.60);
+  composer.addPass(bloomPass);
+  composer.addPass(new OP.OutputPass());
+}catch(err){ composer = null; }
+
+/* ============================================================
+   1. 模块数据（内容与仓库 README 对齐）
+   ============================================================ */
+const MODULES = {
+  input:{ key:'input', name:'输入 token 流', short:'字符流 / SFT 掩码', color:'#9fb4d8', hex:0x9fb4d8,
+    cog:'字符流 → token 流 · SFT 掩码状态机',
+    impl:'train_1b/corpus_stream.py · tokenizer_core.py',
+    scale:'逐 token：一次前向只有一个 token',
+    desc:'语料以字符流进入，经分词核心转成 token 流；onehot 缓冲用 fp16（值只有 0/1，无损）。SFT 数据由掩码状态机标注。状态跨 token / 分片 / epoch 连续演化，因此本架构不允许批处理。' },
+
+  m1:{ key:'m1', name:'M1 稀疏编码器', short:'k-WTA + SDR', color:'#57e6d9', hex:0x57e6d9,
+    cog:'皮层稀疏发放 + 侧抑制 WTA',
+    impl:'phdnet/sparse_encoder.py · word_encoder.py（M7 词涌现）',
+    scale:'组合输入 2048 → 1024 维 SDR',
+    desc:'把组合输入编码成稀疏分布式表示，侧抑制完成竞争，每步只让一小部分神经元胜出。M7 词涌现在无词典的前提下完成分词并给出词级 SDR。' },
+
+  m2:{ key:'m2', name:'M2 预测编码主干', short:'CSR · 4 层', color:'#9d8bff', hex:0x9d8bff,
+    cog:'dense representation + sparse connectivity',
+    impl:'phdnet/sparse_pc.py（SparsePCStack，csr_online 在线可写）',
+    scale:'4 层 × 1024 宽 × 128 出边',
+    desc:'不用堆叠层、不用自注意力。每层基于当前表示预测下一表示，预测误差驱动更新；连接以 CSR 结构性稀疏存储，不存在的突触不存储、不计算。' },
+
+  m3:{ key:'m3', name:'M3 STDP 时序预测', short:'突触迹', color:'#ffb85c', hex:0xffb85c,
+    cog:'稀疏拓扑突触迹',
+    impl:'phdnet/plasticity.py + stdp_kernels.py（numba + numpy 回退）',
+    scale:'沿 M2 活跃通路累积',
+    desc:'局部学习规则，无反向传播：发放时间序决定突触增强 / 抑制，突触迹沿活跃通路累积，是 "fire together, wire together" 的算术形式。图中金色流点即突触迹。' },
+
+  m4a:{ key:'m4a', name:'M4a 工作记忆', short:'WM 锚定', color:'#6fe3a5', hex:0x6fe3a5,
+    cog:'工作记忆锚定',
+    impl:'phdnet/wm.py',
+    scale:'容量小、生命周期短',
+    desc:'跨 token 保持当前上下文的锚点，让预测带有「此刻在意什么」的偏置；与 M4b 的双记忆结构共同承担长程依赖。' },
+
+  m4b:{ key:'m4b', name:'M4b 大容量长期记忆', short:'2²⁴×72 事件驱动', color:'#ffd166', hex:0xffd166,
+    cog:'长程印迹 · 事件驱动稀疏表',
+    impl:'phdnet/bigltm.py + sparse_table.py',
+    scale:'2²⁴ 神经元 × 72 出边 = 1.208e9，≈88% 总容量',
+    desc:'大容量印迹表不是构建即存在，而是随经验生长；每步计算量只正比于活跃神经元数（事件驱动），与 1B 总容量解耦——这是容量与算力解耦的关键。' },
+
+  m5:{ key:'m5', name:'M5 神经调制', short:'surprise 门控', color:'#ff6fa5', hex:0xff6fa5,
+    cog:'surprise z 分数门控 / 四通道',
+    impl:'phdnet/modulator.py',
+    scale:'四通道调制',
+    desc:'用预测误差的 z 分数（意外程度）门控学习与写入：意外大时多学、符合预期时少动，四通道对应不同调质功能。粉色脉冲为一次 surprise 广播。' },
+
+  m6:{ key:'m6', name:'M6 读出', short:'感知器 + softmax', color:'#6ea8ff', hex:0x6ea8ff,
+    cog:'感知器输出层',
+    impl:'phdnet/readout.py（局部感知器 + softmax + 精度码本）',
+    scale:'词表 × n_h（pred_in_readout 时 3×1024）≈11.6%',
+    desc:'输出层是局部感知器 + softmax，W 每步原地更新。支持 fp16/bf16/fp8/fp4 位型码本 + LUT 反量化，检查点按位模式存取。' },
+
+  output:{ key:'output', name:'输出 token', short:'下一 token 分布', color:'#ffffff', hex:0xffffff,
+    cog:'感知器输出 / softmax',
+    impl:'phdnet/readout.py · train_1b/infer.py · chat/tui.py',
+    scale:'推理 / 对话入口',
+    desc:'M6 给出下一 token 分布。推理与对话走 train_1b/infer.py --chat；聊天前端 chat/tui.py 是 ANSI 轻量 TUI（状态栏 / 分色对话区 / 斜杠命令），word 与 1B 双后端。' }
+};
+
+/* ============================================================
+   2. 场景
+   ============================================================ */
+scene.add(new THREE.AmbientLight(0x5a76b0, 0.55));
+scene.add(new THREE.HemisphereLight(0x8fb6ff, 0x070b16, 0.5));
+const keyLight = new THREE.DirectionalLight(0xffffff, 0.5);
+keyLight.position.set(20, 28, 18); scene.add(keyLight);
+
+/* 星空 */
+{
+  const N = 900, pos = new Float32Array(N*3);
+  for(let i=0;i<N;i++){
+    const r = 120 + Math.random()*140, t = Math.random()*Math.PI*2, p = Math.acos(2*Math.random()-1);
+    pos[i*3]   = r*Math.sin(p)*Math.cos(t);
+    pos[i*3+1] = r*Math.cos(p)*0.6 + 20;
+    pos[i*3+2] = r*Math.sin(p)*Math.sin(t);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color:0x9dbcff, size:0.55, transparent:true, opacity:0.5, depthWrite:false })));
+}
+
+/* 地网 */
+const polar = new THREE.PolarGridHelper(70, 8, 7, 72, 0x1b2b4a, 0x0e1729);
+polar.position.y = -10.2;
+polar.material.transparent = true; polar.material.opacity = 0.45;
+scene.add(polar);
+
+const nodeGeo  = new THREE.SphereGeometry(0.3, 16, 12);
+const traceGeo = new THREE.SphereGeometry(0.085, 8, 6);
+const nodes = [];            // 可交互神经元
+const moduleGroups = {};     // key -> Group
+const edgeGroups = [];       // 动态高亮的边组
+
+function group(key){ if(!moduleGroups[key]){ moduleGroups[key] = new THREE.Group(); scene.add(moduleGroups[key]); } return moduleGroups[key]; }
+
+/* 神经元：默认熄灭（emissive≈0），token 流过时才亮 */
+const DORMANT = 0.022;
+function addNode(key, x, y, z, hex, size){
+  const mat = new THREE.MeshStandardMaterial({ color:0x080e1e, emissive:hex, emissiveIntensity:DORMANT, roughness:0.32, metalness:0.15 });
+  const m = new THREE.Mesh(nodeGeo, mat);
+  m.position.set(x,y,z); m.scale.setScalar(size);
+  m.userData = { module:key, size, energy:0 };
+  group(key).add(m); nodes.push(m);
+  return m;
+}
+
+/* 「幽灵点」：极暗的存在性标记，让结构可读但不抢戏 */
+function ghost(list, hex, size, opacity){
+  const pos = new Float32Array(list.length*3);
+  list.forEach((n,i)=>{ pos[i*3]=n.position.x; pos[i*3+1]=n.position.y; pos[i*3+2]=n.position.z; });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  return new THREE.Points(g, new THREE.PointsMaterial({ color:hex, size, transparent:true, opacity, depthWrite:false }));
+}
+
+/* --- 输入 / 输出 --- */
+const INPUT_POS  = new THREE.Vector3(-17.5, 0, 0);
+const OUTPUT_POS = new THREE.Vector3(17.5, 0.6, 0);
+const ringGeo = new THREE.TorusGeometry(1.25, 0.09, 12, 48);
+const inputRing = new THREE.Mesh(ringGeo,
+  new THREE.MeshStandardMaterial({ color:0x0a1024, emissive:0x9fb4d8, emissiveIntensity:0.85, roughness:0.4 }));
+inputRing.position.copy(INPUT_POS); inputRing.rotation.y = Math.PI/2;
+group('input').add(inputRing);
+const outputRing = new THREE.Mesh(ringGeo,
+  new THREE.MeshStandardMaterial({ color:0x0a1024, emissive:0xffffff, emissiveIntensity:1.2, roughness:0.4 }));
+outputRing.position.copy(OUTPUT_POS); outputRing.rotation.y = Math.PI/2;
+group('output').add(outputRing);
+
+/* --- M1：6×6 = 36 个神经元 --- */
+const M1_X = -11.6, M2_XS = [-5.6, -1.9, 1.9, 5.6], M6_X = 11.6;
+const GRID = [];
+for(let i=0;i<6;i++) for(let j=0;j<6;j++) GRID.push([ -3.75 + i*1.5, -3.75 + j*1.5 ]);
+const m1Nodes = GRID.map(p => addNode('m1', M1_X, p[0], p[1], 0x57e6d9, 0.9));
+group('m1').add(ghost(m1Nodes, 0x2f7f7a, 0.10, 0.5));
+
+/* --- M2：四层 6×6 --- */
+const m2Layers = M2_XS.map(x => GRID.map(p => addNode('m2', x, p[0], p[1], 0x9d8bff, 0.95)));
+m2Layers.forEach(L => group('m2').add(ghost(L, 0x5a4ea8, 0.11, 0.45)));
+
+/* --- M6：5×5 = 25 个读出行 --- */
+const M6_GRID = [];
+for(let i=0;i<5;i++) for(let j=0;j<5;j++) M6_GRID.push([ -3 + i*1.5, -3 + j*1.5 ]);
+const m6Nodes = M6_GRID.map(p => addNode('m6', M6_X, p[0], p[1], 0x6ea8ff, 0.85));
+group('m6').add(ghost(m6Nodes, 0x2f548f, 0.10, 0.5));
+
+/* --- 边系统：位置静态 + 顶点颜色动态，只在 token 走过的通路亮起 --- */
+function buildEdgeGroup(list, owner, baseHex, hotHex){
+  const n = list.length;
+  const pos = new Float32Array(n*6), col = new Float32Array(n*6);
+  list.forEach((e,i)=>{
+    e.e = 0;
+    pos[i*6]  = e.a.position.x; pos[i*6+1] = e.a.position.y; pos[i*6+2] = e.a.position.z;
+    pos[i*6+3] = e.b.position.x; pos[i*6+4] = e.b.position.y; pos[i*6+5] = e.b.position.z;
+  });
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  g.setAttribute('color', new THREE.BufferAttribute(col,3));
+  const m = new THREE.LineBasicMaterial({ vertexColors:true, transparent:true, opacity:0.9,
+    blending:THREE.AdditiveBlending, depthWrite:false });
+  group(owner).add(new THREE.LineSegments(g, m));
+  const eg = { list, geo:g, mat:m, base:new THREE.Color(baseHex), hot:new THREE.Color(hotHex), owner };
+  edgeGroups.push(eg);
+  return eg;
+}
+
+/* M2 层间：结构性稀疏 */
+const layerEdges = [];
+for(let l=0;l<3;l++){
+  const list = [];
+  m2Layers[l].forEach(a => m2Layers[l+1].forEach(b => { if(Math.random() < 0.125) list.push({ a, b }); }));
+  layerEdges.push(list);
+  buildEdgeGroup(list, 'm2', 0x2a2f66, 0x9d8bff);
+}
+/* M1 → M2 稀疏 */
+const m1Edges = [];
+m1Nodes.forEach(a => m2Layers[0].forEach(b => { if(Math.random() < 0.16) m1Edges.push({ a, b }); }));
+buildEdgeGroup(m1Edges, 'm1', 0x1f5f5c, 0x57e6d9);
+
+/* M6：读出的连接 */
+const m6Edges = [];
+m2Layers[3].forEach(a => m6Nodes.forEach(b => m6Edges.push({ a, b })));
+buildEdgeGroup(m6Edges, 'm6', 0x14284d, 0x6ea8ff);
+
+/* 主轴引导线 */
+{
+  const g = new THREE.BufferGeometry().setFromPoints([INPUT_POS, OUTPUT_POS]);
+  scene.add(new THREE.Line(g, new THREE.LineBasicMaterial({ color:0x24365c, transparent:true, opacity:0.45 })));
+}
+
+/* --- M3 突触迹：只在活跃通路上出现 --- */
+const traces = [];
+{
+  const all = layerEdges[0].concat(layerEdges[1], layerEdges[2]);
+  const pool = all.slice().sort(() => Math.random()-0.5).slice(0, 70);
+  pool.forEach(e => {
+    const m = new THREE.Mesh(traceGeo, new THREE.MeshBasicMaterial({ color:0xffb85c, transparent:true, opacity:0.9 }));
+    m.visible = false;
+    m.userData = { edge:e, t:Math.random(), speed:0.5 + Math.random()*0.5 };
+    group('m3').add(m); traces.push(m);
+  });
+}
+
+/* --- M4a 工作记忆 --- */
+const m4aPivot = new THREE.Group();
+m4aPivot.position.set(0, 7.6, -7.2);
+group('m4a').add(m4aPivot);
+{
+  const torus = new THREE.Mesh(new THREE.TorusGeometry(1.7, 0.11, 12, 56),
+    new THREE.MeshStandardMaterial({ color:0x0a1024, emissive:0x6fe3a5, emissiveIntensity:0.8, roughness:0.35 }));
+  torus.rotation.x = Math.PI*0.42;
+  m4aPivot.add(torus);
+  const anchors = [];
+  for(let i=0;i<6;i++){
+    const s = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 8), new THREE.MeshBasicMaterial({ color:0xa8ffd6 }));
+    s.userData = { phase: i/6*Math.PI*2 };
+    m4aPivot.add(s); anchors.push(s);
+  }
+  m4aPivot.userData.anchors = anchors;
+  const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(-5.6,-7.6,7.2)]);
+  const line = new THREE.Line(g, new THREE.LineDashedMaterial({ color:0x6fe3a5, transparent:true, opacity:0.3, dashSize:0.5, gapSize:0.4 }));
+  line.computeLineDistances();
+  m4aPivot.add(line);
+}
+
+/* --- M5 神经调制 --- */
+const m5Group = new THREE.Group();
+m5Group.position.set(0, 8.4, 7.4);
+group('m5').add(m5Group);
+const m5Core = new THREE.Mesh(new THREE.IcosahedronGeometry(1.05, 1),
+  new THREE.MeshStandardMaterial({ color:0x1a0a18, emissive:0xff6fa5, emissiveIntensity:1.05, roughness:0.25, metalness:0.2 }));
+m5Group.add(m5Core);
+const m5Wire = new THREE.Mesh(new THREE.IcosahedronGeometry(1.32, 1),
+  new THREE.MeshBasicMaterial({ color:0xff6fa5, wireframe:true, transparent:true, opacity:0.26 }));
+m5Group.add(m5Wire);
+const m5Beams = [];
+[[M1_X,0,0],[-1.9,0,0],[M6_X,0,0]].forEach(t => {
+  const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(t[0], t[1]-8.4, t[2]-7.4)]);
+  const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color:0xff6fa5, transparent:true, opacity:0.13 }));
+  m5Group.add(line);
+  for(let i=0;i<2;i++){
+    const d = new THREE.Mesh(traceGeo, new THREE.MeshBasicMaterial({ color:0xffc2d8, transparent:true, opacity:0.8 }));
+    d.userData = { line, t:i/2, speed:0.35 };
+    m5Group.add(d); m5Beams.push(d);
+  }
+});
+const bursts = [];
+for(let i=0;i<4;i++){
+  const s = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16),
+    new THREE.MeshBasicMaterial({ color:0xff6fa5, transparent:true, opacity:0, blending:THREE.AdditiveBlending, depthWrite:false }));
+  s.visible = false; m5Group.add(s); bursts.push(s);
+}
+
+/* --- M4b 印迹表 --- */
+const LTM_NX = 26, LTM_NZ = 16, LTM_COUNT = LTM_NX*LTM_NZ;
+const ltmEnergy = new Float32Array(LTM_COUNT);
+const ltmPrev   = new Float32Array(LTM_COUNT);
+let ltmLit = 0, ltmDim = 1;
+const ltmMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.5, 0.14, 0.62),
+  new THREE.MeshBasicMaterial({}), LTM_COUNT);
+ltmMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+{
+  const d = new THREE.Object3D(), c = new THREE.Color();
+  for(let i=0;i<LTM_COUNT;i++){
+    const ix = i % LTM_NX, iz = (i/LTM_NX)|0;
+    d.position.set(-16 + ix*1.28, -8.6, -9.6 + iz*1.28);
+    d.updateMatrix(); ltmMesh.setMatrixAt(i, d.matrix);
+    c.setHex(0x050810); ltmMesh.setColorAt(i, c);
+  }
+}
+group('m4b').add(ltmMesh);
+const ltmFrame = new THREE.Mesh(new THREE.BoxGeometry(LTM_NX*1.28+0.6, 0.05, LTM_NZ*1.28+0.6),
+  new THREE.MeshBasicMaterial({ color:0xffd166, transparent:true, opacity:0.09 }));
+ltmFrame.position.set(-16 + (LTM_NX-1)*1.28/2, -8.9, -9.6 + (LTM_NZ-1)*1.28/2);
+group('m4b').add(ltmFrame);
+
+/* --- 标签 --- */
+function makeLabel(key, title, sub, x, y, z){
+  const el = document.createElement('div');
+  el.className = 'lbl';
+  el.innerHTML = '<b style="color:'+MODULES[key].color+'">'+title+'</b><span>'+sub+'</span>';
+  const o = new CSS2DObject(el);
+  o.position.set(x,y,z); o.center.set(0.5, 1);
+  scene.add(o);
+  return o;
+}
+makeLabel('input','输入','token 流', INPUT_POS.x, 2.6, 0);
+makeLabel('m1','M1 稀疏编码','k-WTA + SDR', M1_X, 5.6, 0);
+makeLabel('m2','M2 预测编码主干','CSR · 4 层', 0, 6.6, 0);
+makeLabel('m4a','M4a 工作记忆','WM 锚定', 0, 10.6, -7.2);
+makeLabel('m5','M5 神经调制','surprise 门控', 0, 11.4, 7.4);
+makeLabel('m4b','M4b 大容量长期记忆','2²⁴×72 事件驱动 · 1.208e9', 0, -6.4, -1.6);
+makeLabel('m6','M6 读出','感知器 + softmax', M6_X, 6.4, 0);
+makeLabel('output','输出','下一 token', OUTPUT_POS.x, 2.6, 0);
+M2_XS.forEach((x,i) => makeLabel('m2','L'+(i+1),'', x, 5.4, 0));
+
+/* ============================================================
+   3. token 流
+   ============================================================ */
+const K_WTA = 5;                 // 36 × 12.5% ≈ 4.5
+const tokenGeo = new THREE.SphereGeometry(0.2, 10, 8);
+const tokens = [];
+let tokenCount = 0, tokensActive = true, spawnTimer = 0;
+
+/* 速度：倍率 → 生成间隔 / 段时长（倍率越大越快） */
+const BASE_INTERVAL = 0.28, BASE_SEG = 0.34;
+let speed = 1, spawnInterval = BASE_INTERVAL, speedScale = 1;
+
+function pickK(list, k){
+  const a = list.slice();
+  for(let i=a.length-1;i>0;i--){ const j=(Math.random()*(i+1))|0; const t=a[i]; a[i]=a[j]; a[j]=t; }
+  return a.slice(0, k);
+}
+function lightEdges(list, pred){ for(let i=0;i<list.length;i++) if(pred(list[i])) list[i].e = 1; }
+
+class Token{
+  constructor(){
+    this.mesh = new THREE.Mesh(tokenGeo, new THREE.MeshBasicMaterial({ color:0xdff2ff, transparent:true, opacity:0.95 }));
+    this.mesh.visible = false;
+    scene.add(this.mesh);
+    this.alive = false;
+  }
+  spawn(){
+    /* 每一步在各层做一次稀疏选择，只让一小部分神经元参与 */
+    this.m1k = pickK(m1Nodes, K_WTA);
+    this.lk  = m2Layers.map(L => pickK(L, K_WTA));
+    this.m6k = pickK(m6Nodes, 6);
+    this.targets = [ this.m1k[0], this.lk[0][0], this.lk[1][0], this.lk[2][0], this.lk[3][0], this.m6k[0] ];
+    const jit = () => new THREE.Vector3((Math.random()-0.5)*0.6, (Math.random()-0.5)*1.6, (Math.random()-0.5)*2);
+    this.pts = [INPUT_POS.clone().add(jit())]
+      .concat(this.targets.map(n => n.position.clone()))
+      .concat([OUTPUT_POS.clone().add(jit())]);
+    this.i = 0; this.t = 0; this.alive = true; this.phase = Math.random()*6.28;
+    this.seg = (BASE_SEG + Math.random()*0.16) * speedScale;
+    this.mesh.visible = true;
+    this.mesh.position.copy(this.pts[0]);
+    tokenCount++;
+  }
+  update(dt, time){
+    if(!this.alive) return;
+    this.t += dt / this.seg;
+    while(this.t >= 1 && this.i < this.pts.length-1){
+      this.t -= 1; this.i++;
+      this.arrive(this.i);
+    }
+    if(this.i >= this.pts.length-1){ this.kill(); return; }
+    const a = this.pts[this.i], b = this.pts[this.i+1];
+    this.mesh.position.lerpVectors(a, b, THREE.MathUtils.smoothstep(this.t, 0, 1));
+    this.mesh.position.z += Math.sin(time*4 + this.phase)*0.12;
+    this.mesh.scale.setScalar(1 + Math.sin(time*9 + this.phase)*0.12);
+  }
+  arrive(i){
+    const node = this.targets[i-1];
+    if(node) node.userData.energy = 1;
+    if(i === 1){
+      this.m1k.forEach(n => { n.userData.energy = 1; });
+      lightEdges(m1Edges, e => this.lk[0].indexOf(e.b) >= 0);
+    }else if(i >= 2 && i <= 5){
+      const li = i-2;
+      this.lk[li].forEach(n => { n.userData.energy = 1; });
+      const nextK = this.lk[li+1];
+      lightEdges(layerEdges[li], e =>
+        e.a === node || this.lk[li].indexOf(e.b) >= 0 || (nextK && nextK.indexOf(e.b) >= 0));
+    }else if(i === 6){
+      this.m6k.forEach(n => { n.userData.energy = 1; });
+      outputRing.material.emissiveIntensity = 3.0;
+      lightEdges(m6Edges, e => this.m6k.indexOf(e.b) >= 0);
+    }
+  }
+  kill(){ this.alive = false; this.mesh.visible = false; }
+}
+for(let i=0;i<46;i++) tokens.push(new Token());
+
+/* ============================================================
+   4. 交互：图例 / 详情 / 选择
+   ============================================================ */
+const legendMain = document.getElementById('legendMain');
+const legendMem  = document.getElementById('legendMem');
+const detail = document.getElementById('detail');
+let selected = null;
+
+function legendButton(m, host){
+  const b = document.createElement('button');
+  b.className = 'lg-item';
+  b.dataset.key = m.key;
+  b.innerHTML = '<span class="lg-dot" style="background:'+m.color+';color:'+m.color+'"></span>'+
+                '<span>'+m.name+'<small>'+m.short+'</small></span>';
+  b.addEventListener('click', () => select(m.key));
+  host.appendChild(b);
+}
+['input','m1','m2','m6','output'].forEach(k => legendButton(MODULES[k], legendMain));
+['m3','m4a','m4b','m5'].forEach(k => legendButton(MODULES[k], legendMem));
+
+const selHelper = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(1,1,1)),
+  new THREE.LineBasicMaterial({ color:0xffffff, transparent:true, opacity:0.5 })
+);
+selHelper.visible = false;
+scene.add(selHelper);
+
+function select(key){
+  selected = (selected === key) ? null : key;
+  document.querySelectorAll('.lg-item').forEach(el => el.classList.toggle('on', el.dataset.key === selected));
+  if(!selected){ detail.hidden = true; selHelper.visible = false; ltmDim = 1; return; }
+  const m = MODULES[selected];
+  document.getElementById('dKick').textContent = m.key.toUpperCase() + ' · ' + m.cog;
+  document.getElementById('dTitle').textContent = m.name;
+  document.getElementById('dTitle').style.color = m.color;
+  document.getElementById('dCog').textContent = '神经认知对应：' + m.cog;
+  document.getElementById('dDesc').textContent = m.desc;
+  document.getElementById('dImpl').textContent = m.impl;
+  document.getElementById('dScale').textContent = m.scale;
+  detail.hidden = false;
+  const g = moduleGroups[selected];
+  if(g){
+    let box = new THREE.Box3().setFromObject(g);
+    if(selected === 'm3') box = new THREE.Box3().setFromCenterAndSize(new THREE.Vector3(0,0,0), new THREE.Vector3(14,9,9));
+    const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
+    selHelper.position.copy(center);
+    selHelper.scale.set(Math.max(size.x,1.6)+1.0, Math.max(size.y,1.6)+1.0, Math.max(size.z,1.6)+1.0);
+    selHelper.material.color.set(m.hex);
+    selHelper.visible = true;
+  }
+  ltmDim = (selected === 'm4b') ? 1 : 0.25;
+}
+document.getElementById('dClose').addEventListener('click', () => { if(selected) select(selected); });
+window.addEventListener('keydown', e => { if(e.key === 'Escape' && selected) select(selected); });
+
+/* ---------- 速度调节器 ---------- */
+const speedRange = document.getElementById('speedRange');
+const speedVal   = document.getElementById('speedVal');
+const presetBtns = Array.from(document.querySelectorAll('.sp-btn'));
+
+function paintTrack(){
+  const min = parseFloat(speedRange.min), max = parseFloat(speedRange.max);
+  const p = (speed - min) / (max - min) * 100;
+  speedRange.style.setProperty('--p', p + '%');
+}
+function applySpeed(s){
+  speed = Math.min(3, Math.max(0.2, s));
+  spawnInterval = BASE_INTERVAL / speed;
+  speedScale = 1 / speed;
+  speedVal.textContent = speed.toFixed(1) + '×';
+  speedRange.value = speed;
+  tokens.forEach(t => { if(t.alive) t.seg = (BASE_SEG + Math.random()*0.16) * speedScale; });
+  presetBtns.forEach(b => b.classList.toggle('on', Math.abs(parseFloat(b.dataset.s) - speed) < 0.06));
+  paintTrack();
+}
+speedRange.addEventListener('input', () => applySpeed(parseFloat(speedRange.value)));
+presetBtns.forEach(b => b.addEventListener('click', () => applySpeed(parseFloat(b.dataset.s))));
+applySpeed(1);
+
+/* 射线拾取 */
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2(-10,-10);
+const tip = document.getElementById('tip');
+let pointerPx = {x:0,y:0}, pointerDirty = false;
+let downX = 0, downY = 0, dragged = false;
+
+renderer.domElement.addEventListener('pointerdown', e => { downX = e.clientX; downY = e.clientY; dragged = false; });
+renderer.domElement.addEventListener('pointermove', e => {
+  if(Math.abs(e.clientX-downX) + Math.abs(e.clientY-downY) > 6) dragged = true;
+  const r = hero.getBoundingClientRect();
+  pointer.x = ((e.clientX - r.left)/r.width)*2 - 1;
+  pointer.y = -((e.clientY - r.top)/r.height)*2 + 1;
+  pointerPx = { x:e.clientX - r.left, y:e.clientY - r.top };
+  pointerDirty = true;
+});
+renderer.domElement.addEventListener('pointerleave', () => { pointer.set(-10,-10); tip.style.opacity = 0; });
+renderer.domElement.addEventListener('click', () => {
+  if(dragged) return;
+  const hit = pickNode();
+  if(hit) select(hit.userData.module);
+  else if(selected) select(selected);
+});
+function pickNode(){
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects(nodes, false);
+  return hits.length ? hits[0].object : null;
+}
+
+/* 控制条 */
+const btnRotate = document.getElementById('btnRotate');
+const btnFlow   = document.getElementById('btnFlow');
+const btnLinks  = document.getElementById('btnLinks');
+const btnPause  = document.getElementById('btnPause');
+const btnReset  = document.getElementById('btnReset');
+let paused = false, showLinks = true;
+
+btnRotate.addEventListener('click', () => { controls.autoRotate = !controls.autoRotate; btnRotate.classList.toggle('on', controls.autoRotate); });
+btnFlow.addEventListener('click', () => { tokensActive = !tokensActive; btnFlow.classList.toggle('on', tokensActive);
+  if(!tokensActive) tokens.forEach(t => t.kill()); });
+btnLinks.addEventListener('click', () => {
+  showLinks = !showLinks; btnLinks.classList.toggle('on', showLinks);
+  edgeGroups.forEach(g => g.mat.opacity = showLinks ? 0.9 : 0);
+  traces.forEach(t => t.visible = false);
+});
+btnPause.addEventListener('click', () => { paused = !paused; btnPause.classList.toggle('on', paused);
+  btnPause.textContent = paused ? '▶ 继续' : '⏸ 暂停'; });
+btnReset.addEventListener('click', () => { camera.position.set(23, 14.5, 29); controls.target.set(0, 0.4, 0); });
+
+/* ============================================================
+   5. 动画
+   ============================================================ */
+const ltmColorBase = new THREE.Color(0x050810);
+const ltmColorHot  = new THREE.Color(0xffd166);
+const tmpColor = new THREE.Color();
+function activateLTM(n){ for(let k=0;k<n;k++) ltmEnergy[(Math.random()*LTM_COUNT)|0] = 1; }
+for(let i=0;i<30;i++) activateLTM(1);
+
+const tTok = document.getElementById('tTok'), tLtm = document.getElementById('tLtm'),
+      tFps = document.getElementById('tFps');
+let fpsAcc = 0, fpsFrames = 0, hudTimer = 0;
+
+let m5Timer = 2.2, burstIdx = 0;
+function surprise(){
+  const b = bursts[burstIdx++ % bursts.length];
+  b.visible = true; b.scale.setScalar(0.6); b.material.opacity = 0.5;
+  b.userData.life = 0;
+  m5Core.material.emissiveIntensity = 2.6;
+  m6Nodes.forEach(n => { n.userData.energy = Math.max(n.userData.energy, 0.7); });
+  m2Layers[3].forEach(n => { n.userData.energy = Math.max(n.userData.energy, 0.4); });
+}
+
+/* 边能量衰减 + 顶点颜色刷新 */
+const NODE_DECAY = 0.035, EDGE_DECAY = 0.012;
+function updateEdgeGroup(eg, dt){
+  const arr = eg.geo.attributes.color.array;
+  const list = eg.list, n = list.length;
+  const k0 = Math.pow(EDGE_DECAY, dt);
+  for(let i=0;i<n;i++){
+    const e = list[i];
+    e.e *= k0;
+    const v = Math.min(1, e.e);
+    const k = 0.13 + v*1.55;
+    const r = eg.base.r + (eg.hot.r - eg.base.r)*v;
+    const g = eg.base.g + (eg.hot.g - eg.base.g)*v;
+    const b = eg.base.b + (eg.hot.b - eg.base.b)*v;
+    arr[i*6]=r*k;   arr[i*6+1]=g*k; arr[i*6+2]=b*k;
+    arr[i*6+3]=r*k; arr[i*6+4]=g*k; arr[i*6+5]=b*k;
+  }
+  eg.geo.attributes.color.needsUpdate = true;
+}
+
+const clock = new THREE.Clock();
+let elapsed = 0;
+
+function animate(){
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if(!paused) elapsed += dt;
+
+  /* token 生成与运动 */
+  if(!paused && tokensActive){
+    spawnTimer += dt;
+    if(spawnTimer > spawnInterval){
+      spawnTimer = 0;
+      const free = tokens.find(t => !t.alive);
+      if(free) free.spawn();
+    }
+    tokens.forEach(t => t.update(dt, elapsed));
+  }
+
+  /* M3 突触迹：只沿活跃通路流动（速度跟 token 倍率联动） */
+  for(const tr of traces){
+    const d = tr.userData, e = d.edge;
+    if(!showLinks || e.e < 0.05){ tr.visible = false; continue; }
+    tr.visible = true;
+    d.t += dt * d.speed * speedScale;
+    if(d.t > 1) d.t -= 1;
+    tr.position.lerpVectors(e.a.position, e.b.position, d.t);
+    tr.material.opacity = Math.min(1, e.e) * 0.95;
+  }
+
+  /* M4a 轨道 */
+  if(m4aPivot.userData.anchors){
+    m4aPivot.rotation.y += dt*0.25;
+    m4aPivot.userData.anchors.forEach(s => {
+      const a = elapsed*0.8 + s.userData.phase;
+      s.position.set(Math.cos(a)*1.7, Math.sin(a*2)*0.5, Math.sin(a)*1.7*Math.cos(Math.PI*0.42));
+    });
+  }
+
+  /* M5 脉动 + surprise */
+  if(!paused){
+    const pulse = 1 + Math.sin(elapsed*2.2)*0.07;
+    m5Core.scale.setScalar(pulse);
+    m5Wire.scale.setScalar(pulse*1.04);
+    m5Wire.rotation.y += dt*0.4; m5Wire.rotation.x += dt*0.18;
+    m5Core.material.emissiveIntensity += (1.05 - m5Core.material.emissiveIntensity)*dt*2.2;
+    outputRing.material.emissiveIntensity += (1.2 - outputRing.material.emissiveIntensity)*dt*2.5;
+    for(const d of m5Beams){
+      d.userData.t += dt*d.userData.speed;
+      if(d.userData.t > 1) d.userData.t -= 1;
+      const p = d.userData.line.geometry.attributes.position;
+      d.position.set(
+        p.getX(0) + (p.getX(1)-p.getX(0))*d.userData.t,
+        p.getY(0) + (p.getY(1)-p.getY(0))*d.userData.t,
+        p.getZ(0) + (p.getZ(1)-p.getZ(0))*d.userData.t
+      );
+    }
+    for(const b of bursts){
+      if(!b.visible) continue;
+      b.userData.life = (b.userData.life||0) + dt;
+      const k = b.userData.life/1.5;
+      if(k >= 1){ b.visible = false; continue; }
+      b.scale.setScalar(0.6 + k*7);
+      b.material.opacity = 0.5*(1-k);
+    }
+    m5Timer -= dt;
+    if(m5Timer <= 0){ m5Timer = 3.2 + Math.random()*3.4; surprise(); }
+  }
+
+  /* M4b 事件驱动印迹 */
+  if(!paused){
+    for(let k=0;k<3;k++) if(Math.random() < 0.55) activateLTM(1);
+    let lit = 0;
+    for(let i=0;i<LTM_COUNT;i++){
+      const e = ltmEnergy[i], prev = ltmPrev[i];
+      if(e > 0.003 || prev > 0.003){
+        ltmEnergy[i] = e * Math.pow(0.03, dt);
+        const v = Math.min(1, ltmEnergy[i]);
+        tmpColor.copy(ltmColorBase).lerp(ltmColorHot, v).multiplyScalar(ltmDim);
+        ltmMesh.setColorAt(i, tmpColor);
+        ltmPrev[i] = ltmEnergy[i];
+        if(v > 0.12) lit++;
+      }
+    }
+    ltmLit = lit;
+    if(ltmMesh.instanceColor) ltmMesh.instanceColor.needsUpdate = true;
+  }
+
+  /* 边高亮 */
+  if(showLinks) edgeGroups.forEach(eg => updateEdgeGroup(eg, dt));
+
+  /* 神经元：token 流过才亮，快速回落 */
+  const dimFor = m => (!selected || selected === m) ? 1 : 0.2;
+  const kd = Math.pow(NODE_DECAY, dt);
+  for(const n of nodes){
+    const u = n.userData;
+    u.energy *= kd;
+    n.material.emissiveIntensity = (DORMANT + u.energy*3.4) * dimFor(u.module);
+    n.scale.setScalar(u.size * (1 + u.energy*0.8));
+  }
+
+  /* hover 提示 */
+  if(pointerDirty){
+    pointerDirty = false;
+    const hit = pickNode();
+    if(hit){
+      const m = MODULES[hit.userData.module];
+      const on = hit.userData.energy > 0.18;
+      tip.innerHTML = '<b style="color:'+m.color+'">'+m.name+'</b><small>'+
+        (on ? '● 正在计算 · ' : '○ 未参与本步 · ')+m.short+'</small>';
+      tip.style.left = pointerPx.x + 'px';
+      tip.style.top  = pointerPx.y + 'px';
+      tip.style.opacity = 1;
+      renderer.domElement.style.cursor = 'pointer';
+    }else{
+      tip.style.opacity = 0;
+      renderer.domElement.style.cursor = 'grab';
+    }
+  }
+
+  /* HUD */
+  hudTimer += dt; fpsAcc += dt; fpsFrames++;
+  if(hudTimer > 0.25){
+    hudTimer = 0;
+    tTok.textContent = tokenCount;
+    tLtm.textContent = ltmLit;
+    tFps.textContent = fpsFrames > 0 ? Math.round(fpsFrames/fpsAcc) : '–';
+    fpsAcc = 0; fpsFrames = 0;
+  }
+
+  controls.update();
+  if(composer) composer.render(dt); else renderer.render(scene, camera);
+  labelRenderer.render(scene, camera);
+}
+animate();
+
+/* ============================================================
+   6. 尺寸 / HUD 自适应布局
+   ============================================================ */
+const brandEl = document.querySelector('.brand');
+const navEl   = document.getElementById('nav');
+function layoutHud(){
+  const h = hero.clientHeight;
+  let top = 190;
+  if(brandEl){
+    const b = brandEl.getBoundingClientRect().bottom;
+    if(b > 0) top = Math.max(150, b + 16);
+  }
+  top = Math.min(top, h * 0.46);
+  document.documentElement.style.setProperty('--panel-top', Math.round(top) + 'px');
+
+  let badgeTop = 96;
+  if(navEl){
+    const n = navEl.getBoundingClientRect().bottom;
+    if(n > 0) badgeTop = n + 10;
+  }
+  document.documentElement.style.setProperty('--badge-top', Math.round(badgeTop) + 'px');
+}
+
+function resize(){
+  W = hero.clientWidth; H = hero.clientHeight;
+  camera.aspect = W/H; camera.updateProjectionMatrix();
+  renderer.setSize(W, H);
+  labelRenderer.setSize(W, H);
+  if(composer) composer.setSize(W, H);
+  if(bloomPass) bloomPass.resolution.set(W, H);
+  layoutHud();
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 120));
+if(window.ResizeObserver && brandEl){
+  try{ new ResizeObserver(() => layoutHud()).observe(brandEl); }catch(e){}
+}
+if(document.fonts && document.fonts.ready) document.fonts.ready.then(layoutHud).catch(()=>{});
+resize();
+</script>
 </body>
 </html>
