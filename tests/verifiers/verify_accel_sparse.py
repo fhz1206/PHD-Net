@@ -140,6 +140,22 @@ def main() -> int:
     check(dw2 <= _ATOL + _RTOL * s2, "A3 learn 后 CSR val 一致",
           f"max|Δ|={dw2:.3e} (相对 {dw2/s2:.2e})")
 
+    # A1b 连续不同 h：gather 缓存必须逐 h失效（P112 的回归门禁）
+    # 这条专门盯 `_sp_gather` 的缓存判据。第一版用 `torch.equal`判「同一个
+    # h」，性能上它是**每步强制设备同步**；改成主机侧 epoch 后，判据一旦漏在
+    # 某条上传路径上（如 `forward` 走 `_to_dev` 而非 `_staged_to_dev`），
+    # 就会把上一步的 gather 结果静默复用给新 h —— 只有数值对拍能抓到。
+    _, acc_seq, _, _ = build_pair(n_h, n_out, k, seed=23)
+    dmax = 0.0
+    for i in range(6):                # 连续 6 个不同 h
+        hs = rng.normal(0.0, 1.0 + i, n_h)
+        dmax = max(dmax, float(np.abs(np.asarray(acc_seq(hs))).max()))
+    # 每次 forward 的 h 尺度不同 → y 的量级应随之变化；若缓存被错误复用，
+    # y 会被冻结在上一个 h 的结果上（dmax 不再增长）。
+    check(dmax > 0.0 and acc_seq._cache_g_epoch == acc_seq._ht_epoch,
+          "A1b 连续不同 h：gather 缓存逐 h 失效（epoch 判据）",
+          f"cache_epoch={acc_seq._cache_g_epoch} ht_epoch={acc_seq._ht_epoch}")
+
     # A4 语义锚：稀疏 == 稠密里只保留连接位的那个矩阵
     # ⚠ 两条纪律（第一版都踩了，报出 1.40 的假失败）：
     #   ① 必须用 **csr3 自己的** idx/val（seed=17），不能复用 seed=7 的；
