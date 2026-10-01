@@ -894,10 +894,24 @@ def main() -> None:
                         f"{k} {v * 1000 / _dt:.2f}" for k, v in _lp.items())
                           + " ms/tok", flush=True)
                 if getattr(lm.net, "_prof_on", False) and lm.net._prof:
+                    # P115：`_prof` 是**从 token 0 起全程累加**（代码事实：
+                    # `_prof[name] = _prof.get(name,0)+dt`，从不清零），
+                    # 所以这一行是「历史平均」，会被启动期（numba 首次编译、
+                    # 设备 kernel 首次编译）系统性高估。并行打印**滑窗**口径
+                    #（上一个打印间隔内的真实平均），两个都给出。
                     _pr = sorted(lm.net._prof.items(), key=lambda kv: -kv[1])[:6]
-                    print("      segments: " + "  ".join(
+                    print("segments(cum): " + "  ".join(
                         f"{k} {v * 1000 / max(1, i - done):.2f}" for k, v in _pr)
                           + " ms/tok", flush=True)
+                    _wn = int(getattr(lm.net, "_prof_win_n", 0) or 0)
+                    if _wn > 0:
+                        _pw = sorted(lm.net._prof_win.items(),
+                                     key=lambda kv: -kv[1])[:6]
+                        print("      segments(win): " + "  ".join(
+                            f"{k} {v * 1000 / _wn:.2f}" for k, v in _pw)
+                              + f" ms/tok  [{_wn} steps]", flush=True)
+                    # 打印后清空滑窗，下一个间隔重新统计
+                    lm.net.reset_prof_window()
                 # P41：系统/设备遥测（CPU/RAM/NPU/HBM；IPC 需外部 perf）
                 try:
                     print("      " + _tel.fmt(_tel.sample()), flush=True)
