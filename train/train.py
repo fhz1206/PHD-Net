@@ -757,12 +757,14 @@ def main() -> None:
     # 措施：①freeze 掉导入期的常量对象（模型/配置/词表句柄，之后不再参与扫描）；
     # ②大幅提高 gen0/gen1 阈值（长跑循环几乎不产生真循环引用，回收收益低、
     #    扫描成本高）。遥测新增 `GC <对象数>M/gen2 <次数>` 可验证效果。
+    # P102（2026-09-30）：gc.freeze + 大阈值——**已回滚**（P105）：fhz 实测卡在
+    # freeze 打印之后；且 `tracked objects = 0` 说明 freeze 后 get_objects()
+    # 返回空（freeze 把所有已存在对象移出 GC 跟踪集），行为未验证。保留
+    # collect + 保守的 set_threshold（只调频率，不冻结对象）。
     import gc as _gc
     _gc.collect()
-    _gc.freeze()
     _gc.set_threshold(50_000, 200, 200)
-    print(f"[gc] freeze() + threshold(50000, 200, 200); "
-          f"tracked objects = {len(_gc.get_objects()):,}", flush=True)
+    print("[gc] collect + threshold(50000, 200, 200)（freeze 已回滚）", flush=True)
 
     for ep in range(args.epochs):
         if _STOP["flag"] or (args.tokens and i - done >= args.tokens):
