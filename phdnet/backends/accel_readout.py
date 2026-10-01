@@ -256,7 +256,8 @@ class AccelReadout:
         self._cache_y = None
         # P111：稀疏 gather 缓存（(n_out,k) 复用，见 _sp_gather）
         self._cache_g = None
-        self._cache_g_src = None
+        self._cache_g_epoch = -1                            # P112：主机侧 epoch 判据
+        self._ht_epoch = 0                                  # 每次上传新 h 递增
         self._csr_val_host = None                           # P111：_csr 导出缓存
 
     # ---------- 前向 ----------
@@ -283,19 +284,26 @@ class AccelReadout:
         return self.W @ ht
 
     def _sp_gather(self, ht):
-        """稀疏行内gather：取每行 k 个h 分量（(n_out,k)），供前向与更新共用。
+        """稀疏行内 gather：取每行 k 个 h 分量（(n_out,k)），供前向与更新共用。
 
-        缓存判据与 `_lookup_ht` 同源（同一 h 则复用），但缓存的是**gather 结果**
-        而不是 h —— 因为 gather 出的 (n_out,k) 张量比 h 大三个数量级，每步重算
-        才是真正的浪费。
+        缓存判据（**P112 修复，这里原先是性能 bug**）
+        ----------------------------------------------
+        第一版用 `torch.equal(self._cache_g_src, ht)` 判「是不是同一个 h」。
+        `torch.equal` 逐元素比较后返回 **Python bool** → 在 NPU 上这是一次
+        **强制设备同步**：CPU 必须等所有已入队 kernel 跑完才能拿到结果。等于把
+        P34 刚用 `nll_sync_every` 消除掉的那个同步又加回来，且发生在**每步**的
+        最热路径上（服务器日志实测：读出 7.68 ms/tok，占 43.5%）。
+
+        改为**主机侧 epoch 标记**：每次上传新 h 就递增 `_ht_epoch`，
+        `_sp_gather` 只比这个整数。语义等价（同一 epoch = 同一个 h），
+        **零设备交互**。
+        ⚠ 不能简化成「盲目复用缓存」——那会在 h 变化时静默用错 gather 结果。
         """
-        g = self._cache_g
-        if g is not None and self._cache_g_src is not None:
-            if torch.equal(self._cache_g_src, ht):
-                return g
-        g = ht[self.Wi]# (n_out, k) 高级索引 gather
+        if self._cache_g is not None and self._cache_g_epoch == self._ht_epoch:
+            return self._cache_g
+        g = ht[self.Wi]                                  # (n_out, k) 高级索引 gather
         self._cache_g = g
-        self._cache_g_src = ht.clone()
+        self._cache_g_epoch = self._ht_epoch
         return g
 
     def _int8_update(self, dp32, ht32, alpha: float) -> None:
@@ -326,6 +334,12 @@ class AccelReadout:
         （P28：生产热路径是 `y = readout(h)` → `learn_softmax(..., y_pre=y)`，
         若不缓存就要 D2H 289 KiB 再 H2D 传回，纯往返）。
         """
+        # P112：这也是一次「新 h 上传」，必须递增 epoch —— forward 走的是
+        # `_to_dev` 而**不是** `_staged_to_dev`（前者不做 pinned 暂存），
+        # 只在 `_staged_to_dev` 里递增会让本路径的 epoch 恒定不变，
+        # `_sp_gather` 于是把上一步的 gather 结果错误地复用给新 h。
+        # （第一版遗漏此处 → verify_accel_sparse A1 立刻报数值不一致。）
+        self._ht_epoch += 1
         ht = self._to_dev(h)
         y = self._matmul(ht)
         self._cache_h = np.ascontiguousarray(h, dtype=np.float32)
@@ -717,7 +731,12 @@ class AccelReadout:
         缓冲池轮转 + Event 覆写保护（pinned 复用前必须确认上次拷贝已完成；
         每步 CPU 几 ms ≫ H2D 几 µs，实际零等待）。pin 不可用（CPU-only torch
         / 驱动限制）时回落同步路径，数值逐位一致。
+
+        P112：**每次上传新 h 都递增 `_ht_epoch`**（主机侧整数，零设备交互），
+        供 `_sp_gather` 的缓存判据使用 —— 取代原先那个会强制设备同步的
+        `torch.equal`。
         """
+        self._ht_epoch += 1
         a = np.ascontiguousarray(h, dtype=np.float32)
         if self._pin_bufs is None:                      # 懒初始化（一次）
             self._pin_bufs = []
