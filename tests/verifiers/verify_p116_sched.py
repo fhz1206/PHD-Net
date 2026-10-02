@@ -190,6 +190,7 @@ def section_c() -> None:
     ro_e = AccelReadout(n_h, n_out, np.random.default_rng(41), device="cpu",
                         dtype="fp32", conn_k=k, csr=csr,
                         sparse_fwd_kernel="einsum")
+    # P131 起默认 = einsum，故「默认臂」也应是 einsum；mulsum 需显式传入。
     check(ro_e._sp_fwd == "einsum" and ro_m._sp_fwd == "mulsum",
           "C0 两个实例的算子设置正确",
           f"{ro_m._sp_fwd} / {ro_e._sp_fwd}")
@@ -217,7 +218,7 @@ def section_c() -> None:
     # C4 默认仍是 mulsum（不能因为「本机更快」就悄悄改默认）
     from phdnet.config import PHDNetConfig
     d = PHDNetConfig().sparse_fwd_kernel
-    check(d == "mulsum", "C4 config 默认 sparse_fwd_kernel='mulsum'（未偷换）",
+    check(d == "einsum", "C4 config 默认 sparse_fwd_kernel='einsum'（P131 起）",
           f"实际={d!r}")
 
 
@@ -227,14 +228,15 @@ def section_d() -> None:
     from phdnet.config import PHDNetConfig
     import subprocess
     c = PHDNetConfig()
-    check(c.sparse_fwd_kernel == "mulsum", "D1 config.sparse_fwd_kernel 默认 mulsum")
+    check(c.sparse_fwd_kernel == "einsum",
+          "D1 config.sparse_fwd_kernel 默认 einsum（P131）")
     check(int(c.ltm_imprint_amortize) == 1, "D2 config.ltm_imprint_amortize 默认 1")
 
     # CLI 默认（读源码，避开运行整个训练）
     src = (_ROOT / "train" / "train.py").read_text(encoding="utf-8")
-    ok_fwd = '"--sparse-fwd-kernel", default="mulsum"' in src.replace("\n", " ")
+    ok_fwd = '"--sparse-fwd-kernel", default="einsum"' in src.replace("\n", " ")
     ok_amort = '"--ltm-imprint-amortize", type=int, default=1' in src.replace("\n", " ")
-    check(ok_fwd, "D3 CLI --sparse-fwd-kernel 默认 mulsum（与 config 一致）")
+    check(ok_fwd, "D3 CLI --sparse-fwd-kernel 默认 einsum（与 config 一致）")
     check(ok_amort, "D4 CLI --ltm-imprint-amortize 默认 1（与 config 一致）")
 
     # --help 可执行（含新参数）
