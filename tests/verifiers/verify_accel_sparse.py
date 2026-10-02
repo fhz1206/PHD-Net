@@ -397,6 +397,32 @@ def main() -> int:
           "C4e3 addcmul_ 与物化式**容差内一致**（fp32 1 ulp，非逐位）",
           f"max|Δ|={_d:.3e} 相对={_d/_scale:.3e}")
 
+    # C4f. gather 中间量精度开关（P145）+ 重复赋值检查
+    print("\n[C4f] gather 精度开关与死代码检查（P145）")
+    import re as _re3
+    _pcfg = (_ROOT / "phdnet" / "config.py").read_text(encoding="utf-8")
+    _n_impl = len(_re3.findall(r"^ *readout_gather_impl *:", _pcfg, _re3.M))
+    check(_n_impl == 1,
+          "C4f1 config 里 readout_gather_impl **只定义一次**"
+          "（P145 清掉 3 份重试残留）", f"实际 {_n_impl} 次")
+    from phdnet.config import PHDNetConfig as _PC5
+    check(str(_PC5().readout_gather_dtype) == "fp32",
+          "C4f2 config 默认 gather_dtype=fp32（保持现状）",
+          f"实际={_PC5().readout_gather_dtype!r}")
+    # 数值契约：fp32 逐位不变；fp16 在容差内（实测相对误差 ~2e-4）
+    _, ro32, _, _ = build_pair(n_h, n_out, k, seed=43)
+    _, ro16, _, _ = build_pair(n_h, n_out, k, seed=43)
+    ro16._gather_dtype = "fp16"                # noqa: SLF001
+    _h5 = rng.normal(0.0, 1.0, n_h).astype(np.float32)
+    _y32 = np.asarray(ro32(_h5))
+    _y16 = np.asarray(ro16(_h5))
+    _rel = float(np.abs(_y16 - _y32).max() / max(1e-30, np.abs(_y32).max()))
+    check(_rel <= 1e-2,
+          "C4f3 fp16 的 g 在**容差内**（实测相对误差 ~2e-4，远松于1e-2）",
+          f"max相对Δ={_rel:.3e}")
+    check(getattr(ro32, "_gather_dtype", "fp32") == "fp32",
+          "C4f4 默认实例的 gather_dtype 是 fp32（未被动过）")
+
     # ── D. 零回归 ─────────────────────────────────────────────────────────
     print("\n[D] 零回归：conn_k=0 稠密路径未被污染")
     dense_ref = AccelReadout(n_h, n_out, np.random.default_rng(23), device="cpu",
