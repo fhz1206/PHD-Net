@@ -32,7 +32,7 @@ from .plasticity import NUMBA_OK
 if NUMBA_OK:                                        # pragma: no cover
     from numba import njit, prange
 
-    @njit(cache=True, parallel=True, fastmath=False)
+    @njit(cache=True, parallel=True, fastmath=False, nogil=True)
     def _ro_dense_update(W, dp, h, eta):
         """W -= (dp ⊗ h) · eta —— 融合、按行并行；与 numpy 三步路径逐位等价。"""
         n_out, n_in = W.shape
@@ -240,7 +240,7 @@ def _rint_rne(v):
 
 # P9：量化码本的更新核（fp16/bf16/fp8/fp4）——LUT 反量化 + 位算法重量化。
 if NUMBA_OK:                                        # pragma: no cover
-    @njit(cache=True, parallel=True, fastmath=False)
+    @njit(cache=True, parallel=True, fastmath=False, nogil=True)
     def _ro_q_update_fp16(codes, scr, dp, h, eta, n_in):
         """fp16 码本：LUT 反量化 → fp32 更新 → RNE 位算法重量化（按行并行）。"""
         n_out = codes.shape[0] // n_in
@@ -254,7 +254,7 @@ if NUMBA_OK:                                        # pragma: no cover
                 w = lut_fp16[codes[o]] - (e * h[j]) * eta
                 codes[o] = _q_fp16(scr, w)
 
-    @njit(cache=True, parallel=True, fastmath=False)
+    @njit(cache=True, parallel=True, fastmath=False, nogil=True)
     def _ro_q_update_bf16(codes, scr, dp, h, eta, n_in):
         """bf16 码本：同上（RNE 位截断）。"""
         n_out = codes.shape[0] // n_in
@@ -268,7 +268,7 @@ if NUMBA_OK:                                        # pragma: no cover
                 w = lut_bf16[codes[o]] - (e * h[j]) * eta
                 codes[o] = _q_bf16(scr, w)
 
-    @njit(cache=True, parallel=True, fastmath=False)
+    @njit(cache=True, parallel=True, fastmath=False, nogil=True)
     def _ro_q_update_fp8(codes, scr, dp, h, eta, n_in):
         """fp8 e4m3 码本：同上（最近格点、并列取小幅值）。"""
         n_out = codes.shape[0] // n_in
@@ -282,7 +282,7 @@ if NUMBA_OK:                                        # pragma: no cover
                 w = lut_fp8[codes[o]] - (e * h[j]) * eta
                 codes[o] = _q_fp8(scr, w)
 
-    @njit(cache=True, parallel=True, fastmath=False)
+    @njit(cache=True, parallel=True, fastmath=False, nogil=True)
     def _ro_q_update_fp4(codes, scr, mxs, dp, h, eta, n_in, ws, step):
         """fp4 e2m1 + **MX 块缩放**（P12，2026-09-28）：半字节打包 + 每 16 元素
         一块的共享缩放（ws: (n_out, n_blk) fp32），解决逐张量缩放下小权重整体
@@ -355,7 +355,7 @@ if NUMBA_OK:                                        # pragma: no cover
     # ±iinfo(int32).max/min，**无一元素回绕**（回绕会让符号翻转且幅度仍在
     # 码本内 → 看起来「合法」但训练已被静默损坏）。
     # -----------------------------------------------------------------------
-    @njit(cache=True, parallel=True, fastmath=False)
+    @njit(cache=True, parallel=True, fastmath=False, nogil=True)
     def _ro_q_update_int16(codes, dp, h, eta, n_in, wscale):
         """int16 定点码本（2 B/权重）：LUT 反量化 → 更新 → RNE 取整 →
         **饱和裁剪**到 ±32767（按行并行）。
@@ -385,7 +385,7 @@ if NUMBA_OK:                                        # pragma: no cover
                 else:
                     codes[o] = np.uint16(np.int64(q))
 
-    @njit(cache=True, parallel=True, fastmath=False)
+    @njit(cache=True, parallel=True, fastmath=False, nogil=True)
     def _ro_q_update_int32(codes, dp, h, eta, n_in, wscale):
         """int32 定点码本（4 B/权重，无 LUT —— 2³² 格点的 fp32 LUT 是 17 GB，
         **不可能物化**，故本核完全无查表：反量化 = `code·scale` 一次乘）。
@@ -412,7 +412,7 @@ if NUMBA_OK:                                        # pragma: no cover
                     q = -2147483648.0
                 codes[o] = np.int32(q)
 
-    @njit(cache=True, parallel=True, fastmath=False)
+    @njit(cache=True, parallel=True, fastmath=False, nogil=True)
     def _ro_q_matvec_u16(codes, lut, h, n_in, wscale):
         n_out = codes.shape[0] // n_in
         y = np.empty(n_out, dtype=np.float64)
@@ -424,7 +424,7 @@ if NUMBA_OK:                                        # pragma: no cover
             y[i] = s
         return y
 
-    @njit(cache=True, parallel=True, fastmath=False)
+    @njit(cache=True, parallel=True, fastmath=False, nogil=True)
     def _ro_q_matvec_u8(codes, lut, h, n_in, wscale):
         n_out = codes.shape[0] // n_in
         y = np.empty(n_out, dtype=np.float64)
@@ -436,7 +436,7 @@ if NUMBA_OK:                                        # pragma: no cover
             y[i] = s
         return y
 
-    @njit(cache=True, parallel=True, fastmath=False)
+    @njit(cache=True, parallel=True, fastmath=False, nogil=True)
     def _ro_q_matvec_fp4(codes, lut, h, n_in, ws):
         """fp4 e2m1 + MX 块缩放前向：w = lut[c] × ws[i, j>>4]（块对齐行步长）。"""
         n_blk = (n_in + 15) // 16
@@ -454,7 +454,7 @@ if NUMBA_OK:                                        # pragma: no cover
             y[i] = s
         return y
 
-    @njit(cache=True, parallel=True, fastmath=False)
+    @njit(cache=True, parallel=True, fastmath=False, nogil=True)
     def _ro_q_matvec_i32(codes, h, n_in, wscale):
         """int32 前向：**无 LUT**（2³² 格点的表无法物化）——反量化 = `code·scale`。
 

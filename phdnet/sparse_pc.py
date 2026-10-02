@@ -40,7 +40,24 @@ from .plasticity import NUMBA_OK
 if NUMBA_OK:                                        # pragma: no cover
     from numba import njit, prange
 
-    @njit(cache=True, fastmath=True, parallel=True)
+    # P123（fhz 指示加 nogil）：`--m2-kernel plain` 走的就是下面这5 个核。
+    # `nogil=True` 让核执行期间**释放 GIL**，从而能与其它 Python 线程并发
+    # —— 生产环境里主进程有个**nogil 分词线程**（日志：
+    # `[parallel] tokenisation thread (numba nogil)=153`），它要占大量核。
+    # 核若持 GIL，分词线程就得等 → 这是「真实存在的并发」，不是假设。
+    #
+    # ⚠⚠ **但代价必须先量**（P121 教训：别为「看起来更并发」到处加）：
+    #   本机 x86 8 核实测 1B 档尺寸（n=1024, k=128）：
+    #     单次调用    无 nogil 0.090 ms → 有 nogil 0.097 ms（**慢 7.8%**）
+    #     并发场景    无 nogil 0.021 s  → 有 nogil 0.024 s（**慢 14%**）
+    #   即**本机是负收益**。但本机是 8 核 x86，生产是 **191 核 aarch64**——
+    #   x86 结论不构成昇腾证据（项目已实测到四次方向相反）。故按指示加上，
+    #   **但必须在服务器 A/B 后再定去留**（见 P123 的 A/B 判据）。
+    #
+    # 判据（服务器）：`--step-profiling` 的 `segments(win)` 里 M2_infer 与
+    # `loop: tokenize`。若 **tokenize 明显变短**（分词不再被阻塞）→ 留；
+    # 若 M2_infer 变长且 tokenize 不变 → 去掉（说明本机结论成立，昇腾也如此）。
+    @njit(cache=True, fastmath=True, parallel=True, nogil=True)
     def _csr_matvec(indptr, idx, val, x):
         """y[i] = Σ_{p∈入边(i)} val[p]·x[idx[p]]（只遍历存在的突触；按行并行）。"""
         n = indptr.shape[0] - 1
@@ -52,7 +69,7 @@ if NUMBA_OK:                                        # pragma: no cover
             y[i] = s
         return y
 
-    @njit(cache=True, fastmath=True, parallel=True)
+    @njit(cache=True, fastmath=True, parallel=True, nogil=True)
     def _csr_add_outer(indptr, idx, val, a, b, eta):
         """稀疏外积累加：val[p] += eta·a[i]·b[idx[p]]（边 (i, idx[p])）。"""
         n = indptr.shape[0] - 1
@@ -63,7 +80,7 @@ if NUMBA_OK:                                        # pragma: no cover
             for p in range(indptr[i], indptr[i + 1]):
                 val[p] += eta * ai * b[idx[p]]
 
-    @njit(cache=True, fastmath=True, parallel=True)
+    @njit(cache=True, fastmath=True, parallel=True, nogil=True)
     def _csr_oja_up(indptr, idx, val, post, pre, eta):
         """稀疏 Oja：Δw = η·post[i]·(pre[j] − post[i]·w)（边 (i, j)）。"""
         n = indptr.shape[0] - 1
@@ -83,7 +100,7 @@ if NUMBA_OK:                                        # pragma: no cover
             elif v < -w_max:
                 val[p] = -w_max
 
-    @njit(cache=True, fastmath=True, parallel=True)
+    @njit(cache=True, fastmath=True, parallel=True, nogil=True)
     def _csr_row_norms(indptr, val):
         n = indptr.shape[0] - 1
         out = np.zeros(n)
@@ -94,7 +111,7 @@ if NUMBA_OK:                                        # pragma: no cover
             out[i] = s ** 0.5
         return out
 
-    @njit(cache=True, fastmath=True, parallel=True)
+    @njit(cache=True, fastmath=True, parallel=True, nogil=True)
     def _csr_scale_rows(indptr, val, target):
         n = indptr.shape[0] - 1
         for i in prange(n):
