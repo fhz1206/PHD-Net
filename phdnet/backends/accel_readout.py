@@ -69,6 +69,7 @@ class AccelReadout:
                  nll_sync_every: int = 1, compile: bool = False,
                  compile_mode: str = "default", conn_k: int = 0,
                  csr=None, lognormal_init: bool = False, exc_ratio: float = 0.8,
+                 gather_impl: str = "index",
                  sparse_fwd_kernel: str = "mulsum"):
         if torch is None:
             raise RuntimeError("未安装 torch，加速读出不可用")
@@ -271,6 +272,12 @@ class AccelReadout:
         self._cache_g_epoch = -1                            # P112：主机侧 epoch 判据
         self._ht_epoch = 0                                  # 每次上传新 h 递增
         self._ht_epoch_at_cache = -1# P122：`_cache_ht` 上传时的 epoch
+        # P134：gather 实现（"index" = 高级索引基线/ "take" = 另一条 device kernel）
+        self._gather_impl = str(gather_impl or "index").lower()
+        # P134：gather 实现（"index" = 高级索引基线 / "take" = 另一条 device kernel）
+        self._gather_impl = str(gather_impl or "index").lower()
+        # P134：gather 实现（"index"= 高级索引基线 / "take" = 另一条 device kernel）
+        self._gather_impl = str(gather_impl or "index").lower()
         self._csr_val_host = None                           # P111：_csr 导出缓存
 
     # ---------- 前向 ----------
@@ -932,6 +939,8 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
         return (AccelReadout(n_h, n_out, rng, device=spec,
                              dtype=cfg.readout_dtype,
                              w_clip=cfg.readout_w_clip,
+                             gather_impl=str(
+                                 getattr(cfg, "readout_gather_impl", "index")),
                              nll_sync_every=int(getattr(cfg, "nll_sync_every", 1)),
                              compile=bool(getattr(cfg, "torch_compile", False)),
                              compile_mode=str(getattr(cfg,

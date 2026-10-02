@@ -144,6 +144,7 @@ def _main() -> int:
     # 这两条是「整类问题」的闸门，而不是逐个参数的补丁。
     import ast
     import io
+    import re
     import re as _re
 
     def _bare_percent_hits(path):
@@ -214,6 +215,26 @@ def _main() -> int:
             tail = (rr.stderr or "").strip().splitlines()
             bad_help.append(f"{rel} (exit={rr.returncode}"
                             + (f": {tail[-1][:60]}" if tail else "") + ")")
+    # P134：显式检查「同一选项被重复定义」——argparse 把它当
+    # `ArgumentError: conflicting option string`（**exit≠0**），
+    # 上面那条 --help 门禁能抓到，但**只在有人真跑它**时。
+    # P134 的教训：加参数时我因两次失败重试插入了**3 份**同样定义，
+    # 编译通过、只有 --help 才炸 → 故单列一条，让失败原因更直白。
+    _dup = []
+    for _f in ap_files:
+        try:
+            _txt = _f.read_text(encoding="utf-8")
+        except Exception:                                  # noqa: BLE001
+            continue
+        for _opt in set(re.findall(r'add_argument\(\s*"(--[a-z0-9\-]+)"', _txt)):
+            _n = _txt.count(f'"{_opt}"')
+            if _n > 1:
+                _dup.append(f"{_f.name}:{_opt}×{_n}")
+    # 本文件的 check() 签名是 (name, cond)，没有 detail 参数
+    _msg = ("冲突: " + "; ".join(_dup[:4])) if _dup \
+        else f"已扫描 {len(ap_files)} 个入口"
+    check(f"无重复定义的 CLI 选项（P134）— {_msg}", not _dup)
+
     _n2 = f"所有 argparse 入口 --help 均可执行（{len(ap_files)} 个候选文件）"
     if bad_help:
         _n2 += "← 失败: " + ", ".join(bad_help)
