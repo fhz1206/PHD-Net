@@ -350,8 +350,16 @@ class PHDNetConfig:
     #（**快 15%**）。修之前是反向的（开 30.54 vs 关 28.70），说明瓶颈在分配而
     # 不在融合本身。模式固定用 `torch_compile_mode="default"`（P44：cudagraph
     # 与 W 原地更新冲突，勿用 reduce-overhead）。
-    torch_compile: bool = False   # P58（fhz「图优化关了吧」）：默认关；
-                                  # inductor 服务器不稳定，eager 差距待 profiling
+    # P58（fhz「图优化关了吧」）：**默认仍关** —— 这是fhz 的显式指令，
+    # 我不单方面推翻。但 P128 改变了前提，理由记在这里供后续决策：
+    #   ① P58 当时**稀疏路径根本用不上融合核**（构造期被 `not self._sparse`
+    #      排除），所以「inductor 不稳定」很可能是别的问题被误记；
+    #   ② P128 已放开稀疏路径，且本机实测融合与 eager **逐位相同**；
+    #   ③ 注释里记的「CANN 上 launch ~50-200μs/kernel，每步 5 个」→
+    #      纯 launch 开销约 0.5 ms/step。P128 消掉其中 4 个（softmax/log/
+    #      sub/addmm_ 融成一个）。读出占端到端 64.7%，故这个量级不可忽略。
+    # → **要试就显式 `--torch-compile`**；失败会自动回落 eager 并告警（P19）。
+    torch_compile: bool = False   # 默认关（P58 指令保持不变）；P128 已解除其前提
     # P44：torch.compile 模式。**默认 "default"**（只融合 kernel，不启用
     # cudagraphs）——cudagraph 与 `W.addmm_` 原地更新冲突（"skipping cudagraphs
     # due to mutated inputs" 警告 + 静默回退），W 每步原地更新是硬约束。

@@ -209,6 +209,14 @@ class AccelReadout:
         self._pin_ok = False
         self._pin_next = 0
         self._pin_cap = 4
+        # P128：融合核的启用**不再排除稀疏路径**。
+        # 此前 `if w0 is None and not self._sparse:` 把稀疏读出排在编译之外 →
+        # 稀疏（= 生产默认）永远跑逐算子 eager：softmax / log / rank-1 更新
+        # 各自成一个 kernel。2026-10-02 服务器日志显示读出 **10.99 ms**、
+        # 是带宽下界（0.300 ms）的 36×，而 P115/P120 的判读规则指向
+        #「瓶颈在 kernel 下发」——逐算子 eager 正是该结论的直接成因。
+        # `_train_step_core` 本身与稀疏无关（它只吃 y32/ht/t/correct/eta），
+        # 故放开是安全的；运行期失败已有「永久回落 eager + 告警」（P19）。
         if compile:
             try:
                 self._fused = torch.compile(self._train_step_core,

@@ -1,56 +1,48 @@
-fix(P127): three silent failures found by reading the server log - HBM-bw, cann-env, AICore>100%
+perf(P128): enable torch.compile fusion for the sparse readout - the actual NPU bottleneck
 
-Read train_1b_1b_pretrain_20261002-130316.log (1b tier, Ascend 191 cores + NPU,
---lang zh) and found three things that had been failing quietly. None could have
-been caught locally.
+Root cause: the sparse readout has never used the fused kernel.
 
-1. HBM-bw never appeared (0 occurrences in 59k tokens)
-   npu-smi info -t usages was being called WITHOUT -i <id>. The official
-   command form is `npu-smi info -t usages -i id`. The signature in the log is
-   distinctive: "[telemetry] npu-smi = ..." was printed and there was NO
-   "parse FAILED" - meaning the command ran fine but produced nothing we could
-   parse. Added _accl_device_id() (parses the digit out of `npu:0`, falls back to
-   `npu-smi info -l`) and, crucially, made a parse failure print the raw output
-   once instead of staying silent.
-   This is the metric the whole "is the NPU actually being used" argument rests
-   on, and it was never producing data.
+In accel_readout.py the construction site had `if w0 is None and not
+self._sparse:`, which excluded the sparse readout - i.e. the PRODUCTION default
+since P108 (conn_k=128) - from compilation. It therefore ran per-op eager every
+step. Meanwhile learn_softmax's runtime branch (`if self._compiled:`) has always
+supported sparse. The fused kernel existed; sparse could never reach it.
 
-2. The [cann-env] block never reached the log file
-   It printed at module top level, where sys.stdout is still the terminal;
-   `sys.stdout = TeeLogger(log_path)` only happens ~400 lines later inside
-   main(). So the four CANN variables were only visible on the console and
-   absent from the file fhz actually reads. Now applied silently, the report is
-   kept, and replayed right after the TeeLogger is installed. Labels are pure
-   ASCII on purpose: this prints after install_stream_filter(), and Chinese
-   literals get rewritten by the translator (it once produced "run 环境").
-   Also fixed the provenance tag - it was reading os.environ to decide
-   "user-set", but those values are what this same process just set.
+Why this is the prime suspect for "the NPU is not fast enough":
+- 2026-10-02 server log: readout 10.99 ms, 64.7% of the step, and 36x the
+  bandwidth floor of 0.300 ms.
+- The P115/P120 reading rule (high AICore plus low bandwidth means the
+  bottleneck is kernel dispatch) points straight at per-op eager - many small
+  kernels, one launch each.
+- The magnitude is estimable: our own comment records "launch ~50-200 us/kernel
+  on CANN, 5 per step", i.e. roughly 0.5 ms/step of pure launch overhead.
+  P128 fuses softmax/log/sub/addmm_ into one.
+- P58 turned compilation off with the reason "inductor is unstable on the
+  server", but back then the sparse path could not use it at all, so that
+  instability was probably a different problem misattributed. This is recorded
+  in config.py, but THE DEFAULT IS STILL OFF - P58 was fhz's explicit
+  instruction and I am not unilaterally reversing it.
 
-3. AICore reported 102-106%
-   Above 100% means the field is not a percentage the way we are formatting it
-   (possibly a busy-cycle ratio or a multi-core aggregate). Telemetry prints it
-   with an uncapped format. Needs the official definition checked before we
-   quote it; for now the number should not be read as "the NPU is 106% busy".
+Verification
+- Local measurement (8192 x 3072, k=128): eager 6.690 ms -> compiled 6.298 ms,
+  1.06x. The x86 gain is small precisely because launch overhead is a smaller
+  fraction there; on NPU it should be materially larger (unverified).
+- Numerically BIT-IDENTICAL: both W and nll match exactly (max|delta| = 0).
+- Premise checked: _train_step_core contains no _sparse and no conn_k branch,
+  so enabling it for sparse is safe.
+- Gate C4d (4 cases) added, including "runtime fallback to eager is correct
+  behaviour, not a FAIL" - that matters because this host cannot compile.
+- Gates: accel_sparse 22 -> 31, fast 9/9, cann_env 26/26, powlaw 32/32,
+  accel_readout PASS, --help exit 0.
 
-Also clarified tools/rebaseline.py's "connectivity 12.5%": that comes from
-lm.net.pc.stats(), i.e. M2 trunk connectivity, not the M6 readout (128/3072 =
-4.2%). Label now says [M2 trunk].
-
-Performance note for the record: end-to-end is 15.84 ms/tok versus P113's 12.09 -
-the readout went 7.83 -> 10.99 ms. Cause not yet established. P123's nogil only
-touches CPU kernels so it should not affect the NPU, and P120's
-TASK_QUEUE_ENABLE=2 should if anything be faster. Needs a server A/B; local
-reproduction is not possible.
-
-Gate: verify_cann_env.py gains section E with five cases (usages carries -i /
-warns when the device id is unknown / reports raw output on parse failure /
-train passes the device id / id-parsing regex), now 26/26. fast 9/9,
---help exit 0.
-
-Lesson, and it is the same one as B18: "the code looks right" plus "it runs
-locally" does not mean the feature works. Both the bandwidth telemetry and the
-CANN environment governance were written without hardware verification and both
-failed silently. Anything that can only be checked on real hardware needs a
-"print the raw output once on failure" hook, or it stays undebuggable forever.
+Server A/B (this is the decisive test)
+  python train/train.py --preset 1b --data pretrain --remote-data \
+      --step-profiling --torch-compile
+  python train/train.py --preset 1b --data pretrain --remote-data \
+      --step-profiling
+Compare the readout segment in segments(win). If the fused run is clearly
+faster, changing the default becomes justified. If it warns "torch.compile
+fusion kernel failed, permanently falling back to eager", capture that warning
+and investigate it - that would mean the P58 instability was real after all.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
