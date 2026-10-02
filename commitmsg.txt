@@ -1,48 +1,39 @@
-perf(P128): enable torch.compile fusion for the sparse readout - the actual NPU bottleneck
+fix(P129): UnboundLocalError in the P127 change, plus a static def-before-use gate
 
-Root cause: the sparse readout has never used the fused kernel.
+My bug, and it broke the first server run of the day (2026-10-02 13:59):
 
-In accel_readout.py the construction site had `if w0 is None and not
-self._sparse:`, which excluded the sparse readout - i.e. the PRODUCTION default
-since P108 (conn_k=128) - from compilation. It therefore ran per-op eager every
-step. Meanwhile learn_softmax's runtime branch (`if self._compiled:`) has always
-supported sparse. The fused kernel existed; sparse could never reach it.
+  UnboundLocalError: cannot access local variable 'lm'
 
-Why this is the prime suspect for "the NPU is not fast enough":
-- 2026-10-02 server log: readout 10.99 ms, 64.7% of the step, and 36x the
-  bandwidth floor of 0.300 ms.
-- The P115/P120 reading rule (high AICore plus low bandwidth means the
-  bottleneck is kernel dispatch) points straight at per-op eager - many small
-  kernels, one launch each.
-- The magnitude is estimable: our own comment records "launch ~50-200 us/kernel
-  on CANN, 5 per step", i.e. roughly 0.5 ms/step of pure launch overhead.
-  P128 fuses softmax/log/sub/addmm_ into one.
-- P58 turned compilation off with the reason "inductor is unstable on the
-  server", but back then the sparse path could not use it at all, so that
-  instability was probably a different problem misattributed. This is recorded
-  in config.py, but THE DEFAULT IS STILL OFF - P58 was fhz's explicit
-  instruction and I am not unilaterally reversing it.
+In P127 I put `_tel._accel_device = getattr(lm.net.readout, ...)` 189 lines
+BEFORE `lm = PHDWordLM(...)` - the Telemetry block sits at line 613, the LM is
+created at line 802. py_compile cannot catch this (the name is perfectly legal
+in the function's scope) and I did not run the entry point locally, so it only
+exploded on the real production startup path.
 
-Verification
-- Local measurement (8192 x 3072, k=128): eager 6.690 ms -> compiled 6.298 ms,
-  1.06x. The x86 gain is small precisely because launch overhead is a smaller
-  fraction there; on NPU it should be materially larger (unverified).
-- Numerically BIT-IDENTICAL: both W and nll match exactly (max|delta| = 0).
-- Premise checked: _train_step_core contains no _sparse and no conn_k branch,
-  so enabling it for sparse is safe.
-- Gate C4d (4 cases) added, including "runtime fallback to eager is correct
-  behaviour, not a FAIL" - that matters because this host cannot compile.
-- Gates: accel_sparse 22 -> 31, fast 9/9, cann_env 26/26, powlaw 32/32,
-  accel_readout PASS, --help exit 0.
+Fixed by moving the assignment to immediately after the LM is constructed.
+Also corrected the attribute name from `_device` to `device`, which is what
+AccelReadout actually exposes.
 
-Server A/B (this is the decisive test)
-  python train/train.py --preset 1b --data pretrain --remote-data \
-      --step-profiling --torch-compile
-  python train/train.py --preset 1b --data pretrain --remote-data \
-      --step-profiling
-Compare the readout segment in segments(win). If the fused run is clearly
-faster, changing the default becomes justified. If it warns "torch.compile
-fusion kernel failed, permanently falling back to eager", capture that warning
-and investigate it - that would mean the P58 instability was real after all.
+New gate: an AST scan for "local variable used before it is assigned", added to
+verify_ms_stream.py - which already carried the "run --help across every argparse
+entry point" gate, so the philosophy matches. Threshold is 30 lines, since
+ordering within a line or two is ordinary control flow. It walks every function
+in train/train.py and train/infer.py.
+
+The gate is verified to actually catch the bug: re-introducing the misordering
+makes it FAIL and it names the variable and both line numbers
+(`train/train.py:main() inside vocab_text assigned@L683 but first used@L614`);
+restoring the file makes it PASS again. ms_stream goes 42 -> 43 cases.
+
+Honest limitation of the new gate, recorded in the code: a static order check
+can only catch cases inside the same function and more than 30 lines apart. A
+definition in a different function, or a misordering only a few lines wide
+inside a branch, slips through. So this does NOT replace the discipline of
+running a smoke test locally whenever the startup path is touched - it just
+catches the gross version of the mistake.
+
+Gates: fast 9/9, ms_stream 43/43, accel_sparse 31/31, cann_env 26/26,
+accel_readout PASS, and a local smoke run confirms zero UnboundLocalError /
+Traceback markers.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

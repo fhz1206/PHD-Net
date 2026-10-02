@@ -611,10 +611,6 @@ def main() -> None:
     cfg.torch_compile = args.torch_compile             # P38 kernel 融合（默认开）
     cfg.torch_compile_mode = args.torch_compile_mode   # P44 模式（default=无 cudagraph）
     _tel = Telemetry()                                 # P41：系统/设备遥测
-    # P127：把设备号告知遥测，让 `npu-smi -t usages` 能带 `-i <id>`
-    # （不带 -i 时该子命令在 910B 上行为不稳 → HBM-bw 字段恒空）。
-    _tel._accel_device = getattr(lm.net.readout, "_device", None) or \
-        getattr(lm.net, "_readout_device", None)
 
     data_path = DATA_FILES[args.data]
     remote_active = bool(args.remote_data and args.data != "eval")
@@ -800,6 +796,12 @@ def main() -> None:
     tok = _make_tokenizer(seg, tokens, cfg)
     from phdnet.word_lm import PHDWordLM
     lm = PHDWordLM(vocab_text, cfg, seg_kwargs=SEG_KWARGS, tokenizer=tok)
+    # P127：把设备号告知遥测，让 `npu-smi -t usages` 能带 `-i <id>`
+    # （不带 -i 时该子命令在 910B 上行为不稳 → HBM-bw 字段恒空）。
+    # ⚠ **必须在 `lm` 创建之后**——曾在它前面 189 行处赋值 → 首次服务器运行
+    #   直接 `UnboundLocalError: cannot access local variable 'lm'`（2026-10-02
+    #   13:59 报错，生产启动即崩）。`_tel` 可早在任何地方建。
+    _tel._accel_device = getattr(lm.net.readout, "device", None)
     vocab = len(lm.tok)
 
     print("=" * 76)
