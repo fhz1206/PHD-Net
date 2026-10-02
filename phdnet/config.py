@@ -326,6 +326,26 @@ class PHDNetConfig:
     # 故 PPL 锚点会轻微漂移（量级远小于 fp16→fp32 那次，那次是学习规则级变化）。
     # 要回逐位基线：`--sparse-fwd-kernel mulsum`。
     sparse_fwd_kernel: str = "einsum"
+    # P134：稀疏读出的 **gather 实现**（只影响 `ht[Wi]` 这一步）
+    #   "index" = `ht[self.Wi]` 高级索引（**默认**，保持现状）
+    #   "take"  = `torch.take(ht, Wi)` —— 另一条 device kernel，
+    #             本机 x86 实测 10.26 → 5.94 ms（**1.7×**），
+    #             数值**逐位相同**（已验证）。
+    # ⚠ 本机是 CPU 数据，**不构成昇腾证据**（本项目已实测到多次平台方向相反）
+    #   → 默认保持基线，用开关让服务器一键 A/B。
+    readout_gather_impl: str = "index"
+    # P134：稀疏 gather 的实现。`"index"` = `ht[Wi]` 高级索引（旧行为，默认）；
+    # `"take"` = `torch.take`（另一条 device kernel）。**两者逐位相同**。
+    # 本机 x86 实测 take 快 1.7×（10.26→5.94 ms，单段），但**那是 CPU 数据，
+    # 不构成昇腾证据** → 默认保持 index，用开关让服务器一键 A/B。
+    readout_gather_impl: str = "index"
+    # P134：稀疏读出**gather 的实现**（`ht[Wi]` 这一步）。
+    #   "index" = 高级索引（**默认，旧行为**）；"take" = `torch.take`（另一条
+    #            device kernel，本机 x86 实测 10.26 → 5.94 ms即 **1.7×**，
+    #            但那是 CPU 数据，**不构成昇腾证据** → 默认不变）
+    # 两者数值**逐位相同**（工具 + 单测已验证）→ 纯性能开关，无语义风险。
+    # 昇腾上用 `--readout-gather-impl take` 一键 A/B。
+    readout_gather_impl: str = "index"
     # P116 曾加 M4b imprint 配对学习摊销 → **P122 审计后移除**。
     # 现仅保留 1（旧行为，逐位不变）；传 >1 由 `SparseLTM.imprint` fail-fast。
     # 移除理由（实测）：① 收益为 0——`encode` 在摊销分支之前无条件执行，

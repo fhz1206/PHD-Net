@@ -243,6 +243,11 @@ def main() -> None:
                          "等价旧 --data pretrain_zh；sft 分片同样适用）。"
                          "词表扫描不受影响（词表是训练流的超集，OOV 恒 0）。"
                          "⚠ **这个参数会改变训练结果**，与 --lang 不同")
+    ap.add_argument("--readout-gather-impl", default="index",
+                    choices=["index", "take"],
+                    help="P134：稀疏读出 gather 的实现。index=高级索引（默认，"
+                         "旧行为）；take=torch.take（本机 x86 实测快 1.7×，"
+                         "**昇腾待实测**）。两者数值**逐位相同**，纯性能开关")
     ap.add_argument("--readout-powlaw-alpha", type=float, default=0.0,
                     help="P124：M6 读出的**幂律异质连接**指数（k_i ∝ 词频^alpha）。"
                          "**默认 0.0 = 关闭**（与 --readout-conn-k 的均匀 k-conn "
@@ -597,8 +602,14 @@ def main() -> None:
     # P122：imprint 摊销已移除；>1 交给 `SparseLTM.imprint` fail-fast 报错，
     # 不在这里静默钳成 1（那样用户会以为摊销生效了）。
     cfg.ltm_imprint_amortize = int(args.ltm_imprint_amortize)
+    # P134：稀疏 gather 实现（默认 index = 旧行为）
+    cfg.readout_gather_impl = str(args.readout_gather_impl)
     # P124：M6 幂律异质连接（默认 alpha=0 = 关闭，保持均匀 k-conn 逐位不变）
+    # P134：gather 实现（默认 index = 保持现状）
+    cfg.readout_gather_impl = str(args.readout_gather_impl)
     cfg.readout_powlaw_alpha = float(args.readout_powlaw_alpha)
+    # P134：gather 实现（默认 index = 旧行为）
+    cfg.readout_gather_impl = str(args.readout_gather_impl)
     cfg.readout_powlaw_kmin = max(1, int(args.readout_powlaw_kmin))
     cfg.readout_powlaw_kmax = max(0, int(args.readout_powlaw_kmax))
     cfg.readout_powlaw_density = None      # 由 alpha + conn_k 自然决定

@@ -1,45 +1,57 @@
-fix(P133): the segment benchmark measured the wrong model; source it from the production ckpt
+perf(P134): wire the two official Ascend sparse paths, plus a gather-impl switch
 
-Server run 2026-10-02 14:48 crashed, and the output shows why the whole run was
-meaningless before it even started:
+fhz suggested trying third-party libraries for the NPU. Two official paths
+exist and both match our shapes; a third is available immediately as a switch.
 
-  [bench] backend accel:auto | n_out=1,021 n_h=3,072 conn_k=0 dtype=fp32
+torch_npu.npu_gather_sparse_index - official custom operator, documented as
+supported on both A2 and A3 training series. Signature
+npu_gather_sparse_index(input, index) is semantically identical to our h[Wi]
+(take elements of input's dim 0 by index). Its documented conditions for
+actually gaining performance:
+  (1) weight numel > 150*1024/itemsize -> ours 6,738,176 vs threshold 38,400  OK
+  (2) index numel > 960               -> 6,738,176                           OK
+  (3) "data must be aggregated, non-zero and zero distributions clustered"
+      -> our h is a DENSE activation, so this is UNVERIFIED
+Conditions 1 and 2 pass comfortably; 3 can only be settled by measurement.
 
-n_out should be 51,962, and conn_k should be 128, not 0. The tool read the
-vocabulary snapshot, then fed PHDWordLM a 4000-character slice of it - which
-re-tokenized into a 1,021-word vocabulary. Every number that run could have
-produced would have described a different model.
+aclsparseSpMM from CANN ops-sparse - documented to support CSR (exactly our
+format; COO and CSC are not supported) and offers
+ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG, a Kahan-compensated algorithm
+that is kind to fp32. However torch_npu does NOT expose a Python interface, so
+using it means binding aclsparse through ctypes and handling
+aclrtStream/context/workspace lifetimes. This round only probes for the
+library; the binding is not implemented and the tool says so explicitly rather
+than skipping quietly.
 
-Fixed properly rather than patched: the tool now sources everything from a
-production checkpoint, which already carries the real structure -
-tok_vocab for n_out, ro_ip/ro_idx for conn_k and the n_h bound, plus the stack
-weights. Added --ckpt to point at a specific file; by default it picks
-outputs/models/*1b*pretrain*.npz. When conn_k comes out as 0 the tool says so
-loudly, because that is the signature of "you are not measuring the production
-path".
+New switch --readout-gather-impl index|take, default index (unchanged).
+Measured on this x86 host at production dimensions (n_out=52,642, k=128,
+n_h=3,072), best-of-5:
+  (1) h[Wi] baseline          10.26 ms
+  (2) index_select            11.03 ms
+  (3) torch.take               5.94 ms   1.7x
+  (4) einsum, full forward     3.87 ms
+take and the baseline are BIT-IDENTICAL, which the tool verifies every run.
+That 1.7x is CPU data and does NOT constitute Ascend evidence, so the default
+stays on index and the choice is left to a server A/B.
 
-Also fixed a genuine trap in my own code: getattr(ro, "_csr", None) does NOT
-return None when the readout is dense - `_csr` is a property that RAISES
-NotImplementedError, getattr's default does not suppress exceptions. That was
-the traceback. Wrapped in try/except, and noted in the comment so it is not
-rediscovered.
+New tool tools/bench_accel_kernels.py puts all six candidates on the same
+device and the same tensors, reports best-of-N with the jitter ratio, and
+checks numerical equality per candidate. On this host, with no torch_npu and no
+ops-sparse, it degrades honestly and says what is missing.
 
-One more robustness fix: the n_h back-inference from ro_idx only holds when the
-CSR row count equals n_out. When it does not (the local smoke ckpt has 637
-vocab words against 2611 CSR rows), n_h stayed None and then blew up when used
-to build the test vector. It now always resolves to an integer and prints the
-value for the operator to check.
+Two mistakes of mine, both fixed:
+1. Because a script edit failed twice and I retried, --readout-gather-impl got
+   inserted THREE times, and argparse rejects duplicate option strings
+   (compiles fine, only --help explodes). That is the P129 lesson repeating, so
+   verify_ms_stream now has a dedicated duplicate-option assertion
+   (43 -> 44 cases).
+2. gather_impl was passed into _mk_readout, which constructs the numba
+   Readout - a class with no _sp_gather and no such concept - giving
+   TypeError. It now goes to the AccelReadout construction site. Discipline:
+   when adding a parameter, confirm which class actually has that concept.
 
-Verified locally end to end (the local ckpt is a small dense one, so the
-numbers are reference-only, but both the sparse and dense paths execute without
-error). fast 9/9, --help exit 0.
-
-Please rerun on Ascend with
-
-  python tools/bench_readout_segments.py --preset 1b
-
-The line that matters is "[bench] sparse CSR: rows=... conn_k=... nnz=..." - if
-it does not appear, the ckpt is not the production pre-training one and the
-measurements will not transfer.
+Gates: fast 9/9, ms_stream 44/44, accel_readout 30/30, cann_env 30/30,
+accel_sparse 31/31, p116_sched 22/22, powlaw 32/32, ckpt roundtrip PASS,
+local smoke zero crashes.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
