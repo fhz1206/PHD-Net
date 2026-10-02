@@ -1,55 +1,48 @@
-perf(P131): switch the sparse forward kernel to einsum by default; decline B
+perf(P132): add a per-segment readout benchmark - stop guessing from x86
 
-Two of the three asks, and one I did not do.
+fhz asked whether readout can be made faster. Short answer: yes, but not by
+guessing on this host - I have now guessed wrong three more times.
 
-B (imprint amortization) is NOT enabled. P122's audit measured it: the benefit
-is exactly zero - the learn call count goes 23/22/21/20 for N=1/2/3/4, so it
-defers rather than saves, and the buffered tail pairs are never flushed - and
-at N>=2 it corrupts weights, because several learn calls under the same
-step_count give shared neurons dt=0, so the trace never decays. At production
-size (n_dim=1024, m_out=72) max|delta w| is 7.10 at N=2 and 11.98 at N=3; at small
-sizes the delta is zero, which is exactly why it hid. amortize>1 now raises
-ValueError. Turning B on by default would mean enabling a switch already proven
-harmful, so I left it off and am flagging the disagreement rather than quietly
-doing it.
+What I measured here (x86, best-of-5), all wrong or useless:
+  chunking so gather fits L2        0.83-0.91x (slower; just adds kernels)
+  idx int64 -> int32 (saves 25 MiB) 0.58x (halved throughput; type conversion)
+  index_select / take instead of    0.92-0.93x (no difference)
+    advanced indexing
+  embedding(W, Wi) fused            0.02x (catastrophic - it is a lookup, not a sum)
+  CSR SpMM A @h                     15.1 ms (slower than einsum; x86 has no good
+                                    SpMM kernel)
+The revealing one: at smaller sizes the gather costs only 1.38 ms, so "gather is
+slow" is ASCEND-SPECIFIC, not an intrinsic property of the algorithm. Any
+optimisation aimed at it has to be driven by Ascend measurements, not by x86
+relative timings.
 
-C (einsum) IS now the default, in config, in the CLI and in the gates.
+Traffic accounting per step at 1b tier, total 152.6 MiB:
+  idx read (int64)   50.7 MiB   33%
+  W read + write     50.7 MiB   33%
+  g read + write     50.7 MiB   33%   <- einsum already removes this (P131)
+  y read + write      0.4 MiB
+So einsum removes a third of the traffic and 10.99 ms should land near 7.3 ms.
+Being straight about the target: 5 ms is NOT reachable by swapping kernels
+alone, because the remaining three items are each a third and W cannot drop to
+fp16/bf16 - P110 measured that doing so destroys the perceptron update rule.
 
-But I have to correct my own earlier number. P116 reported "einsum is 21%
-faster" from a single measurement, and that was noise. Best-of-5 on this x86 8
--core host, same sizes, several rounds: one round 16.02 vs 15.79 ms (no
-difference), another 18.19 vs 14.38 ms (einsum 21% faster), with run-to-run
-jitter of 1.1x on identical code. This host simply cannot distinguish the two
-kernels reliably.
+New tool tools/bench_readout_segments.py. It times each stage in dependency
+order: (1) H2D of h, (2) gather, (3) mul+sum, (4) einsum, (5) forward total,
+(6) softmax+CE, (7) update addmm_. Every stage is best-of-N and prints its
+jitter ratio; anything above 1.3x is labelled "noise dominated, not a basis for
+optimisation" so a single noisy sample cannot be mistaken for a finding.
 
-So the default change rests on a STRUCTURAL argument, not on speed: mulsum
-materialises a (51962, 128) = 6,651,136 element intermediate every step (25.37
-MiB at 1b tier) which einsum does not. The Ascend speedup is still unmeasured
-and is written up as such in the code comment.
+It handles both the sparse accelerated arm (torch tensors) and the dense
+numba fallback (numpy arrays) - running it here end to end is what proves
+neither path crashes. On this host it reports the CPU fallback, so its numbers
+are reference-only; run it on Ascend for the real breakdown of that 10.99 ms.
 
-New breakdown of where readout time actually goes (x86, relative reference
-only, n_out=51962 / n_h=3072 / k=128):
-  gather h[Wi] alone          9.5-12.3 ms   <- the single biggest item
-  mulsum (W*g).sum(1)         16-18 ms
-  einsum                      14.4-15.8 ms
-  CSR SpMM A@h                15.1 ms
-  (W.unsqueeze(2)*g.unsqueeze(1)).sum(2)   955 ms  (materialises n_out*k*k)
-The real bottleneck is the gather - 6.65 million random pulls from a 3072
-element vector - not the multiply and not the sum. einsum only removes the
-multiply and the materialisation, i.e. roughly half.
+Gates: fast 9/9, py_compile clean, bench --help exit 0.
 
-So getting from 10.99 ms to 5 ms is NOT reachable by swapping kernels alone; it
-needs a different algorithm that removes the gather (bucketing by n_h to turn
-it into contiguous slices, or a real SpMM kernel - Ascend may have one, x86 does
-not). I am not going to guess further without measurement.
-
-Gates: p116_sched 22/22 (three default-value assertions updated), fast 9/9,
-accel_sparse 31/31, cann_env 30/30, accel_readout and powlaw PASS, ms_stream
-43/43, --help exit 0.
-
-Lesson, and it repeats: a single performance measurement is not evidence. The
-project already had a "best-of-3 for any timing" rule and I nearly shipped
-another single-sample conclusion. From now on, any performance default change
-requires best-of-N plus a structural argument.
+Lesson, and it is the fourth time: every wrong conclusion about "readout is
+slow" came from measuring on x86 and extrapolating to Ascend. This project has
+now recorded seven platform direction reversals. For anything device-side,
+segment-measure on the device first and only then choose an optimisation; the
+local host is for checking that the code runs, not for predicting speed.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
