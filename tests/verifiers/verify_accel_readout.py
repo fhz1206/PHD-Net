@@ -35,6 +35,31 @@ import numpy as np                                          # noqa: E402
 _FAILURES: list[str] = []
 
 
+def _random_csr_for(n_out: int, n_h: int, k: int):
+    """P149：造一份 CSR（供 fp8 存储/计算分离的契约检查用）。"""
+    from phdnet.sparse_pc import _random_csr
+    return _random_csr(np.random.default_rng(0), n_out, n_h, k,
+                       0.05 * np.sqrt(n_h / k), False, 0.8)
+
+
+def _fp8_step_ok(ro) -> bool:
+    """P149：fp8 存储的读出能否跑通「前向 + 感知器更新」一步。
+
+    我 P148 把计算域也设成 fp8 → 这一步直接抛
+    "Promotion for Float8 Types is not supported"。这是**回归点**，
+    故钉成门禁：只要有人再把两个域混淆，测试立刻红。
+    """
+    try:
+        h = np.random.default_rng(1).normal(0, 1, ro.n_h).astype(np.float32)
+        t = np.zeros(ro.n_out, dtype=np.float32)
+        t[0] = 1.0
+        y = ro.forward_dev(h)
+        ro.learn_softmax(h, t, 0.15, y_pre=y, target_idx=0)
+        return True
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
 def check(name: str, ok: bool, detail: str = "") -> None:
     tag = "PASS" if ok else "FAIL"
     print(f"  [{tag}] {name}" + (f" —— {detail}" if detail else ""), flush=True)
@@ -319,6 +344,18 @@ def main() -> None:
         _is8 = str(_ro_a.W.dtype) in ("torch.int8", "torch.float8_e4m3fn")
         check("F6a dtype=fp8 构造出 8-bit 码本（fp8 或 int8）",
               _is8, f"W.dtype={_ro_a.W.dtype}")
+        # P149：**存储 fp8 / 计算 fp16** 的分离契约。
+        #   我 P148 把 `_cdtype` 也设成 fp8 → 训练直接崩
+        #   （"Promotion for Float8 Types is not supported"），改了三处才对。
+        #   这里把它钉死，防止再次混淆「存储域」与「计算域」。
+        _csr8 = _random_csr_for(_n8, _h8, 8)          # noqa: F821
+        _f8 = AccelReadout(_h8, _n8, None, device="cpu", dtype="fp8",
+                           conn_k=8, csr=_csr8)
+        check("F6c fp8 存储时 `_cdtype`（计算域）**不是 fp8**",
+              getattr(_f8, "_cdtype", None) != torch.float8_e4m3fn,
+              f"存储={_f8.W.dtype} 计算={getattr(_f8, '_cdtype', None)}")
+        check("F6d fp8 完整一步**不抛异常**（存储/计算分离可跑通）",
+              _fp8_step_ok(_f8), "forward_dev + learn_softmax")
         check("F6b fp8 **运行时探测被真正执行**"
               + ("（原生 fp8）" if getattr(_ro_a, "_fp8_native", False)
                  else "（回落 int8）" if getattr(
