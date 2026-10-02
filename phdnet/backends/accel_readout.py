@@ -813,6 +813,15 @@ def _unsupported_reason(cfg) -> str | None:
     """
     if int(getattr(cfg, "readout_hidden", 0) or 0) > 0:
         return "readout_hidden>0（两级读出未在加速后端实现）"
+    # P124：幂律异质连接 → **行宽不等** → 需要变长 CSR + segment sum，
+    # 与本路径的「均匀 k 稠密张量gather-GEMV」是**不同的算法**（P19 纪律：
+    # 不能「能跑但语义不同」）。必须在能力表**提前**拒绝，否则会一路走到
+    # 构造期抛 ValueError → 被 pick_readout_backend 的兜底 except 吞掉 →
+    # **回落原因丢失**（`_accel_fallback_reason=None`，与 B12 同类静默失效）。
+    if float(getattr(cfg, "readout_powlaw_alpha", 0.0) or 0.0) > 0.0:
+        return ("readout_powlaw_alpha>0（幂律异质连接 = 行宽不等，需变长 CSR "
+                "+ segment sum，加速后端未实现；回落 numba 路径——"
+                "它在 numba 下是正确且已验证的）")
     # P111：稀疏读出**已在加速后端实现**（均匀 k 的 gather-GEMV），不再回落。
     # 仍需拒绝的只有非均匀行宽（幂律变长 CSR）——那是另一种结构，见AccelReadout
     # 的「只支持均匀 k」注释。若将来有人传入变长 CSR，构造期会fail-fast。
@@ -853,20 +862,50 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
     配置不兼容 / 构造异常 → 原 `Readout`（默认路径逐位不变），并把原因记在
     `readout._accel_fallback_reason` 上（不静默）。
     """
+    def _powlaw_counts():
+        """取词频向量（P124）。构造期拿不到 → 由训练循环用 `set_powlaw_counts`
+        注入；未注入时返回 `None`，`build_powlaw_csr` 会退化成均匀分配。
+
+        ⚠ **这是「词频从哪来」的设计缺口**（必须如实记下）：
+        理想的 counts 是**训练语料的词频**（Zipf 分布），但读出在
+        `pick_readout_backend` 时就构造好了，那时词表刚建好、语料尚未流过
+        → **拿不到真实词频**。当前只有两条可行路径：
+          (a) 用**词表序**当代理（`tok.stoi` 的插入序≈ 频次序，因为词是按
+              训练流里出现顺序induced 的）—— 零成本、可立即用，但是**近似**；
+          (b) 两阶段：先用均匀 k-conn 跑一段收集词频，再重建读出（复杂，且
+              会改变 checkpoint 结构）。
+        故本函数先返回注入值，没有则 None（=均匀）。**这个近似是否可接受，
+        必须由 PPL A/B 判定，不能想当然。**
+        """
+        return getattr(cfg, "_powlaw_counts_runtime", None)
+
+    def _mk_readout():
+        """构造 numba `Readout`（**三条分支共用**，P124）。
+
+        幂律参数在这里统一下发，避免「回落路径 / cpu 路径 / auto 无加速路径」
+        三处漏传 —— 那会导致「同一份配置在不同后端得到不同连接结构」。
+        ⚠ `powlaw_counts` **不由 cfg 携带**（它是运行时的词频统计，见
+        `set_powlaw_counts`）：构造期拿不到，须由训练循环在第一次 step 前注入。
+        """
+        from ..readout import Readout
+        return Readout(n_h, n_out, rng, w_clip=cfg.readout_w_clip,
+                       dtype=cfg.readout_dtype, conn_k=cfg.readout_conn_k,
+                       lognormal_init=cfg.lognormal_init,
+                       powlaw_alpha=float(getattr(cfg, "readout_powlaw_alpha", 0.0)),
+                       powlaw_counts=_powlaw_counts(),
+                       powlaw_density=getattr(cfg, "readout_powlaw_density", None),
+                       powlaw_kmin=int(getattr(cfg, "readout_powlaw_kmin", 1)),
+                       powlaw_kmax=int(getattr(cfg, "readout_powlaw_kmax", 0)))
+
     def _fallback(reason: str):
         from ..readout import Readout
-        ro = Readout(n_h, n_out, rng, w_clip=cfg.readout_w_clip,
-                     dtype=cfg.readout_dtype, conn_k=cfg.readout_conn_k,
-                     lognormal_init=cfg.lognormal_init)
+        ro = _mk_readout()
         ro._accel_fallback_reason = reason
         return ro, "numba-cpu(回落)"
 
     spec = str(getattr(cfg, "accel_readout", "auto") or "auto").lower()
     if spec in ("", "cpu", "off", "numba"):
-        from ..readout import Readout
-        return Readout(n_h, n_out, rng, w_clip=cfg.readout_w_clip,
-                       dtype=cfg.readout_dtype, conn_k=cfg.readout_conn_k,
-                       lognormal_init=cfg.lognormal_init), "numba-cpu"
+        return _mk_readout(), "numba-cpu"
     bad = _unsupported_reason(cfg)
     if bad is not None:
         return _fallback(bad)
@@ -879,10 +918,7 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
         except Exception:                                    # noqa: BLE001
             has_accel = False
         if not has_accel:
-            from ..readout import Readout
-            return Readout(n_h, n_out, rng, w_clip=cfg.readout_w_clip,
-                           dtype=cfg.readout_dtype, conn_k=cfg.readout_conn_k,
-                           lognormal_init=cfg.lognormal_init), "numba-cpu"
+            return _mk_readout(), "numba-cpu"
         spec = "auto"                                       # 交给 resolve_device 择优
     try:
         return (AccelReadout(n_h, n_out, rng, device=spec,

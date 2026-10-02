@@ -751,7 +751,10 @@ class Readout:
     def __init__(self, n_in: int, n_out: int, rng: np.random.Generator,
                  w_clip: float = 0.0, dtype: str = "fp32", conn_k: int = 0,
                  lognormal_init: bool = False, exc_ratio: float = 0.8,
-                 hidden: int = 0, hid_k: int = 0, eta_hid: float = 0.002):
+                 hidden: int = 0, hid_k: int = 0, eta_hid: float = 0.002,
+                 powlaw_alpha: float = 0.0, powlaw_counts=None,
+                 powlaw_density: float | None = None,
+                 powlaw_kmin: int = 1, powlaw_kmax: int = 0):
         self._n_in, self._n_out = int(n_in), int(n_out)
         self.conn_k = int(conn_k) if conn_k and conn_k > 0 else 0
         # A4（2026-09-23）：**两级群体读出**（`hidden > 0`，默认 0 = 单层线性）。
@@ -804,10 +807,27 @@ class Readout:
             self._lut = self._lat = None
             self._sbit = 0
         elif self.conn_k > 0:                   # O1-3：结构性稀疏读出（单级）
-            self.conn_k = max(1, min(self.conn_k, n_in))
-            self._csr = _random_csr(rng, n_out, n_in, self.conn_k,
-                                    0.05 * np.sqrt(n_in / self.conn_k),   # fan-in 补偿
-                                    lognormal_init, exc_ratio)
+            _k_uni = max(1, min(self.conn_k, n_in))
+            self.conn_k = _k_uni
+            # P124：幂律异质连接（`sparse_alloc.build_powlaw_csr`）。
+            # `alpha=0`（**默认**）→ **逐位走原均匀 k 路径**，保证
+            # 「不设 alpha 时行为与 P108 完全一致」这条零回归不变。
+            _alpha = float(powlaw_alpha or 0.0)
+            if _alpha > 0.0:
+                from .sparse_alloc import build_powlaw_csr
+                _dens = (powlaw_density if powlaw_density is not None
+                         else _k_uni / max(1, n_in))
+                _kmax = int(powlaw_kmax) if powlaw_kmax and powlaw_kmax > 0 else None
+                self._csr = build_powlaw_csr(
+                    rng, n_out, n_in, powlaw_counts,
+                    alpha=_alpha, density=_dens,
+                    k_min=max(1, int(powlaw_kmin)), k_max=_kmax,
+                    scale=0.05 * np.sqrt(n_in / _k_uni),   # fan-in 补偿（对齐旧路径）
+                    exc_ratio=exc_ratio, lognormal=lognormal_init)
+            else:
+                self._csr = _random_csr(rng, n_out, n_in, _k_uni,
+                                        0.05 * np.sqrt(n_in / _k_uni),
+                                        lognormal_init, exc_ratio)
             self._W = None
             self._codes = None
             self._wscale = 1.0

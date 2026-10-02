@@ -234,6 +234,19 @@ def main() -> None:
                          "等价旧 --data pretrain_zh；sft 分片同样适用）。"
                          "词表扫描不受影响（词表是训练流的超集，OOV 恒 0）。"
                          "⚠ **这个参数会改变训练结果**，与 --lang 不同")
+    ap.add_argument("--readout-powlaw-alpha", type=float, default=0.0,
+                    help="P124：M6 读出的**幂律异质连接**指数（k_i ∝ 词频^alpha）。"
+                         "**默认 0.0 = 关闭**（与 --readout-conn-k 的均匀 k-conn "
+                         "逐位一致）。alpha>0 时高频词获得更多入边、长尾词被"
+                         "修剪到 k_min（对应大脑的突触巩固/修剪 use-it-or-lose-it）。"
+                         "⚠ 这是**结构变更，会改变模型归纳偏置**（长尾词容量下降），"
+                         "**必须用 PPL A/B 验证收益后再开**。"
+                         "⚠ alpha>=0.5 在 Zipf 词频上会大量撞 k_min/k_max 两端，"
+                         "实践中 [0, 0.3] 更稳")
+    ap.add_argument("--readout-powlaw-kmin", type=int, default=1,
+                    help="P124：幂律分配的每行最少入边（长尾词不被剪到 0）")
+    ap.add_argument("--readout-powlaw-kmax", type=int, default=0,
+                    help="P124：幂律分配的每行最多入边（0 = 不设上限 = n_h）")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
     ap.add_argument("--readout-dtype", default="fp32",
                     choices=["fp32", "fp16", "bf16", "fp8", "fp4", "int8", "int4",
@@ -555,6 +568,11 @@ def main() -> None:
     # P122：imprint 摊销已移除；>1 交给 `SparseLTM.imprint` fail-fast 报错，
     # 不在这里静默钳成 1（那样用户会以为摊销生效了）。
     cfg.ltm_imprint_amortize = int(args.ltm_imprint_amortize)
+    # P124：M6 幂律异质连接（默认 alpha=0 = 关闭，保持均匀 k-conn 逐位不变）
+    cfg.readout_powlaw_alpha = float(args.readout_powlaw_alpha)
+    cfg.readout_powlaw_kmin = max(1, int(args.readout_powlaw_kmin))
+    cfg.readout_powlaw_kmax = max(0, int(args.readout_powlaw_kmax))
+    cfg.readout_powlaw_density = None      # 由 alpha + conn_k 自然决定
     cfg.encoder_dtype = args.encoder_dtype            # P75：M1 权重精度（平台相关）
     # P99：三态（serial=单核融合 / fused=并行融合 / plain=原始多核调用）
     cfg.pc_fused_kernel = (False if args.m2_kernel == "plain"

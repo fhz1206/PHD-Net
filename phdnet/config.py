@@ -316,6 +316,22 @@ class PHDNetConfig:
     # ② N>=2 会因同一 step_count 下多次 learn 造成 dt=0 → 迹不衰减 →
     #   权重污染（生产尺寸 max|Δw| 达 7~12；小尺寸测会漏掉）。
     ltm_imprint_amortize: int = 1
+    # P124：M6 读出的**幂律异质连接**分配（`phdnet/sparse_alloc.py` 接线）。
+    # k_i ∝ counts_i^alpha（counts = 每个输出单元的词频），行宽不等 → CSR 的
+    # indptr 用 cumsum。生物学依据：突触巩固/修剪（"use it or lose it"）。
+    #   alpha = 0.0 → **精确退化到均匀 k-conn**（与 P108 的 conn_k 路径逐位一致）
+    #   alpha > 0   → 高频词更多入边、长尾词被修剪到 k_min（更接近大脑的 rich-get-richer）
+    # ⚠ **默认 0.0 = 关闭**：这是结构变更，会改变模型的归纳偏置（长尾词容量下降、
+    #   高频词容量上升），**必须先用 PPL A/B 验证收益再开**。
+    # ⚠ alpha 过大（>=0.5）会在 Zipf 词频上大量撞 k_min/k_max 两端（见 sparse_alloc
+    #   模块 docstring「已知局限」），实践中 [0, 0.5] 更合适。
+    readout_powlaw_alpha: float = 0.0
+    # 幂律分配的预算：目标平均连接率（mean(k)/n_in）。None = 由 alpha=0 或
+    # k_max 自然决定。⚠ 无论 alpha 取值，**总 nnz 不超过 uniform_k*n_out**（预算控顶）。
+    readout_powlaw_density: float | None = None
+    # 每行入边数夹紧（长尾不归零、高频不铺满 n_in）
+    readout_powlaw_kmin: int = 1
+    readout_powlaw_kmax: int = 0        # 0 = 不设上限（= n_in）
     # P34：nll 同步周期（AccelReadout）。1=每步同步（旧行为）；N>1 时
     # nll 累积到设备、每 N 步同步一次 → CPU/NPU 重叠（NPU 上端到端约 -30~40%）。
     # P62（2026-09-29）：默认 1 → **8**。服务器日志证据：读出 12.9 ms/tok、
