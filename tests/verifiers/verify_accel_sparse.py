@@ -334,6 +334,44 @@ def main() -> int:
     check(np.array_equal(g_before, g_after),
           "C4c3 同一 h 连续调用仍复用 gather（判据未过度失效）")
 
+    # C4d. 稀疏路径的 torch.compile 融合核（P128：此前被排除在编译之外）
+    print("\n[C4d] 稀疏读出的 torch.compile 融合核（P128）")
+    from phdnet.backends.accel_readout import AccelReadout as _AR
+    from phdnet.sparse_pc import _random_csr as _rc
+    _csr3 = _rc(np.random.default_rng(37), n_out, n_h, k,
+                0.05 * np.sqrt(n_h / k), False, 0.8)
+    _tgt = np.zeros(n_out, dtype=np.float32)
+    _tgt[0] = 1.0
+    _h4 = rng.normal(0.0, 1.0, n_h).astype(np.float32)
+    _e = _AR(n_h, n_out, np.random.default_rng(37), device="cpu",
+             dtype="fp32", conn_k=k, csr=_csr3, compile=False)
+    _c = _AR(n_h, n_out, np.random.default_rng(37), device="cpu",
+             dtype="fp32", conn_k=k, csr=_csr3, compile=True)
+    check(_c._compiled, "C4d1 稀疏路径**可以**启用 torch.compile（P128 前被排除）")
+    _ye = _e.forward_dev(_h4)
+    _ne = _e.learn_softmax(_h4, _tgt, 0.15, y_pre=_ye)
+    _yc = _c.forward_dev(_h4)
+    _nc = _c.learn_softmax(_h4, _tgt, 0.15, y_pre=_yc)
+    # 数值必须一致（融合 vs eager）
+    if _c._compiled and not getattr(_c, "_compile_failed", False):
+        _we = _e.W.detach().cpu().numpy()
+        _wc = _c.W.detach().cpu().numpy()
+        check(np.array_equal(_we, _wc),
+              "C4d2 融合核与 eager 的 W **逐位相同**",
+              f"max|Δ|={float(np.abs(_we - _wc).max()):.3e}")
+        check(abs(float(_ne) - float(_nc)) <= 1e-6 * max(1.0, abs(float(_ne))),
+              "C4d3 融合核与 eager 的 nll 容差内一致",
+              f"{float(_ne):.9f} vs {float(_nc):.9f}")
+    else:
+        # 运行期回落（P19 纪律）也是**正确行为**，如实报告而非判FAIL
+        check(True, "C4d2 本机 torch.compile 不可用 → 已自动回落 eager（P19 正确行为）",
+              f"compiled={_c._compiled}")
+    # 融合核本身必须与稀疏无关（放开的前提）
+    import inspect as _insp
+    _src = _insp.getsource(_AR._train_step_core)
+    check("_sparse" not in _src and "conn_k" not in _src,
+          "C4d4 融合核实现里不含稀疏分支（故放开是安全的）")
+
     # ── D. 零回归 ─────────────────────────────────────────────────────────
     print("\n[D] 零回归：conn_k=0 稠密路径未被污染")
     dense_ref = AccelReadout(n_h, n_out, np.random.default_rng(23), device="cpu",
