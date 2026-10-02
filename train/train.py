@@ -69,7 +69,7 @@ import numpy as np
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
-for p in (str(_HERE), str(_ROOT)):
+for p in (str(_HERE), str(_ROOT), str(_ROOT / "tools")):
     if p not in sys.path:
         sys.path.insert(0, p)
 os.environ.setdefault(  # P39：numba 缓存持久化（不被 __pycache__ 清理波及）
@@ -255,7 +255,7 @@ def main() -> None:
                          "→ **只能用差值**")
     ap.add_argument("--probe-tokens", type=int, default=2048,
                     help="P146：探针集 token 数（越大越稳，代价是每次多跑一遍前向）")
-    ap.add_argument("--readout-gather-dtype", default="fp32",
+    ap.add_argument("--readout-gather-dtype", default="fp16",
                     choices=["fp32", "fp16", "bf16"],
                     help="P145：稀疏读出**中间量 g**（gather 输出）的精度，"
                          "**默认 fp32=保持现状**。动机（msprof 昇腾 600 步）："
@@ -287,7 +287,7 @@ def main() -> None:
     ap.add_argument("--readout-powlaw-kmax", type=int, default=0,
                     help="P124：幂律分配的每行最多入边（0 = 不设上限 = n_h）")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
-    ap.add_argument("--readout-dtype", default="fp32",
+    ap.add_argument("--readout-dtype", default="fp8",
                     choices=["fp32", "fp16", "bf16", "fp8", "fp4", "int8", "int4",
                              "int16", "int32"],
                     help="读出计算精度。**默认 fp32**（P110, 2026-10-01：实测 "
@@ -865,11 +865,21 @@ def main() -> None:
           f" | build time {time.perf_counter() - t0:.1f}s")
     _rb = getattr(lm.net, "_readout_backend", "numba-cpu")
     if cfg.readout_dtype in ("bf16", "fp16", "fp8", "fp4", "int8", "int4"):
+        # P147：fp8 已是 **fhz 明确指定的默认**（模型本体 fp8 / 其余 fp16），
+        # 所以这里**不再叫它「生产别用」**，而是如实陈述代价 + 给出复核手段。
+        _isdef = (cfg.readout_dtype == "fp8")
+        _tail = ("这是 fhz 2026-10-02 指定的默认（模型本体 fp8）。"
+                 if _isdef else
+                 "如需精确 p − t 规则请显式 --readout-dtype fp32。")
         print(f"[readout] compute precision = {cfg.readout_dtype}"
               f" (checkpoint storage = {args.ckpt_dtype or 'fp32'}); "
-              f"WARNING: 半精度会舍入丢弃感知器 p − t 的非目标行更新 "
-              f"(实测保留率 fp16 26.7% / bf16 5.8% @ |dp|~1e-6)，"
-              f"学习规则退化为纯 Hebbian。生产请用 --readout-dtype fp32。",
+              f"代价：低精度会舍入丢弃感知器 p − t 的**非目标行**更新"
+              f"（P110 实测保留率 fp32 99.95% / fp16 26.67% / bf16 5.79%"
+              f"@ |dp|~1e-6），即学习规则部分退化为纯 Hebbian；"
+              f"**fp8 的量化步长比 fp16 粗约 4 倍**（mantissa 3bit vs 10bit）"
+              f"，风险更高。{_tail}"
+              f" **验收方式**：用 `--probe-every N` 的固定探针 PPL 做 A/B"
+              f"（训练流 PPL 波动正负 20%，不可用作判据，见 P146）。",
               flush=True)
     else:
         print(f"[readout] compute precision = {cfg.readout_dtype}"

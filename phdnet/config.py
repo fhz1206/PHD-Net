@@ -82,7 +82,10 @@ class PHDNetConfig:
 
     # 硬件后端（2026-09-18；默认不启用 torch 后端 = 旧行为，非破坏）
     backend: str = "auto"        # auto（无加速器则 numpy）/ numpy / torch / npu / rocm / cuda / cpu
-    torch_dtype: str = "float32"  # torch 后端数据类型（昇腾部分型号建议 float16，需另行验证）
+    # P147：「其余全部 fp16」→ torch 后端 dtype 也改 fp16。
+    # ⚠ 原注释写「昇腾部分型号建议 float16，需另行验证」——P147 已把它变成默认，
+    #   但那条「需另行验证」**依然成立**（本机 x86 无 NPU，验不了）。
+    torch_dtype: str = "float16"  # torch 后端数据类型（昇腾部分型号建议 float16，需另行验证）
 
     # 架构强化（2026-09-18；默认关闭 = 旧行为，非破坏）
     homeostasis: bool = False        # 稳态突触缩放：把 PC 各行权重范数拉回初始值，
@@ -289,7 +292,18 @@ class PHDNetConfig:
     #   fp16 只比 bf16 好、并未解决问题（保留率仍 <100%）。
     # 默认 **fp32**（fhz 2026-10-01 授权改回）：语义正确优先于带宽收益。
     # 低精度仍可显式指定（带宽敏感且接受 Hebbian 近似时）。
-    readout_dtype: str = "fp32"
+    # P147（fhz 2026-10-02 指令）：「模型本体 fp8，其余全部 fp16」。
+    # ⚠⚠ **P110 的实测反证必须留在案**（它不阻止你的决定，但要如实记录）：
+    #   fp16 下**非目标行更新保留率仅 26.67%**（bf16 更差），
+    #   判据=「同精度舍入后元素是否真变了」（|W|~1e-2 / |dp|~1e-6 档），
+    #   而 fp32 是 99.95%。即：**低精度下「只提升目标行」退化为纯 Hebbian**。
+    #   fp8 的量化步长比 fp16 **粗4 倍**（mantissa 3bit vs 10bit）→ 风险更高。
+    #   → 判定只能靠**PPL**（P146：训练流 PPL 波动 ±20% 不可用，
+    #     必须用新加的 `--probe-every` 固定探针集做 A/B）。
+    #   → `tools/probe_readout_precision.py` 可复核这条反证。
+    # fp8 的算子可用性由 `phdnet/backends/fp8_capability.py` **运行时探测**
+    #   （原生 fp8 / 只有 int8→自动转 / 都无→报错），不再硬编码禁用（P86 解除）。
+    readout_dtype: str = "fp8"
     # P61（fhz 2026-09-29「迭代默认 fp32，模型默认 bf16」）：M1 稀疏编码器权重
     # 的存储 dtype。**迭代量恒 fp32**（GEMV 上采样后算）。默认 fp32 而非 bf16
     # ——numpy/BLAS 路径下低精度存储每次都要付上采样转换（8.4 MB 读 + 16.8 MB
@@ -348,7 +362,10 @@ class PHDNetConfig:
     # ⚠ **只降 g，不降 W** —— W 是**累积状态**（P110 实测 fp16 后保留率仅
     #   26.67%，每次读回都丢）；g 是**中间量**（算完即弃、不累积）
     #   → **P110 的结论不能直接套到 g**，但也不保证 g 安全。**PPL说话**。
-    readout_gather_dtype: str = "fp32"
+    # P147：随「其余全部 fp16」指令改为 fp16。gather 中间量是**一次性**的
+    # （算完即弃、不累积），故精度代价远小于 W。本机实测 fp16 的 g 带来
+    # 更新量相对误差 ~2e-4（≈1800× fp32 eps）。
+    readout_gather_dtype: str = "fp16"
     # P116 曾加 M4b imprint 配对学习摊销 → **P122 审计后移除**。
     # 现仅保留 1（旧行为，逐位不变）；传 >1 由 `SparseLTM.imprint` fail-fast。
     # 移除理由（实测）：① 收益为 0——`encode` 在摊销分支之前无条件执行，

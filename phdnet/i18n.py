@@ -208,9 +208,28 @@ _TABLE: list[tuple[str, str]] = [
 _CN = re.compile("|".join(re.escape(k) for k, _ in _TABLE))
 
 
+# P147：**诊断前缀白名单** —— 这些前缀开头的行**不做翻译**。
+# 起因：P147 的 fp8 警告行里有「会/非目标/行/学习规则」等词，逐个命中
+#   `_TABLE` 的条目 → 打印成「半精度will 舍入丢弃感知器 p − t 的**非目标lines**」
+#   这种中英混杂，**完全无法阅读**（实测 2026-10-02）。
+# 诊断/告警行必须**两种语言下完全一致** → 干脆不翻译（它们本来就是给
+# 人看的技术信息，不是面向用户的宣传文案）。
+_DIAG_PREFIXES = (
+    "[readout] compute precision",
+    "[fp8]", "[probe]", "[cann-env]", "[telemetry]",
+    "[capability]", "[readout-]", "[m2-kernel]",
+)
+
+
 def translate(text: str) -> str:
-    """把 `text` 里的中文片段按表替换（英文模式）。未知片段原样保留。"""
+    """把 `text` 里的中文片段按表替换（英文模式）。未知片段原样保留。
+
+    ⚠ P147：**诊断类前缀整行跳过翻译**（见 `_DIAG_PREFIXES`）——
+      逐词替换会把技术告警拼成中英混杂的不可读文本。
+    """
     if _LANG != "en" or not text:
+        return text
+    if text.lstrip().startswith(_DIAG_PREFIXES):
         return text
     return _CN.sub(lambda m: dict(_TABLE)[m.group(0)], text)
 

@@ -406,9 +406,13 @@ def main() -> int:
           "C4f1 config 里 readout_gather_impl **只定义一次**"
           "（P145 清掉 3 份重试残留）", f"实际 {_n_impl} 次")
     from phdnet.config import PHDNetConfig as _PC5
-    check(str(_PC5().readout_gather_dtype) == "fp32",
-          "C4f2 config 默认 gather_dtype=fp32（保持现状）",
+    # P147：默认已按 fhz 指令改为 **fp16**（「其余全部 fp16」）
+    check(str(_PC5().readout_gather_dtype) == "fp16",
+          "C4f2 config 默认 gather_dtype=fp16（P147 指令）",
           f"实际={_PC5().readout_gather_dtype!r}")
+    check(str(_PC5().readout_dtype) == "fp8",
+          "C4f2b config 默认 readout_dtype=fp8（P147 指令：模型本体 fp8）",
+          f"实际={_PC5().readout_dtype!r}")
     # 数值契约：fp32 逐位不变；fp16 在容差内（实测相对误差 ~2e-4）
     _, ro32, _, _ = build_pair(n_h, n_out, k, seed=43)
     _, ro16, _, _ = build_pair(n_h, n_out, k, seed=43)
