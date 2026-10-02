@@ -1,45 +1,47 @@
-perf(P136): the 31x gap was a measurement-basis mismatch; add a sync-basis probe
+perf(P137): the async-wait hypothesis is dead; add per-line profiling inside the readout
 
-fhz ran section 7 on Ascend. Everything is fast: baseline gather 0.020 ms,
-index_select 0.026, take 0.011, the official gather operator 0.033 (still slower
-than the baseline it would replace), einsum forward 0.155, the addmm_ update
-(which touches roughly 100 MiB) only 0.060, cross-entropy 0.116, and the
-per-step host-side np.array_equal 0.007.
+Section 8 from the Ascend run (1b tier, production dimensions) settles two things
+by ruling the others out:
+  items 1-7, bare operators, total      ~0.35 ms
+  8a real step, submission basis15.147 ms  jitter 1.0x
+  8b real step, sync basis                15.204 ms  jitter 1.0x
+  training log readout                    10.99 ms
 
-Items 1 through 7 total about 0.35 ms, yet the training log reports the readout
-at 10.99 ms - a 31x gap. That gap is the whole story, and I now think I know
-what it is.
+Hypothesis 1, that the cost is asynchronous waiting or dispatch queueing, which
+I proposed in P135, is dead: 8a equals 8b to within 0.5%. Enqueueing and
+completing cost the same, so synchronisation is not the bottleneck.
 
-Every number above is a SUBMISSION measurement. The NPU executes
-asynchronously, so when you run best-of-N back to back, the previous result is
-still sitting in the queue and what you are timing is the cost of enqueueing
-work, not the cost of finishing it. The training log's "readout ms/tok" is a
-main-thread wall clock from time.perf_counter (model.py:370-410), which
-includes waiting for the H2D copy and every host-side cost, so it corresponds
-to the SYNCHRONOUS basis. The two differ by 31x precisely because one measures
-enqueueing and the other measures completion.
+Hypothesis 2, that the 100 MiB update is the cost, is also dead: the addmm_
+update measures 0.061 ms. A corollary is that there is no room on the gather
+side at all - the official npu_gather_sparse_index is 0.034 against a 0.020
+baseline, and torch.take at 0.016 is inside the noise.
 
-New section 8 measures this directly: it builds a production AccelReadout,
-calls forward_dev plus learn_softmax, and times both the bare call and the same
-call followed by a device synchronize. 8b is the number that reconciles with the
-training log.
+What remains: 8b matches the training log to within 0.7% (the benchmark is
+slightly higher because it carries more Python overhead and no CPU/NPU overlap),
+so 8b IS the real production cost. The remaining 14.8 ms is spent in code that
+sections 1 through 7 never touch, and bare operator benchmarks cannot see it -
+that requires instrumenting inside the production functions.
 
-A latent trap found while writing it: forward_dev only exists on the accelerated
-backend, while the numba fallback arm has just __call__ plus learn. My first
-version only implemented the device path, so on this host - which takes the
-fallback - section 8 would never run, while on Ascend it would. "Verified
-locally" would have been a fiction. Both branches are now handled and the tool
-prints which interface it took.
+New tool tools/bench_readout_lineprofile.py. It uses sys.settrace to time
+individual lines in seven readout methods only, prints the top-N most expensive
+lines with their source text, and classifies each by what it is - .item() or
+synchronize or an H2D copy means a synchronisation cost, plain Python tensor
+arithmetic means a host cost. The limitations are recorded in the tool itself:
+settrace costs 0.1-0.3 ms per line so absolute values are inflated and only the
+relative ranking and the top line should be read; and on this host, which takes
+the numba fallback, it cannot reproduce 15 ms at all, so it is only meaningful on
+Ascend.
 
-Direction depends on what 8b reports. If it is around 10 ms, the cost is real
-device execution or waiting, and the levers are fewer kernels per step
-(torch.compile fusion, already unblocked in P128 but off by default) and less
-traffic. If it is far below 10 ms, then the 10 ms is host-side: the per-step
-array_equal in _lookup_ht, the h assembly in _build_h, the pinned-buffer
-rotation, in which case the answer is to cut host work rather than touch NPU
-kernels. Note that the update is NOT the culprit at 0.060 ms, which rules out
-one of my earlier hypotheses.
+A mistake of mine inside this tool, worth recording. The first version computed
+per-line attribution as t0 minus _last[0], where t0 was captured on function
+entry while _last advanced on line events. Line events can precede the function
+entry stamp, so every delta came out NEGATIVE: on this host the whole table
+printed negative times and negative percentages, yet nothing raised. It now uses
+each line event's own timestamp minus the previous line event, plus a filter
+that discards negative values. The lesson generalises: a measurement tool whose
+output is not sanity-checked for impossible values - negative durations,
+percentages above 100 - is the same as having no output.
 
-Gates: fast 9/9, benchmark --help exit 0.
+Gates: fast 9/9, line profiler --help exit 0.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
