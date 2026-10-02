@@ -240,7 +240,12 @@ class Telemetry:
             _dev = self._accl_device_id()
             _cmd = [self._smi_path, "info", "-t", "usages"]
             if _dev is not None:
+                # ⚠ **P130 加 `-c <chip_id>`**：多个实测样例与官方快速查询都用
+                # `-i0 -c 0`（如 `watch npu-smi info -t usages -i 0 -c 0`）。
+                # chip id 恒取 0（AI 芯片在卡内的编号，见 `npu-smi info -m`）。
                 _cmd += ["-i", str(_dev)]
+                _cid = os.environ.get("PHD_NPU_CHIP_ID", "0").strip() or "0"
+                _cmd += ["-c", _cid]
             try:
                 r2 = subprocess.run(_cmd, capture_output=True, text=True,
                                     timeout=10)
@@ -270,17 +275,43 @@ class Telemetry:
         其数字部分。**取不到就返回 None**（不带 `-i`，行为由npu-smi 决定）——
         但那正是 P127 修复前 `HBM-bw` 恒空的原因，故启动时会打印一次提示。
         """
+        #优先级 1：**环境变量显式指定**（最可靠，用户知道自己的卡号）
+        _env = os.environ.get("PHD_NPU_ID", "").strip()
+        if _env.isdigit():
+            return int(_env)
+        # 优先级 2：训练入口传入的设备串
         dev = getattr(self, "_accel_device", None)
         if dev:
-            m = re.search(r"(\d+)$", str(dev))
+            d = str(dev)
+            m = re.search(r"(\d+)$", d)
             if m:
                 return int(m.group(1))
-        try:                       # 退化：从 npu-smi -l 读第一块设备
+            # P130：后端描述串形如 `accel:auto@npu` / `accel:npu` / `npu` —— **没有
+            # 数字**，但它证明「当前确实跑在 NPU 上」→ 按单卡最常见情形取 0。
+            # 风险（必须诚实标出）：多卡机器上若进程实际绑在 2 号卡，这里会读错卡
+            # → 那是**别的卡的指标**（读数仍有效但不对应本进程）。
+            # → 故设`PHD_NPU_ID` 可显式纠正，且本函数会打印实际采用的值。
+            if re.search(r"npu|cuda|rocm", d, re.I):
+                if not getattr(self, "_devid_assumed", False):
+                    self._devid_assumed = True
+                    print(f"[telemetry] 设备串 {d!r} 无编号 → 假定 card 0"
+                          "（多卡若绑到其它卡请设 PHD_NPU_ID）", flush=True)
+                return 0
+        # 退化：从 `npu-smi info -l` 读第一个 NPU ID。
+        # ⚠ **P130 修**：原正则 `^\s*(\d+)\s` 匹配不到真实格式——该命令输出是
+        # Key-Value 式而非表格行，两种实测格式都要认：
+        #   `NPU ID : 0`（华为文档样例）/ `NPU : 0`（实测样例），
+        #   另有`Total : 8` / `Card Count : 8` 这类**计数行**必须排除。
+        # 服务器 2026-10-02 14:0x 的证据：两条路径都失败 → 不带 `-i` →
+        # `npu-smi` 直接 rc=215 "This command must input card id."。
+        try:
             r = subprocess.run([self._smi_path, "info", "-l"],
                                capture_output=True, text=True, timeout=10)
-            m = re.search(r"^\s*(\d+)\s", r.stdout, re.M)
-            if m:
-                return int(m.group(1))
+            for ln in r.stdout.splitlines():
+                m = re.match(r"\s*(?:npu\s*id|npu)\s*[:：]\s*(\d+)",
+                             ln, re.I)
+                if m:
+                    return int(m.group(1))
         except Exception:                                   # noqa: BLE001
             pass
         if not getattr(self, "_devid_warned", False):

@@ -801,7 +801,17 @@ def main() -> None:
     # ⚠ **必须在 `lm` 创建之后**——曾在它前面 189 行处赋值 → 首次服务器运行
     #   直接 `UnboundLocalError: cannot access local variable 'lm'`（2026-10-02
     #   13:59 报错，生产启动即崩）。`_tel` 可早在任何地方建。
-    _tel._accel_device = getattr(lm.net.readout, "device", None)
+    # P130：拿设备号有**三条来源**，按可靠性倒序试——
+    #   ① 读出实例的 `.device`（仅 `AccelReadout` 有；numba `Readout` **没有**
+    #      这个属性**，回落时 getattr 返回 None）；
+    #   ② 后端描述串 `accel:auto@npu` → 末尾的 `npu` 段（回落时拿不到①，用它）；
+    #   ③ `PHD_NPU_ID` 环境变量（在 telemetry 里，最高优先级）。
+    # ⚠ P127 只做了 ①，而服务器恰好在 ① 返回 None 时**静默退化成不带 `-i`** →
+    #   `npu-smi` rc=215 "This command must input card id."（2026-10-02 14:0x）。
+    _tel._accel_device = (
+        getattr(lm.net.readout, "device", None)
+        or str(getattr(lm.net, "_readout_backend", "") or "")
+    )
     vocab = len(lm.tok)
 
     print("=" * 76)
