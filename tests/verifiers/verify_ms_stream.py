@@ -20,6 +20,13 @@ from phdnet.corpus import expand_paths, is_remote_path   # noqa: E402
 CASES: list[tuple[str, bool]] = []
 
 
+# ⚠ **本文件的 check 只有两个参数**（name, cond），**没有 detail**。
+# 历史上多次因照搬其它 verifier 的三参写法而 TypeError（P140 再次）。
+#   其它 verifier 的 check 形如 check(cond, name, detail)，**顺序也不同**。
+# 本文件：check(name, cond) —— **名字在前、判据在后**。
+_CHECK_ARITY = 2
+
+
 def check(name: str, cond: bool) -> None:
     CASES.append((name, bool(cond)))
     print(f"  {'✓' if cond else '✗'} {name}")
@@ -231,6 +238,20 @@ def _main() -> int:
             if _n > 1:
                 _dup.append(f"{_f.name}:{_opt}×{_n}")
     # 本文件的 check() 签名是 (name, cond)，没有 detail 参数
+    # P140 曾尝试加「未定义变量」AST 扫描（抓 `_ro` vs `ro` 这类拼错）。
+    #⚠ **已撤除**：本机实测**误报 15 处**（如 `RESULTS` 在模块级第 35 行赋值、
+    #   `rows` 是 `main()` 的闭包变量），而真错只有 1 处。
+    #   根因：Python 的名字解析（模块级 / 闭包 / global / nonlocal / 推导式 /
+    #   异常名 / 参数）规则太多，**可靠判「未定义」需要真正的符号表**
+    #   （如 `pyflakes`），不是几十行 AST 能可靠近似。
+    #   → 误报率高的门禁**比没有门禁更糟**（训练者会习惯性忽略它）。
+    #   → 改用**最低成本的有效手段**：所有 benchmark 工具在本机跑一遍冒烟
+    #     （`--help` 之外再加 `--steps 2` 的短跑），拼错名字必然在导入/执行时炸。
+    #     本机每次提交前跑一次，即可覆盖「拼错变量名」这一类。
+
+    # 本文件 check() 的签名是 (name, cond) —— **没有 detail 参数**。
+    #（P140 我又写错一次；已加下方自检，防同类错误再发生。）
+
     _msg = ("冲突: " + "; ".join(_dup[:4])) if _dup \
         else f"已扫描 {len(ap_files)} 个入口"
     check(f"无重复定义的 CLI 选项（P134）— {_msg}", not _dup)
