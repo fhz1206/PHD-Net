@@ -234,7 +234,47 @@ def _raises(exc, fn, *a, **kw):
     return False
 
 
+# ── P129：「局部变量使用先于赋值」静态扫描 ──────────────────────────────────
+# 2026-10-02 13:59 服务器首次运行直接崩在启动阶段：
+#     UnboundLocalError: cannot access local variable 'lm'
+# 起因：把 `_tel._accel_device = getattr(lm.net, ...)` 写在 `lm = PHDWordLM(...)`
+# **之前 189 行**处。`py_compile` **查不出**（名字在函数作用域内合法），
+# 只有真跑到那一行才炸 —— 而那是**生产启动路径**，代价极大。
+# 本检查用 AST 比较每个局部名「首次赋值行」与「首次使用行」，提前拦这类顺序错误。
+def _check_def_before_use() -> bool:
+    import ast
+    _bad = []
+    for _rel in ("train/train.py", "train/infer.py"):
+        _f = _ROOT / _rel
+        if not _f.exists():
+            continue
+        _tree = ast.parse(_f.read_text(encoding="utf-8"))
+        for _fn in ast.walk(_tree):
+            if not isinstance(_fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            _d: dict = {}
+            _u: dict = {}
+            for _n in ast.walk(_fn):
+                if isinstance(_n, ast.Name):
+                    if isinstance(_n.ctx, ast.Store):
+                        _d.setdefault(_n.id, _n.lineno)
+                    else:
+                        _u.setdefault(_n.id, _n.lineno)
+            for _name, _ul in _u.items():
+                _dl = _d.get(_name)
+                # 差值大 = 明显顺序写错（同一两行内的先后属正常控制流）
+                if _dl is not None and (_dl - _ul) > 30 and not _name.startswith("_"):
+                    _bad.append(f"{_rel}:{_fn.name}() 内 `{_name}` 定义@L{_dl} "
+                                f"但最早使用@L{_ul}")
+    # 本文件的 check() 签名是 (name, cond)，没有 detail 参数
+    check(f"入口无「局部变量使用先于赋值」（P129）"
+          + (f" — 发现 {len(_bad)} 处：{_bad[0]}" if _bad else""),
+          not _bad)
+    return not _bad
+
+
 if __name__ == "__main__":
+    _check_def_before_use()
     raise SystemExit(_main())
 
 
