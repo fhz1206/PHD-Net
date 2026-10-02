@@ -262,6 +262,16 @@ def section_e() -> None:
           "E1 usages 带 `-i <id>`（不带则 910B 上 HBM-bw 恒空）")
     check("未能确定 NPU 设备号" in flat,
           "E2 取不到设备号时**打印提示**（不再静默）")
+    # P130：三处必须齐备（服务器 14:0x 实测 rc=215 "must input card id"）
+    check('"-c", _cid' in flat,
+          "E2b usages 带 `-c <chip_id>`（官方样例均为 `-i 0 -c 0`）")
+    check("PHD_NPU_ID" in flat and "PHD_NPU_CHIP_ID" in flat,
+          "E2c 支持 PHD_NPU_ID / PHD_NPU_CHIP_ID 环境变量显式指定")
+    check("npu\\s*id|npu" in flat.replace("\\", "\\"),
+          "E2d `npu-smi info -l` 解析认 Key-Value 两种格式"
+          + "（`NPU ID : 0` / `NPU : 0`）")
+    check("no编号 → 假定 card 0" in flat or "无编号" in flat,
+          "E2e 后端串无编号时（accel:auto@npu）假定 card 0 并提示")
     check("未解析到字段" in flat,
           "E3 usages 解析失败时**报一次原始输出**（不再静默失效）")
     tpy = (_ROOT / "train" / "train.py").read_text(encoding="utf-8")
