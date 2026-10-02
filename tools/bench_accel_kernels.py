@@ -332,6 +332,36 @@ def main() -> int:
             print(f"    不可用：{type(e).__name__}: {str(e)[:140]}")
             rows.append(("⑧ 真实一步", float("nan"), 0.0, "构造失败"))
 
+    # ── ⑨ 冷/热执行对比（P143：解释 P135 与 msprof 的 655× 差异）────────────
+    # ⚠ P135 测到的 `h[Wi]` = 0.020 ms 可能是**热执行**：best-of-N 连续跑同一份
+    #   h，gather 结果反复命中 L2；而生产**每步 h 都是新的**。msprof 显示单次
+    #   Index 真实耗时 6556 μs（13.11 ms/步）。二者差 655 倍——
+    #   必须用「每次换新 h」的单次执行来对比才能定性。
+    if want("cold"):
+        print("\n[⑨] 冷执行 vs 热执行（P135 的 0.020 ms 是哪一种？）")
+        _h_hot = h                                    # 同一份，反复用
+        t_hot, j_hot = _bench(lambda: _h_hot[Wi], max(3, args.reps // 2))
+        rec("⑨a 热执行（同一 h 反复 gather）", t_hot, j_hot,
+            "← 若接近 P135 的 0.020 ms，则 P135 测的是热路径")
+        # 冷执行：每次换一份新 h（=生产的「每步新 h」）
+        _pool = [torch.tensor(rng.normal(0, 1, n_h), dtype=torch.float32,
+                             device=dev) for _ in range(16)]
+        _ctr = [0]
+
+        def _cold():
+            _ctr[0] = (_ctr[0] + 1) & 15
+            return _pool[_ctr[0]][Wi]
+        t_cold, j_cold = _bench(_cold, max(3, args.reps // 2))
+        rec("⑨b 冷执行（每次换新 h = 生产真实情形）", t_cold, j_cold,
+            "← **这个才是生产的成本**")
+        if t_cold > 0 and t_hot > 0:
+            print(f"    冷/热 = {t_cold / t_hot:.1f}×"
+                  f"　（msprof 单次 Index = 6556 μs = 6.556 ms）")
+            print("    → 若冷执行 ≈ 6.5 ms，则 **P135 的 0.020 ms 是热路径假象**；")
+            print("      生产慢的真实原因是「每步新 h → 缓存全失效 → gather 每次")
+            print("      都要真的从 HBM 搬 25.4 MiB」，而非「算子本身慢」。")
+            print("      → 对策不是换算子，而是**减少 h 搬运量**或**提高复用率**。")
+
     # ── 汇总 ───────────────────────────────────────────────────────────
     print("\n" + "=" * 78)
     print(f"{'实现':<34}{'ms':>8}{'抖动':>9}  备注")

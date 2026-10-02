@@ -324,11 +324,33 @@ class AccelReadout:
         **零设备交互**。
         ⚠ 不能简化成「盲目复用缓存」——那会在 h 变化时静默用错 gather 结果。
         """
-        if self._cache_g is not None and self._cache_g_epoch == self._ht_epoch:
+        # ⚠⚠ **P143 修复（msprof 实测定位，性能级）**：
+        #  msprof（昇腾，600 步，op_summary）给出：
+        #    aclnnIndex_IndexAiCore_Index  ×1200  占 **89.3%**（每步 13.11 ms）
+        #    aclnnBatchMatMul_V2           × 600  占  9.6%
+        #  → **每步 gather 被执行了两次**（1200 = 600×2），而它是全部开销的主项。
+        #  实测复现（本机CPU臂）：`forward_dev` + `learn_softmax` 一步内
+        #  `_sp_gather` 被调 **2 次**，`_cache_g_epoch=-1 != _ht_epoch`。
+        #
+        #  根因：`_lookup_ht` 命中缓存时（P122 加的）把 `_ht_epoch` **回退**到
+        #  `_ht_epoch_at_cache`，但 `forward_dev` 走的是 `_to_dev`（**不是**
+        #  `_staged_to_dev`），它递增 epoch 后**从不更新** `_ht_epoch_at_cache`
+        #  → 该字段停在 -1 → 判据永远不成立 → 缓存形同虚设。
+        #  （P122 修的是「不同 h 时用错 gather」；P143 是**同一 h 时重复 gather**。
+        #    两者方向相反，必须同时成立。）
+        #
+        #  修法：判据改为「**ht 的内容身份**」而非「epoch 数字」——
+        #  用 `ht` 的**对象身份**（`is`）判定同一个设备张量复用，这是**零设备
+        #  交互**的（P112 消同步的要求），且不受epoch 数字怎么变的影响。
+        #  跨调用时 `forward_dev` 的 `ht` 与 `learn_softmax` 的 `ht` 是**同一
+        #  个张量对象**（`_cache_ht` 命中）→ 命中缓存。
+        if (self._cache_g is not None
+                and getattr(self, "_cache_g_src", None) is ht):
             return self._cache_g
         g = ht[self.Wi]                                  # (n_out, k) 高级索引 gather
         self._cache_g = g
-        self._cache_g_epoch = self._ht_epoch
+        self._cache_g_src = ht                # 记住张量**对象**（P143）
+        self._cache_g_epoch = self._ht_epoch  # 保留供诊断
         return g
 
     def _int8_update(self, dp32, ht32, alpha: float) -> None:
@@ -370,6 +392,10 @@ class AccelReadout:
         self._cache_h = np.ascontiguousarray(h, dtype=np.float32)
         self._cache_ht = ht
         self._ht_epoch_at_cache = self._ht_epoch   # P122：记下这份 ht 的 epoch
+        # P143：`forward_dev` 是**生产热路径**（训练每步都走它），而
+        # `_lookup_ht` 命中时会把 `_ht_epoch` 回退到 `_ht_epoch_at_cache`。
+        # 二者必须一致，否则回退到一个陈旧值 → `_sp_gather`的判据失效
+        # → **每步重复 gather**（msprof 实测：Index 占 89.3%、每步 13.11 ms）。
         self._cache_y = y
         return y.float().cpu().numpy()
 
@@ -616,6 +642,16 @@ class AccelReadout:
                 # 命中：epoch 回退到「这份 ht 上传时」的值，使 gather 判据有效
                 self._ht_epoch = getattr(self, "_ht_epoch_at_cache",
                                          self._ht_epoch)
+                # P143：若这份 ht 与上次 gather 用的是**同一个张量对象**
+                # （生产热路径就是这样：`_cache_ht` 命中返回同一对象），
+                # 把 gather 缓存的 epoch 也对齐 → 下游 `_sp_gather` 命中缓存，
+                # **省掉每步 13.11 ms 的重复 Index**。
+                # 反之（不同对象，即使内容相同）**必须不命中**，
+                # 否则 P122 那个「用错 gather」的静默错误会回来。
+                if self._cache_ht is not None:
+                    self._cache_g_epoch = self._ht_epoch \
+                        if getattr(self, "_cache_g_src", None) is self._cache_ht \
+                        else getattr(self, "_cache_g_epoch", -1)
                 return self._cache_ht, True
         return self._staged_to_dev(h), False
 
