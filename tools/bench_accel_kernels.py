@@ -265,6 +265,73 @@ def main() -> int:
               "差额就是尚未覆盖的开销（很可能是 **kernel 下发**或"
               "**P120 的 HBM-bw 尚未测出**的那一类）。")
 
+    # ── ⑧ 真实一步（走生产 AccelReadout，含全部 Python 侧开销）─────────
+    #这是**决定性测量**：上面 ①~⑦ 合计 ~0.35 ms，而训练日志读出 **10.99 ms**。
+    # 本段直接构造生产读出对象、调`forward_dev` + `learn_softmax`，
+    # 并**分别**测「裸调用」与「调用前后强制 synchronize」的两种口径：
+    #   · 裸调用 = 只测**下发**时间（异步，可能远小于真实执行）
+    #   · +synchronize = 测**设备真正完成**的时间 ← 这个才对应训练日志
+    # ⚠ bench 之前的数字全是「下发口径」，这是它与训练日志差 31× 的**最可能原因**：
+    #   连续 best-of-N 跑时，前一次的结果还在队列里没完成，测到的只是提交开销。
+    if want("real"):
+        print("\n[⑧] 真实一步（生产 AccelReadout，对账训练日志的 10.99 ms）")
+        try:
+            from phdnet.config import PHDNetConfig
+            from phdnet.sparse_pc import _random_csr
+            from phdnet.backends.accel_readout import pick_readout_backend
+            _cfg = PHDNetConfig(readout_conn_k=k, readout_dtype="fp32",
+                                lognormal_init=False, nll_sync_every=1)
+            _csr = _random_csr(np.random.default_rng(0), n_out, n_h, k,
+                               0.05 * np.sqrt(n_h / k), False, 0.8)
+            _ro, _be = pick_readout_backend(_cfg, n_h, n_out,
+                                            np.random.default_rng(1))
+            print(f"    后端 {_be} | device {getattr(_ro, 'device', '?')} "
+                  f"| conn_k {getattr(_ro, 'conn_k', 0)}"
+                  f"| forward_dev {'有' if hasattr(_ro, 'forward_dev') else '无（回落臂）'}")
+            _h_np = h.cpu().numpy()
+            _tgt = np.zeros(n_out, dtype=np.float32)
+            _tgt[0] = 1.0
+            _sync = (torch.npu.synchronize
+                     if hasattr(torch, "npu") and hasattr(torch.npu, "synchronize")
+                     else torch.cuda.synchronize
+                     if hasattr(torch, "cuda") and torch.cuda.is_available()
+                     else None)
+
+            # ⚠ 两种后端接口不同：加速后端有 `forward_dev`（设备张量直通），
+            # numba回落臂只有 `__call__` + `learn`（无 device 路径）。
+            # 这不是 bug（生产回落时走另一条路），但**基准脚本必须两者都支持**
+            # ——否则在本机（回落）永远跑不到这一段，昇腾上却能跑，
+            # 于是「本机验证过」变成假象。
+            _has_dev = hasattr(_ro, "forward_dev")
+
+            def one_step(sync_after: bool):
+                if _has_dev:
+                    y = _ro.forward_dev(_h_np)
+                    _ro.learn_softmax(_h_np, _tgt, 0.15, y_pre=y,
+                                      target_idx=0)
+                else:
+                    y = _ro(_h_np)
+                    _ro.learn_softmax(_h_np, _tgt, 0.15, y_pre=y)
+                if sync_after and _sync is not None:
+                    _sync()
+
+            for _ in range(3):
+                one_step(True)
+            t1, j1 = _bench(lambda: one_step(False), max(3, args.reps // 2))
+            rec("⑧a 真实一步（下发口径，无sync）", t1, j1,
+                "≈前面 ①~⑦ 之和")
+            if _sync is not None:
+                t2, j2 = _bench(lambda: one_step(True), max(3, args.reps // 2))
+                rec("⑧b 真实一步（**sync 口径**）", t2, j2,
+                    "← **这个才对应训练日志**")
+                print(f"    对账：⑧b={t2:.3f} ms vs 训练日志 10.99 ms "
+                      f"→ 差{t2 and 10.99/t2:.1f}×" if t2 > 0 else "")
+            else:
+                print("    （无 NPU/CUDA，跳过 sync 口径）")
+        except Exception as e:                             # noqa: BLE001
+            print(f"    不可用：{type(e).__name__}: {str(e)[:140]}")
+            rows.append(("⑧ 真实一步", float("nan"), 0.0, "构造失败"))
+
     # ── 汇总 ───────────────────────────────────────────────────────────
     print("\n" + "=" * 78)
     print(f"{'实现':<34}{'ms':>8}{'抖动':>9}  备注")
