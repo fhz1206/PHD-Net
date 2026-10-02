@@ -233,9 +233,20 @@ class AccelReadout:
             #   → 故**必须告警**（不静默），且验收只能靠固定探针 PPL
             #     （`--probe-every`；训练流 PPL 波动 ±20% 不可用，见 P146）。
             if self._fp8_native:
-                # 设备真有 fp8 算子 → 稀疏臂直接用 fp8 存 W
+                # ⚠⚠ **P149（fhz 2026-10-02：「模型原生 fp8，迭代 fp16」）**：
+                #   **存储 fp8、计算 fp16** —— 这是本项目的第三种精度布局
+                #   （P105 的 int8 是「存储 int8、计算 fp16」；fp32 是两者同）。
+                #   ⚠ 我 P148 在这里把 `_cdtype` 也设成 fp8 → **训练直接崩**：
+                #     torch 算子**不做 fp8↔fp16 的隐式提升**
+                #     （"Promotion for Float8 Types is not supported"），
+                #     且 `softmax`/`addcmul_`/`einsum` 全都不接受 fp8 张量。
+                #   → 故 `_cdtype` **必须**留在 fp16（计算域），`tdtype` 才是 fp8
+                #     （存储域）。两个域的用途：
+                #       tdtype  = 决定 `self.W` 的 dtype（访存量）
+                #       _cdtype = 决定算子的输入 dtype（计算精度）
+                #     每次用 W 算之前**显式反量化**（见 `_matmul` / `_eager_step`）。
                 self.tdtype = torch.float8_e4m3fn
-                self._cdtype = torch.float8_e4m3fn
+                self._cdtype = torch.float16        # ← 不是 fp8！
                 self._int8 = False
                 self._wscale = None
                 import warnings as _w8
@@ -408,11 +419,18 @@ class AccelReadout:
             #   权重全丢掉、只把 gather 到的 h 分量相加——数值完全错但形状/
             #   dtype 都对，只在数值对拍里才暴露。）
             g = self._sp_gather(ht)
+            # ⚠⚠ **P149（fhz 指令「模型原生 fp8，迭代 fp16」）**：
+            #   `W` 以 **fp8 存储**（省 4× 访存），但**参与算术前必须显式
+            #   反量化成 fp16** ——torch **不做 fp8↔fp16 的隐式提升**
+            #   （实测报 "Promotion for Float8 Types is not supported"）。
+            #   → 存储/计算分离，与 P105 的 int8 完全同构。
+            _Wm = (self.W.to(self._cdtype) if self.W.dtype != self._cdtype
+                   else self.W)
             if self._sp_fwd == "einsum":
                 # P116：不物化 (n_out,k) 中间张量（mulsum 每步两处各25.37 MiB）。
                 # ⚠ 归约顺序与 mulsum 不同 → **非逐位**（本机 max|Δ|≈3e-05）。
-                return torch.einsum("ij,ij->i", self.W, g)
-            return (self.W * g).sum(dim=1)
+                return torch.einsum("ij,ij->i", _Wm, g)
+            return (_Wm * g).sum(dim=1)
         if self._int8:
             Wq = (self.W.to(torch.float32) * self._wscale).to(ht.dtype)
             return Wq @ ht
@@ -705,8 +723,16 @@ class AccelReadout:
             return nll_dev
         # P84：更新主副本是 fp16（低精度回落场景）→ dp/ht 必须同 dtype，否则
         # addmm_ 退回慢路径或直接报错。int8 模式已在上面提前返回，不会到这里。
+        # ⚠⚠ **P149（fhz「模型原生 fp8，迭代 fp16」）**：`_upd_dtype` 原本在
+        #   `W.dtype` 非 fp16 时直接取 `self.tdtype` —— 而 fp8 模式下 `tdtype`
+        #   就是 fp8 → dp/ht 也被转成 fp8 → 算子全部崩
+        #   （"Promotion for Float8 Types is not supported"）。
+        # → 正确：**计算精度一律用 `_cdtype`**（fp8 存储时它 = fp16），
+        #   **存储精度**才是 `tdtype`。两者必须分开判。
         _upd_dtype = (torch.float16
-                      if self.W.dtype == torch.float16 else self.tdtype)
+                      if self.W.dtype in (torch.float16,
+                                          torch.float8_e4m3fn)
+                      else self.tdtype)
         if t is None:                     # P45：p 就地变成 dp（p − t）
             dp = p.to(_upd_dtype)
             dp[correct] -= 1.0
@@ -734,9 +760,28 @@ class AccelReadout:
             #   （前者 `(dp[i]*g)*alpha`、后者 `dp[i]*g` 先算再整体乘），
             #   fp32 下**可能差 1 ulp**。故下方 verifier 会用容差判据，
             #   而非宣称逐位。**若必须逐位**，退回 `add_`（但那带物化）。
-            self.W.addcmul_(dp.reshape(-1, 1), g, value=-float(eta))
+            # ⚠⚠ **P149**：fp8/int8 存储时`self.W` 不能直接参与算子
+            #   （torch 不做 fp8 的隐式提升）。→ **显式反量化到 `_cdtype`**，
+            #   在 fp16 域算完再**重量化写回** fp8（保持 4× 存储收益）。
+            #   这一步与 P105 的 `_int8_update`（稠密路径）是同一套语义。
+            if self.W.dtype == self._cdtype:
+                self.W.addcmul_(dp.reshape(-1, 1), g, value=-float(eta))
+                if self.w_clip > 0.0:
+                    self.W.clamp_(-self.w_clip, self.w_clip)
+                return nll_dev
+            _Wq = self.W.to(self._cdtype)          # 反量化（fp8 → fp16）
+            _Wq.addcmul_(dp.reshape(-1, 1), g, value=-float(eta))
             if self.w_clip > 0.0:
-                self.W.clamp_(-self.w_clip, self.w_clip)
+                _Wq.clamp_(-self.w_clip, self.w_clip)
+            # 重量化写回存储精度。⚠ fp8 用 torch 的 dtype cast（其舍入由
+            #   dtype 语义决定）；int8沿用 P105 的 ±127 clamp + round(RNE)。
+            if self.W.dtype == torch.int8:
+                _sc = float(getattr(self, "_wscale", 1.0)) or 1.0
+                _codes = torch.clamp(torch.round(_Wq.to(torch.float32) / _sc),
+                                     -_INT8_QMAX, _INT8_QMAX)
+                self.W.copy_(_codes.to(torch.int8))
+            else:
+                self.W.copy_(_Wq.to(self.W.dtype))
             return nll_dev
         self.W.addmm_(dp.reshape(-1, 1), ht.reshape(1, -1), alpha=-float(eta))
         if self.w_clip > 0.0:
