@@ -3,7 +3,7 @@
 > **适用范围**：加速后端的**能力矩阵、精度能力、机制性代价、昇腾真机踩坑、迁移路径、诊断入口**。
 > **不写**：训练怎么跑（→ `../train/README.md`）、机制设计（→ `PHD-Net_架构设计.md`）、
 > 任何性能数字（**唯一出处 `PHD-Net_性能评估与迭代方案.md`**，本文只链接不复制）。
-> **数据截止：2026-10-01（P113）。**
+> **数据截止：2026-10-02（P113）。**
 >
 > **相关文档**：
 > 子包文件索引与每层设备归属 → `../phdnet/backends/README.md`；
@@ -287,6 +287,30 @@ updated  = _round(W0 + dp, dtype)
 静默 no-op。`phdnet/model.py` **从不 import torch**（torch 是可选依赖），
 所以 bf16 分支必须惰性 `import torch as _t` —— 直接写 `torch.bfloat16` 会让
 纯 numpy 训练路径 `NameError`（BUGS A7）。
+
+---
+
+### 5.2 P124：加速器对**非均匀行宽**必须提前 fail-fast
+- **症状**：开 `--readout-powlaw-alpha>0`（幂律异质连接）后，加速器路径走到
+  **构造期**才抛 `ValueError("只支持均匀 k")` → 被 `pick_readout_backend` 的
+  兜底 `except` 吞掉 → **回落了但原因丢失**（`_accel_fallback_reason=None`）。
+- **根因**：行宽均匀性只在 `AccelReadout.__init__` 检查，而**能力表
+  `_unsupported_reason` 没有相应条目** → 不兼容的配置要到构造期才暴露。
+- **修复**：在 `_unsupported_reason` **提前**拒绝并说明原因（行宽不等需变长 CSR
+  + segment sum，是**不同算法**；P19 纪律：不能「能跑但语义不同」）。
+- **教训**：与 BUGS B12 同源 —— **能力表必须覆盖所有会改变算法/语义的结构
+  参数**，否则用户得到的是「静默回落 + 无原因」。
+
+### 5.3 P120：设备侧瓶颈的**判读规则**（配套 `npu-smi info -t usages`）
+| 观察组合 | 结论 |
+|---|---|
+| 高 AICore + **高**带宽 | 真memory-bound → 只能降流量/换布局 |
+| 高 AICore + **低**带宽 | **瓶颈在 kernel 下发/调度** → `TASK_QUEUE_ENABLE=2` 等 |
+| 低 AICore | 算子没跑满 → 检查同步点/小算子过多 |
+- ⚠ **高 AICore 单独不能说明算力用满**：大量小 kernel（launch 开销主导）也能顶到 99%。
+- ⚠ `npu-smi info`（表格式）**没有**带宽字段，必须 `npu-smi info -t usages`
+  （`Key : value` 格式，非表格）。
+- 我们读出实测 7.83 ms = 带宽下界的 **26.1×** → 按上表必然属第二行。
 
 ---
 

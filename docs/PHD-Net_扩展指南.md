@@ -53,7 +53,7 @@ phdnet/
   modulator.py            M5 神经调制（ACh/NE/DA/5-HT 四通道）
   readout.py              M6 读出（numba 路径：稠密W 或 CSR）
   config.py               全部配置项 —— 注释即设计意图的权威来源
-  sparse_alloc.py         幂律连接数分配器（**尚未接入 readout**，见 §8）
+  sparse_alloc.py         幂律连接数分配器（**P124 起已接入 readout**，默认 alpha=0 关闭）
   backends/
     accel_readout.py      加速器读出（M6 上设备）
     multi_device.py       多设备（模型并行）
@@ -66,7 +66,9 @@ train/
   ckpt_1b.py              检查点保存/恢复
   config_1b.py            四档预设 + 容量账
   tokenizer_core.py       分词热路径（numba nogil）
-tests/verifiers/          22 个专项验证器（含 P113 新增的 `verify_m2_kernels.py`）
+tests/verifiers/          26 个专项验证器（P110–P124 新增：verify_m2_kernels /
+                           verify_cann_env / verify_lang_semantics /
+                           verify_powlaw_readout / verify_p116_sched）
 tools/                    工具脚本
 ```
 
@@ -356,6 +358,11 @@ P111 恰恰是要取消这个回落。改代码前若不看清断言，**会把�
 | 开关 | 作用 | 动它要注意 |
 |---|---|---|
 | `--readout-conn-k` | M6 稀疏化入边数（默认 128） | >0 时加速后端走 gather-GEMV；**只支持均匀 k**，非均匀行宽 fail-fast |
+| `--readout-powlaw-alpha` | **幂律异质连接**指数（默认 **0.0 = 关闭**） | k_i ∝ 词频^alpha，行宽不等、总 nnz 仍受预算控制。**alpha=0 逐位等价于均匀 k**。⚠ 开 >0 会**回落 numba 读出**（加速器不支持非均匀行宽）；⚠ 词频是**代理值**（`1/rank`，词表是字典序非频次序）→ 开启前须 A/B |
+| `--readout-powlaw-kmin/-kmax` | 幂律行宽夹紧（默认 1 / 0=不设上限） | 长尾不归零、高频不铺满 n_h |
+| `--sparse-fwd-kernel` | 稀疏前向算子（默认 `mulsum`） | `mulsum`=物化 (n_out,k) 临时张量；`einsum` 不物化但**非逐位**且昇腾未实测 |
+| `--ltm-imprint-amortize` | ⚠ **已于 P122 移除**，只接受 1 | 传 >1 直接 `ValueError`（实测收益为 0 且N≥2 污染权重）|
+| `--lang` | 终端输出语言（默认 **en**） | ⚠ **对训练结果零影响**。语料过滤是 `--data-lang`（会改变结果）|
 | `--readout-dtype` | 读出计算精度（默认 **fp32**） | 低精度破坏 p − t 规则（§4.2） |
 | `--encoder-dtype` | M1 权重存储精度（默认 fp32） | 昇腾走平台自适应 GEMV，与 dtype 无关 |
 | `--m2-kernel` | M2 推理核（默认 **`plain`**） | 三态见下方 §9.1。**`plain` 在昇腾赢 5.41×**（P113 实测）；`fused` 在昇腾退化 3–4×（已否）。门禁 `verify_m2_kernels.py` |

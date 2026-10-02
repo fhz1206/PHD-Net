@@ -348,4 +348,4 @@ meta 落盘**数据口径**（数据路径 / `--remote-fraction` / 语言过滤�
 | 首次启动慢 | numba 首次全量编译约 2.6 s；`[numba] cache` 看缓存目录与大小 |
 | 检查点写盘慢 | 1B 档每次约 867 MiB D2H + 数秒写盘，属预期；调大 `--ckpt-every` |
 | 想确认容量 | 启动时的容量验算表，或 `--report` 查已生长突触 / 利用率 |
-| 门禁失败 | `python tests/run_tests.py fast`（9 项）+ `tests/verifiers/` 下 18 个专项 verifier |
+| 门禁失败 | `python tests/run_tests.py fast`（9 项）+ `tests/verifiers/` 下 26 个 verifier |

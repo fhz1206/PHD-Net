@@ -32,9 +32,14 @@
    实践中 `alpha ∈ [0, 0.5]` 更合适（`alpha` 实为**压缩指数**）。
 2. 高频行同样可能撞上 `k_max`（甚至 `k_max = n_in` 即退化为该行稠密）。
    两端同时饱和时秩相关必然被 ties 拉低——这是**预算的真实约束**，不是 bug。
-3. 本模块是**纯分配函数**：不参与前向/反向，也未接入 `readout.py`。接线需自行
-   保证 `indptr/idx/val` 与下游 `_csr_matvec` 核的约定一致（列索引行内升序、
-   无放回），本模块已保证。
+3. **P124（2026-10-01）已接入 `readout.py`**：由 `Readout.__init__` 的
+   `powlaw_alpha/counts/density/kmin/kmax` 驱动，CLI 为 `--readout-powlaw-alpha`
+   （**默认 0.0 = 关闭**，此时逐位走原均匀 k 路径）。
+   ⚠ **加速器不支持非均匀行宽**（行宽不等需变长 CSR + segment sum，是不同算法）
+   → 开 `alpha>0` 会回落 numba 读出，NPU 加速失效（P19 正确行为）。
+   ⚠ **词频目前是代理值**（构造读出时语料未流过，拿不到真实 Zipf 频次），
+   见 `phdnet/word_lm.py::_powlaw_proxy_counts` —— 故默认关闭。
+   下游约定（列索引行内升序、无放回）本模块与 `_csr_matvec` 均已满足。
 
 纯 numpy、无副作用、确定性（同一 counts + 超参 → 唯一输出，不依赖随机数）。
 """
