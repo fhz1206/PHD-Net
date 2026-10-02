@@ -17,6 +17,23 @@ __all__ = ["PHDWordLM", "WordSegmenter", "WordTokenizer", "WordNGram"]
 
 
 
+def _powlaw_proxy_counts(tok, n_out: int):
+    """P124：给幂律连接用的**词频代理**（⚠ 见调用处的说明）。
+
+    策略：`counts[i] = 1 / (rank_i + 1)`，其中 rank 是词在词表中的位置。
+    这样得到一个**单调递减**的频次形状（Zipf 的形状），使
+    `assign_conn_counts` 能产生合法的倾斜分配。
+
+    ⚠ 词表是 `sorted(set(...))` = **字典序**，不是频次序→ 这个代理
+    **不反映真实频次**。它是「让幂律路径可跑」的最小实现，
+    **是否与真实频次相关必须 A/B 验证**；若否，应改为两阶段
+    （先跑一段收集真实频次再重建读出）。
+    """
+    n = int(n_out)
+    r = np.arange(1, n + 1, dtype=np.float64)
+    return 1.0 / r
+
+
 class PHDWordLM:
     """PHD-Net 词级语言模型（T2.1 + T2.3；M1 三开关经 cfg 透传）。"""
 
@@ -39,6 +56,27 @@ class PHDWordLM:
                               "n_input": 2 * cfg.n_sdr,     # T2.3 组合输入
                               "n_readout": len(self.tok),
                               "readout_softmax": True})
+        # P124：M6 幂律连接需要**词频**（counts），必须在 `PHDNet(cfg)` 之前
+        # 注入 cfg —— 读出在 `PHDNet.__init__` 里就构造好了。
+        #
+        #⚠ **这里的 counts 是代理值，不是真实语料词频**（必须如实记下）：
+        #   理想的 counts 来自训练语料的 Zipf 统计，但此刻词表刚由
+        #   `vocab_text` 建好、语料尚未流过 → 拿不到真实频次。
+        #   退而用**词表序**当频次代理：`WordTokenizer.tokens` 由
+        #   `sorted(set(...))` 得到，是**字典序**而非频次序——故它作为
+        #   「哪些词更常见」的代理**依据不足**。
+        #   → 因此默认 alpha=0（关闭）；开启前请先用 A/B 验证这个代理
+        #     是否真的与真实频次相关，否则幂律倾斜方向可能是错的。
+        _alpha = float(getattr(cfg, "readout_powlaw_alpha", 0.0) or 0.0)
+        if _alpha > 0.0:
+            n_out = cfg.n_readout if cfg.n_readout > 0 else cfg.n_input
+            _counts = _powlaw_proxy_counts(self.tok, n_out)
+            cfg._powlaw_counts_runtime = _counts        # noqa: SLF001
+            if getattr(cfg, "_powlaw_warned", None) is None:   # 只提醒一次
+                cfg._powlaw_warned = True             # noqa: SLF001
+                print(f"[readout-powlaw] alpha={_alpha} 启用幂律连接；"
+                      f"counts来源=词表序代理（**非真实语料词频**），"
+                      f"nnz≈{int((_counts[:n_out] > 0).sum())} 行非零", flush=True)
         self.net = PHDNet(cfg)
 
     def tokenize(self, text: str) -> list[str]:
