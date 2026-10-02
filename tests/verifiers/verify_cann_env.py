@@ -246,6 +246,38 @@ def section_d() -> None:
           f"{out[0]['dig']}")
 
 
+def section_e() -> None:
+    """P127：`npu-smi -t usages` 必须带 `-i <id>`。
+
+    2026-10-02 服务器日志证据：跑满 59k token，`HBM-bw` 字段出现 **0 次**，
+    而 `[telemetry] npu-smi = ...` 已打印且**无 parse FAILED**
+    → 说明命令「成功执行但没解析到字段」，正是缺 `-i` 的signature
+    （官方文档明确 `npu-smi info -t usages -i id`）。
+    本节是**静态形态检查**（本机无 NPU，跑不了真命令）。
+    """
+    print("\n[E] usages 子命令的调用形态（P127）")
+    tel = (_ROOT / "phdnet" / "telemetry.py").read_text(encoding="utf-8")
+    flat = " ".join(tel.split())
+    check('"-t", "usages"' in flat and '"-i", str(' in flat,
+          "E1 usages 带 `-i <id>`（不带则 910B 上 HBM-bw 恒空）")
+    check("未能确定 NPU 设备号" in flat,
+          "E2 取不到设备号时**打印提示**（不再静默）")
+    check("未解析到字段" in flat,
+          "E3 usages 解析失败时**报一次原始输出**（不再静默失效）")
+    tpy = (_ROOT / "train" / "train.py").read_text(encoding="utf-8")
+    check("_tel._accel_device" in tpy,
+          "E4 训练入口把设备号传给遥测（`_tel._accel_device`）")
+    # 设备号解析本身（纯正则，可测）
+    import re as _re
+    t = _re.search(r'_accl_device.*?\(\d\+\)', flat)
+    ok = True
+    for dev, want in (("npu:0", "0"), ("npu:3", "3"), ("cuda:0", "0")):
+        got = _re.search(r"(\d+)$", dev)
+        if not (got and got.group(1) == want):
+            ok = False
+    check(ok, "E5 设备串→ 数字设备号解析（npu:N / cuda:N）")
+
+
 def main() -> int:
     print("=" * 78)
     print("P120 门禁：CANN 环境治理 + NPU 带宽遥测")
@@ -254,6 +286,7 @@ def main() -> int:
     section_b()
     section_c()
     section_d()
+    section_e()
     npass = sum(1 for ok, _, _ in _RESULTS if ok)
     total = len(_RESULTS)
     print("\n" + "=" * 78)
