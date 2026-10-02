@@ -243,6 +243,31 @@ def main() -> None:
                          "等价旧 --data pretrain_zh；sft 分片同样适用）。"
                          "词表扫描不受影响（词表是训练流的超集，OOV 恒 0）。"
                          "⚠ **这个参数会改变训练结果**，与 --lang 不同")
+    ap.add_argument("--probe-every", type=int, default=0,
+                    help="P146：每 N 步在**固定探针集**上跑一次只读前向并打印 "
+                         "`probe_PPL`（**A/B 判据用这个**，不是 sliding PPL）。"
+                         "0 = 关闭。⚠ 为什么要它：训练流窗口 PPL 的变异系数实测 "
+                         "**19.6%%**、相邻变化中位 **7.0%%**，而首尾趋势仅 "
+                         "**-2.8%%** → **信噪比 0.40** → 任何 <20%% 的真实差异"
+                         "都被淹没 → 现有 PPL **无法用于 A/B 判定**。"
+                         "探针用同一份冻结文本 + readonly 前向，对训练零污染。"
+                         "⚠ 探针 PPL **绝对值与训练流 PPL 不可比**（不同文本）"
+                         "→ **只能用差值**")
+    ap.add_argument("--probe-tokens", type=int, default=2048,
+                    help="P146：探针集 token 数（越大越稳，代价是每次多跑一遍前向）")
+    ap.add_argument("--readout-gather-dtype", default="fp32",
+                    choices=["fp32", "fp16", "bf16"],
+                    help="P145：稀疏读出**中间量 g**（gather 输出）的精度，"
+                         "**默认 fp32=保持现状**。动机（msprof 昇腾 600 步）："
+                         "`Index` 占 81.0%%、其中 aiv_time 99.6%% → 它在 **Vector 单元**"
+                         "真执行，50.8 MiB 只跑出 **8.1 GB/s**（而同流量的 "
+                         "BatchMatMul 在 Cube 上 38 GB/s，**快 4.7×**）。"
+                         "降精度 → 流量减半 → 理论每步 8.18→**~4.9 ms**。"
+                         "⚠ **代价**：本机实测更新量相对误差 ~2e-4（≈1800×fp32 eps，"
+                         "比 P131 einsum 的 3e-5 大一个量级）。"
+                         "⚠ **只降 g，W 仍 fp32**（P110：W 是累积状态，fp16 后"
+                         "保留率仅 26.67%%；g 是中间量不累积）。"
+                         "**是否开请用 --probe-every 的 probe_PPL 做 A/B 判定**")
     ap.add_argument("--readout-gather-impl", default="index",
                     choices=["index", "take"],
                     help="P134：稀疏读出 gather 的实现。index=高级索引（默认，"
@@ -603,13 +628,14 @@ def main() -> None:
     # 不在这里静默钳成 1（那样用户会以为摊销生效了）。
     cfg.ltm_imprint_amortize = int(args.ltm_imprint_amortize)
     # P134：稀疏 gather 实现（默认 index = 旧行为）
+    # P145：gather **中间量 g** 的精度（默认 fp32 = 保持现状；
+    #⚠ 是否降精度由 PPL A/B 决定，见 --readout-gather-dtype 的 help）
+    cfg.readout_gather_dtype = str(args.readout_gather_dtype)
+    # ⚠ P146 清理：此处原有**三份重复**的 gather_impl 赋值（P145 脚本中途
+    #   abort 留下的残留）。功能无害但属死代码，已合并为一份。
     cfg.readout_gather_impl = str(args.readout_gather_impl)
     # P124：M6 幂律异质连接（默认 alpha=0 = 关闭，保持均匀 k-conn 逐位不变）
-    # P134：gather 实现（默认 index = 保持现状）
-    cfg.readout_gather_impl = str(args.readout_gather_impl)
     cfg.readout_powlaw_alpha = float(args.readout_powlaw_alpha)
-    # P134：gather 实现（默认 index = 旧行为）
-    cfg.readout_gather_impl = str(args.readout_gather_impl)
     cfg.readout_powlaw_kmin = max(1, int(args.readout_powlaw_kmin))
     cfg.readout_powlaw_kmax = max(0, int(args.readout_powlaw_kmax))
     cfg.readout_powlaw_density = None      # 由 alpha + conn_k 自然决定
@@ -883,6 +909,9 @@ def main() -> None:
 
     # ── 流式训练主循环（1M context：状态永不重置）──
     seg_nll: list[float] = []
+    # P146：最近一次**固定探针集**的 PPL（A/B 判据用这个，不是 sliding PPL）
+    _probe_ppl = None
+    _probe_nll_v = 0.0
     oov_skipped = 0
     prompt_masked = 0                        # P26：prompt 段（未计损失）步数
     t_start = time.perf_counter()
@@ -1000,6 +1029,42 @@ def main() -> None:
                       f"tokens processed continuously (state never reset; ≥1M context achieved ×{last_mile}){ppl_ms}",
                       flush=True)
                 _print_table_stats(lm)
+            # P146：**固定探针集**（每 `probe_every` 步一次，只读前向）。
+            # ⚠ 为什么必须有（用真实日志实测的数字）：
+            #   训练流窗口 PPL 的**变异系数 19.6%**、相邻变化中位 **7.0%**
+            #   （最大 60%），而首→尾趋势只有 **−2.8%** → **信噪比 0.40**，
+            #   趋势被波动完全淹没 → **任何 <20% 的真实差异都测不出来**。
+            #   根因三条：
+            #   ① 窗口覆盖的**语料片段每次不同**（远程流式+ 混合域）
+            #      → 词表/句式/长度分布的差异直接进 PPL，这是**混淆变量**；
+            #   ② 连续 token 的 nll **逐步强相关**（共享语境、共享刚被
+            #      STDP/Oja 改过的权重）→ 2000 个样本的**有效样本数远小于
+            #      2000**，均值标准误被严重低估；
+            #   ③ `exp(mean(nll))`（几何平均）**对高频词敏感**，而突触
+            #      生长/修剪本就会改变 nll 的**分布形状**—— 而形状变化与
+            #      「学得更好」无关。
+            # → 探针用**同一份冻结文本**（`eval_corpus/internal_corpus.txt`）
+            #   + `readonly=True` 前向（不更新权重、不进 `_prev_*`、不写 LTM/
+            #   回放缓冲）→ 对训练**零污染**，且 A/B 差值可比。
+            # ⚠ 探针 PPL 的**绝对值与训练流 PPL 不可比**（不同文本），
+            #   **只能用差值**做 A/B。
+            if args.probe_every > 0 and i % args.probe_every == 0:
+                try:
+                    from ppl_probe import probe_nll
+                    _pr = probe_nll(lm, args.probe_tokens)
+                    if _pr["n_tok"]:
+                        _probe_ppl = _pr["ppl"]
+                        _probe_nll_v = _pr["nll"]
+                        print(f"[probe] token {i:>12,}  probe_PPL "
+                              f"{_probe_ppl:>11.4f}  nll {_probe_nll_v:.6f}"
+                              f"  n_tok {_pr['n_tok']}  ({_pr['ms']:.0f} ms, 只读)",
+                              flush=True)
+                except Exception as _pe:                # noqa: BLE001
+                    if not getattr(args, "_probe_warned", False):
+                        args._probe_warned = True
+                        print(f"[probe] 探针不可用（不影响训练）："
+                              f"{type(_pe).__name__}: {str(_pe)[:90]}", flush=True)
+
             if (i - done) % args.log_every == 0 and seg_nll:
                 k = min(args.log_every, len(seg_nll))
                 ppl = float(np.exp(np.mean(seg_nll[-k:])))
@@ -1011,7 +1076,10 @@ def main() -> None:
                 _ro_n = max(1, int(getattr(lm.net, "_ro_calls", 0)))
                 _ro_dev = (getattr(lm.net.readout, "device", "cpu")
                            if _rb.startswith("accel:") else "cpu")
-                print(f"  token {i:>12,}  sliding PPL {ppl:>9.3f}  {ms:>8.2f} ms/tok"
+                _probe_txt = (f"  probe_PPL {_probe_ppl:>10.4f}"
+                              if _probe_ppl is not None else "")
+                print(f"  token {i:>12,}  sliding PPL {ppl:>9.3f}{_probe_txt}"
+                      f"  {ms:>8.2f} ms/tok"
                       f"  elapsed {spent / 60:.1f} min"
                       f"  | readout {_ro_ms / _ro_n:>7.3f} ms/tok"
                       f" ({_rb.split('(')[0]}@{_ro_dev}, {_ro_ms / 1000 / max(1e-9, spent) * 100:>5.1f}% of total)",
