@@ -1,48 +1,45 @@
-perf(P141): the diag settles H2D, and external measurement runs out of road
+fix(P142): the timeline parser silently read the wrong columns; refuse to guess now
 
-The diagnostic section answered the H2D question at last. Measured on Ascend with
-pin_cap 16 over 60 steps at 16.094 ms/step:
-  _staged_to_dev measured standalone        0.0914 ms
-  _staged_to_dev inside the training loop    4.94 ms
-Same function, same device, 54x apart. So the 4.94 ms is NOT a slow memcpy - it
-is the CPU waiting for the NPU to finish consuming that pinned buffer.
+The msprof collection worked - 2.0 MiB of op_summary came back. Its real columns
+are:
+  Device_id, Model ID, Task ID, Stream ID, Op Name, OP Type, ..., Task Start
+  Time(us), Task Duration(us), Task Wait Time(us), ..., aicore_time(us),
+  aic_mac_ratio, aic_scalar_ratio, aic_mte1_ratio, aic_mte2_ratio, ...,
+  cube_utilization(%)
 
-One caution about the diagnostic's own output: it shows the cost going UP when
-the CPU is given extra work (0.0914 to 0.1645 ms), which naively reads as "the
-memcpy really is slow". It is not - that 0.07 ms is the 400-iteration loop I
-added. The upward movement is not evidence about the copy, and the tool should
-say so. I have noted that in the next run's expectations.
+My parser was broken in a way that produced a confident, entirely wrong answer.
+It matched column names by exact equality against a list containing 'op name'
+and 'task duration', neither of which is an actual header, so every lookup missed
+and it fell back to guessing by position. It guessed columns 1 and 3, which are
+'Model ID' and 'Stream ID'. So it read the operator name as 4294967295 - the
+value of Model ID - while still printing a full table. Nothing about the output
+looked wrong. The "uncovered operators are 100% of the total" line in that run
+was fiction.
 
-pin_cap is not the lever, and my P139 guess is wrong. Comparing the two runs:
-  cap 4:  73.79 ms per sync / 8 steps = 9.22 ms per step, 15.698 ms/step wall
-  cap 16: 112.71 ms per sync / 8 steps = 14.09 ms per step, 16.094 ms/step wall
-Quadrupling the pool makes each wait longer but less frequent, and the total is
-conserved. A bigger pool lets the CPU run further ahead, the queue gets deeper,
-so when the CPU finally blocks it blocks for longer. Total time does not move,
-which means growing pin_cap cannot fix anything.
+Two fixes. Column matching now uses substring containment, which is what these
+headers need. And when recognition fails the tool no longer guesses: it prints
+the real header, prints what it expected, and exits 3. Verified against a
+synthetic timeline built with the genuine 46-column header, including
+Casting, Malloc and Memset with different aicore split, and it now names them
+correctly and reports the AI Core versus queueing breakdown.
 
-External measurement has now run out of road. Bare operators total 0.35 ms while
-the device executes 9.2 to 14.1 ms per step, and the per-line profile shows that
-on the Python side nothing outside .item() exceeds 0.2 ms. So the device really
-is running kernels we have not been counting. The candidates are implicit dtype
-conversions and .to()/contiguous calls; allocation and free for the 25 MiB
-temporary each step; transfer operators, since we only ever measured the 12 KiB
-of h; and implicit synchronisation. Only a device profiler can tell these apart,
-so I wrote the toolchain for it.
+The more valuable part of that header is not the operator list at all. msprof
+emits aicore_time for how long the AI Core was actually busy, aic_mte1_ratio and
+aic_mte2_ratio for memory movement, aic_mac_ratio for matrix work, Task Wait
+Time for queueing, and cube_utilization. Those answer the question directly.
+High aicore share means the device is genuinely computing and the problem is
+real work; high mte ratios mean it is memory-bound; high wait time means it is
+queued for resources. The parser now emits a "where the time goes" table with
+AI Core share versus queueing share, plus the median cube utilisation.
 
-tools/prof_readout_msprof.sh collects the profile on Ascend. The step count is
-deliberately tiny because profiling inflates runtime by 10 to 100x and there is
-no point collecting a large trace when the answer needs a dozen steps.
+Second instance of the same lesson, after P140's false positives. Both times a
+tool was handed data it could not read and returned something that looked like a
+conclusion. A static scan reported fifteen confident false positives; a parser
+reported a confident table built from the wrong columns. The rule I want to keep
+is narrow and mechanical: a parsing tool must refuse to produce a result when it
+cannot find the fields it expects. Silently degrading into a guess is strictly
+worse than failing, because the output is indistinguishable from a real finding.
 
-tools/analyse_readout_timeline.py parses the exported timeline and does the
-thing a person would not: it sorts device-side operators by time and takes the
-difference against the eight operators we have already measured, printing what
-is left over. That leftover list is the 26x. Verified against a synthetic
-timeline containing Casting, Malloc and Memset - it correctly flags all three as
-uncovered. Since column names differ across msprof versions, the script prints
-the actual header first, falls back to positional guessing if that fails, and
-labels the output as guessed when it does.
-
-Gates: fast 9/9, analyser py_compile clean.
+Gates: fast 9/9, analyser py_compile clean, synthetic-header verification passed.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

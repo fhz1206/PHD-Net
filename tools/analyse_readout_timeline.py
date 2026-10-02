@@ -50,18 +50,42 @@ def _find_csv(path: str) -> list[str]:
     return out
 
 
+# ⚠ **P142 修正**：msprof 的 `op_summary` 真实列名（2026-10-02 实测）是：
+#   'Op Name', 'OP Type', 'Task Start Time(us)', 'Task Duration(us)', ...
+#   另有**极有价值**的分解列：
+#   'aicore_time(us)'（AI Core 占用）、'aic_mte1/mte2_ratio'（内存搬运）、
+#   'aic_scalar_ratio'、'aic_mac_ratio'、'cube_utilization(%)'、
+#   'Task Wait Time(us)'（**排队等待**）、'aiv_time/aiv_vec_time'（Vector 单元）
+# → **列名匹配必须用「子串包含」**，不是精确相等：第一版用精确相等
+#   全部落空 → 按位置猜到 col1/col3（那是 'Model ID'/'Stream ID'）→
+#   把算子名读成 `4294967295`（Model ID 的值），**结论完全无效且看不出来**。
+#教训：解析失败时**必须显式报错并拒绝出结论**，不能「猜了就出表」。
+_SUBSTR_DUR = ("task duration", "duration")
+_SUBSTR_NAME = ("op name", "kernel name", "op_type", "optype")
+
+
 def _pick_cols(header: list[str]) -> tuple[int, int, int, str] | None:
-    """返回 (name_col, dur_col, start_col, 判据说明)。找不到返回 None。"""
+    """返回 (name_col, dur_col, start_col, 说明)。找不到返回 None。"""
     low = [h.strip().lower() for h in header]
     dur = next((i for i, h in enumerate(low)
-                if h in ("duration", "dur", "duration(us)", "time")), None)
+                if any(k in h for k in _SUBSTR_DUR)), None)
     name = next((i for i, h in enumerate(low)
-                 if h in ("name", "op", "op name", "kernel", "event")), None)
+                 if any(k in h for k in _SUBSTR_NAME)), None)
     start = next((i for i, h in enumerate(low)
-                  if h in ("start", "begin", "ts", "start(us)")), None)
+                  if "start" in h), None)
     if dur is not None and name is not None:
-        return name, dur, (start if start is not None else -1), "按列名"
+        return name, dur, (start if start is not None else -1), "按列名(子串)"
     return None
+
+
+# 有价值的分解列（用于「时间去哪了」的判读）
+_SUBSTR_AICORE = ("aicore_time",)
+_SUBSTR_WAIT = ("task wait time",)
+_SUBSTR_MTE1 = ("aic_mte1_ratio",)
+_SUBSTR_MTE2 = ("aic_mte2_ratio",)
+_SUBSTR_SCALAR = ("aic_scalar_ratio",)
+_SUBSTR_MAC = ("aic_mac_ratio",)
+_SUBSTR_CUBE = ("cube_utilization",)
 
 
 def main() -> int:
@@ -91,19 +115,46 @@ def main() -> int:
         picked = _pick_cols(header)
         guessed = False
         if picked is None:
-            # 按位置猜：msprof 常见布局是 id,name,start,duration,...
-            guessed = True
-            name_c, dur_c = (1, 3) if len(header) > 3 else (0, len(header) - 1)
-            start_c = 2 if len(header) > 2 else -1
-            print("⚠ **列名识别失败，按位置猜测**："
-                  f"name=col{name_c}, duration=col{dur_c}"
-                  "（结果请谨慎解读）")
+            # ⚠⚠ **P142：识别失败就**拒绝出结论**。第一版「按位置猜」，
+            #   猜到了 col1/col3（实际是 'Model ID'/'Stream ID'）→ 把算子名读成
+            #   `4294967295`，而**表格照样打印、看不出任何异常** ——
+            #   这是比「报错」更糟的失败模式。宁可不给结果。
+            print("✗ **列名识别失败，拒绝出结论**（不再按位置猜测）。")
+            print(f"  实际列名: {header}")
+            print("  期望包含 'Op Name' 与 'Task Duration'（可用子串匹配）。")
+            print("  若列名确实不同，请把本工具的 _SUBSTR_NAME/_SUBSTR_DUR "
+                  "按实际表头调整。")
+            return 3
         else:
             name_c, dur_c, start_c, how = picked
             print(f"列名识别: {how} → name=col{name_c}, duration=col{dur_c}")
 
+        # 分解列索引（有则用，无则跳过）
+        def _ci(sub):
+            return next((i for i, h in enumerate(header)
+                         if any(k in h.strip().lower() for k in sub)), -1)
+        c_wait = _ci(_SUBSTR_WAIT)
+        c_aic = _ci(_SUBSTR_AICORE)
+        c_mte1 = _ci(_SUBSTR_MTE1)
+        c_mte2 = _ci(_SUBSTR_MTE2)
+        c_mac = _ci(_SUBSTR_MAC)
+        c_scalar = _ci(_SUBSTR_SCALAR)
+        c_cube = _ci(_SUBSTR_CUBE)
+
         # 累加：按算子名聚合
         agg: dict[str, list[float]] = defaultdict(list)
+        dec: dict[str, list[float]] = defaultdict(
+            lambda: [0.0] * 6)      # wait, aicore, mte1, mte2, mac, scalar
+        cube: list[float] = []
+
+        def _num(row, i):
+            if i < 0 or i >= len(row):
+                return 0.0
+            try:
+                return float(row[i])
+            except ValueError:
+                return 0.0
+
         n = 0
         for row in rdr:
             if len(row) <= max(name_c, dur_c):
@@ -116,6 +167,14 @@ def main() -> int:
             except ValueError:
                 continue
             agg[nm].append(d)
+            dec[nm][0] += _num(row, c_wait)
+            dec[nm][1] += _num(row, c_aic)
+            dec[nm][2] += _num(row, c_mte1)
+            dec[nm][3] += _num(row, c_mte2)
+            dec[nm][4] += _num(row, c_mac)
+            dec[nm][5] += _num(row, c_scalar)
+            if c_cube >= 0:
+                cube.append(_num(row, c_cube))
             n += 1
     if not n:
         print("没有可解析的数据行")
@@ -156,6 +215,37 @@ def main() -> int:
         print(f"  {nm[:48]:<50}{s:>12,.1f}  ×{c}")
     if not miss:
         print("  （无—— 所有算子都能被已知的 8个解释）")
+    # ── 时间去向：AI Core vs 搬运 vs 排队（msprof 的分解列）──────────────
+    if dec and (c_aic >= 0 or c_wait >= 0 or c_mte1 >= 0):
+        print("\n" + "=" * 92)
+        print("时间去向（msprof 分解列，单位 μs；ratio 类列是 **%**，不是 μs）")
+        print("=" * 92)
+        print(f"{'算子':<40}{'耗时':>11}{'aicore':>11}"
+              f"{'mte1%':>8}{'mte2%':>8}{'mac%':>8}{'排队':>11}")
+        print("-" * 92)
+        for nm, vals in items[:12]:
+            s_ = sum(vals)
+            d = dec[nm]
+            print(f"{nm[:38]:<40}{s_:>11,.0f}{d[1]:>11,.0f}"
+                  f"{d[2]:>8.1f}{d[3]:>8.1f}{d[4]:>8.1f}{d[0]:>11,.0f}")
+        tot_d = sum(sum(v) for v in agg.values())
+        tot_a = sum(d[1] for d in dec.values())
+        tot_w = sum(d[0] for d in dec.values())
+        if tot_d > 0:
+            print("-" * 92)
+            print(f"{'合计':<40}{tot_d:>11,.0f}{tot_a:>11,.0f}")
+            print(f"  **AI Core 占比 = {tot_a/tot_d*100:.1f}%**"
+                  f"　　**排队等待占比 = {tot_w/tot_d*100:.1f}%**")
+            print("  → AI Core 占比高 = 设备**在算**（则问题在真实计算量）")
+            print("  → 排队占比高 = 设备**在等资源**（则调度/并发度不足）")
+        if cube:
+            _cv = [c for c in cube if c > 0]
+            if _cv:
+                print(f"  cube_utilization(%)：中位 {sorted(_cv)[len(_cv)//2]:.1f}，"
+                      f"最大 {max(_cv):.1f}")
+    else:
+        print("\n（本文件没有 msprof 的分解列，跳过「时间去向」分析）")
+
     print("\n→ 未覆盖的算子就是我们**没数到**的那26 倍。"
           "看它们的名称与累计耗时，即可判断是"
           " dtype 转换 / 内存分配 / 搬运 / 隐式同步 中的哪一种。")
