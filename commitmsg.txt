@@ -1,45 +1,48 @@
-fix(P140): a typo crash, plus a static gate I had to withdraw after measuring it
+perf(P141): the diag settles H2D, and external measurement runs out of road
 
-The crash was mine: in the line profiler's diagnostic section I wrote
-_ro._staged_to_dev(h) where the variable is ro, so the Ascend run died with
-NameError. Fixed, two occurrences.
+The diagnostic section answered the H2D question at last. Measured on Ascend with
+pin_cap 16 over 60 steps at 16.094 ms/step:
+  _staged_to_dev measured standalone        0.0914 ms
+  _staged_to_dev inside the training loop    4.94 ms
+Same function, same device, 54x apart. So the 4.94 ms is NOT a slow memcpy - it
+is the CPU waiting for the NPU to finish consuming that pinned buffer.
 
-More interesting is the gate I tried to build to catch that class of error. I
-wrote an AST scan for locals that are read but never assigned, expecting it to
-be a cheap permanent guard. On this host it produced 15 false positives against
-1 real finding: RESULTS is assigned at module level on line 35 of
-audit_brain_parity.py, rows is a closure variable defined in main() and read by a
-nested rec(), and train_tokens and resume are the same shape. Reliable
-detection of undefined names needs a real symbol table such as pyflakes;
-a few dozen lines of AST can only approximate it, and mine approximated badly.
+One caution about the diagnostic's own output: it shows the cost going UP when
+the CPU is given extra work (0.0914 to 0.1645 ms), which naively reads as "the
+memcpy really is slow". It is not - that 0.07 ms is the 400-iteration loop I
+added. The upward movement is not evidence about the copy, and the tool should
+say so. I have noted that in the next run's expectations.
 
-So I withdrew the gate, and left a comment explaining why not to add it again.
-A gate with a 15:1 false positive ratio is worse than no gate at all, because
-people learn to ignore it. Reliability beats coverage for a check that is
-supposed to be trusted.
+pin_cap is not the lever, and my P139 guess is wrong. Comparing the two runs:
+  cap 4:  73.79 ms per sync / 8 steps = 9.22 ms per step, 15.698 ms/step wall
+  cap 16: 112.71 ms per sync / 8 steps = 14.09 ms per step, 16.094 ms/step wall
+Quadrupling the pool makes each wait longer but less frequent, and the total is
+conserved. A bigger pool lets the CPU run further ahead, the queue gets deeper,
+so when the CPU finally blocks it blocks for longer. Total time does not move,
+which means growing pin_cap cannot fix anything.
 
-The replacement is tools/smoke_benchmarks.sh, which short-runs five benchmark
-tools. It has zero false positives and genuinely catches import-time explosions,
-misspelled names and bad arguments. Verified: reintroducing the _ro typo makes
-it report SKIP with exit code 1 (correctly classified as an NPU-environment
-failure while still detecting the error), and restoring the file returns it to
-all green.
+External measurement has now run out of road. Bare operators total 0.35 ms while
+the device executes 9.2 to 14.1 ms per step, and the per-line profile shows that
+on the Python side nothing outside .item() exceeds 0.2 ms. So the device really
+is running kernels we have not been counting. The candidates are implicit dtype
+conversions and .to()/contiguous calls; allocation and free for the 25 MiB
+temporary each step; transfer operators, since we only ever measured the 12 KiB
+of h; and implicit synchronisation. Only a device profiler can tell these apart,
+so I wrote the toolchain for it.
 
-The smoke script had a blind spot of its own, now fixed. The diagnostic section
-began with `if not _use_pin: break`, and this host always takes the numba
-fallback, which has no _pin_bufs - so the whole section was skipped, and a typo
-inside it went undetected even with the smoke script in place. I confirmed that
-empirically before changing it. It now runs regardless of whether pinned memory
-is available: the fallback measures the upload cost itself, the accelerated path
-measures the pinned pool rotation wait. The general lesson: every early-return
-or guard in a gate is a blind spot, and the question to ask is which branch the
-default local configuration actually takes.
+tools/prof_readout_msprof.sh collects the profile on Ascend. The step count is
+deliberately tiny because profiling inflates runtime by 10 to 100x and there is
+no point collecting a large trace when the answer needs a dozen steps.
 
-I also tripped over this file's check() signature once more - it is check(name,
-cond) with two arguments and no detail, unlike most verifiers which take
-(cond, name, detail) in the opposite order. There is now a prominent comment and
-a _CHECK_ARITY constant at the top of verify_ms_stream.py.
+tools/analyse_readout_timeline.py parses the exported timeline and does the
+thing a person would not: it sorts device-side operators by time and takes the
+difference against the eight operators we have already measured, printing what
+is left over. That leftover list is the 26x. Verified against a synthetic
+timeline containing Casting, Malloc and Memset - it correctly flags all three as
+uncovered. Since column names differ across msprof versions, the script prints
+the actual header first, falls back to positional guessing if that fails, and
+labels the output as guessed when it does.
 
-Gates: fast 9/9, ms_stream 44/44, smoke_benchmarks all five OK.
+Gates: fast 9/9, analyser py_compile clean.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
