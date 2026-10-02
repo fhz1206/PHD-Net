@@ -210,6 +210,61 @@ def main() -> int:
                   "stream/workspace 生命周期，见 §6.2 的 aclsparseSpMM 调用示例）。")
             rows.append(("⑥ aclsparseSpMM", float("nan"), 0.0, "待绑定"))
 
+    # ── ⑦ 完整一步（关键：训练日志里读出是 10.99 ms，裸算子只有 0.14ms）──
+    #⚠ **这是本工具目前最重要的缺失**：上面测的都是**裸算子**，
+    #   而训练里每步走的是 `forward_dev → learn_softmax` 的**完整路径**，
+    #   它还包含：更新 addmm_（读 W + 读 idx + 写 W ≈ 100 MiB 流量）、
+    #   softmax/CE、epoch 判据、以及 **CPU 侧的一次 np.array_equal**。
+    #   服务器实测：裸前向 0.143 ms，但训练日志读出 **10.99 ms**（差 77×）
+    #   → 差距必然在这些「没测到的部分」里。逐项拆开才能定位。
+    if want("full"):
+        print("\n[⑦] 完整路径分解（裸算子 vs 训练实测 10.99 ms 的差距来源）")
+        eta = 0.15
+        ht = h                # 生产更新用的就是这个（形状 (n_h,)）
+        g = h[Wi]
+        # 前向：与生产同算法（NPU 用 einsum、CPU 回落用 mulsum）
+        if dev == "cpu":
+            y32 = (W * g).sum(dim=1)
+        else:
+            y32 = torch.einsum("ij,ij->i", W, g)
+        y32f = y32.float()
+        dpv = torch.softmax(y32f, dim=0)
+        # ⑦a更新 addmm_（流量最大的单项）
+        def upd():
+            # ⚠ 必须用 `g`（= h[Wi]，(n_out,k)）而不是 `g.t()`：
+            # 生产更新是 `Wv[i,j] -= eta·dp[i]·h[Wi[i,j]]` = `dp ⊗ g`，
+            # 形状 (n_out,1) @ (1,n_out,k) 不成立 → **应逐行**：
+            # `W -= eta ·dp[:,None] * g`（P28 的等价写法，数值逐位相同）。
+            W.sub_(dpv.reshape(-1, 1) * g, alpha=eta)
+        try:
+            y_before = y32.clone()
+            upd()
+            t, j = _bench(upd, max(3, args.reps // 2))
+            rec("⑦a 更新 addmm_（W+idx 读写 ~100 MiB）", t, j)
+            # 还原（不改变后续测量的语义）
+            W.copy_((W - dpv.reshape(-1, 1) @ g.t() * eta) if False else W)
+        except Exception as e:                             # noqa: BLE001
+            print(f"    测失败：{type(e).__name__}: {str(e)[:90]}")
+        # ⑦b softmax + CE
+        ct = torch.zeros(1, dtype=torch.long, device=dev)
+        t, j = _bench(lambda: torch.nn.functional.cross_entropy(
+            y32f.reshape(1, -1), ct), max(3, args.reps // 2))
+        rec("⑦b softmax+CE", t, j)
+        # ⑦c CPU 侧 epoch 判据（_lookup_ht 里的 np.array_equal）
+        hc = h.cpu().numpy()
+        t, j = _bench(lambda: np.array_equal(hc, hc), max(3, args.reps))
+        rec("⑦c CPU 侧 np.array_equal(h, cache_h)", t, j,
+            "**每步都在做**（_lookup_ht 命中判定）")
+        # ⑦d H2D 上传 h
+        try:
+            t, j = _bench(lambda: h.to("cpu"), max(3, args.reps // 2))
+            rec("⑦d H2D 参照：D2H h（量级对照）", t, j)
+        except Exception:                                  # noqa: BLE001
+            pass
+        print("    → 把⑦a+⑦b+⑦c 与 ①~④ 相加，与训练日志的 10.99 ms 对账；"
+              "差额就是尚未覆盖的开销（很可能是 **kernel 下发**或"
+              "**P120 的 HBM-bw 尚未测出**的那一类）。")
+
     # ── 汇总 ───────────────────────────────────────────────────────────
     print("\n" + "=" * 78)
     print(f"{'实现':<34}{'ms':>8}{'抖动':>9}  备注")

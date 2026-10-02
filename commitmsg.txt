@@ -1,57 +1,51 @@
-perf(P134): wire the two official Ascend sparse paths, plus a gather-impl switch
+perf(P135): Ascend segment data overturns the "gather is slow" assumption
 
-fhz suggested trying third-party libraries for the NPU. Two official paths
-exist and both match our shapes; a third is available immediately as a switch.
+fhz ran the kernel benchmark on Ascend at production dimensions (n_out=52,642,
+n_h=3,072, k=128; per-step traffic Wi 51.4 MiB + W 51.4 MiB):
+  (1) h[Wi] baseline              0.019 ms   jitter 1.7x (noise dominated)
+  (2) index_select                0.025 ms   bit-identical
+  (3) torch.take                  0.016 ms   bit-identical
+  (4) einsum, full forward        0.143 ms   <- the P131 default
+  (5) npu_gather_sparse_index     0.033 ms   bit-identical, SLOWER than baseline
+  (6) aclsparseSpMM               library not found; needs a ctypes binding
 
-torch_npu.npu_gather_sparse_index - official custom operator, documented as
-supported on both A2 and A3 training series. Signature
-npu_gather_sparse_index(input, index) is semantically identical to our h[Wi]
-(take elements of input's dim 0 by index). Its documented conditions for
-actually gaining performance:
-  (1) weight numel > 150*1024/itemsize -> ours 6,738,176 vs threshold 38,400  OK
-  (2) index numel > 960               -> 6,738,176                           OK
-  (3) "data must be aggregated, non-zero and zero distributions clustered"
-      -> our h is a DENSE activation, so this is UNVERIFIED
-Conditions 1 and 2 pass comfortably; 3 can only be settled by measurement.
+On Ascend the gather takes 0.019 ms, against 10.26 ms on the x86 host - a 540x
+difference. My P132/P134 reasoning that gather was the single biggest item is
+simply wrong on the real hardware. The x86 1.7x win for torch.take shrinks to
+1.2x and sits inside the noise, while the official operator is slower than the
+baseline it would replace.
 
-aclsparseSpMM from CANN ops-sparse - documented to support CSR (exactly our
-format; COO and CSC are not supported) and offers
-ACL_SPARSE_SPMM_CSR_FP32_HIGH_PRECISION_ALG, a Kahan-compensated algorithm
-that is kind to fp32. However torch_npu does NOT expose a Python interface, so
-using it means binding aclsparse through ctypes and handling
-aclrtStream/context/workspace lifetimes. This round only probes for the
-library; the binding is not implemented and the tool says so explicitly rather
-than skipping quietly.
+The most important number in that run is a ratio, not a measurement: the bare
+operators total under 0.2 ms while the training log reports the readout at
+10.99 ms - a 77x gap. So roughly 10.8 ms per step is spent somewhere the
+benchmark does not cover. That, not the gather, is what needs to be found.
 
-New switch --readout-gather-impl index|take, default index (unchanged).
-Measured on this x86 host at production dimensions (n_out=52,642, k=128,
-n_h=3,072), best-of-5:
-  (1) h[Wi] baseline          10.26 ms
-  (2) index_select            11.03 ms
-  (3) torch.take               5.94 ms   1.7x
-  (4) einsum, full forward     3.87 ms
-take and the baseline are BIT-IDENTICAL, which the tool verifies every run.
-That 1.7x is CPU data and does NOT constitute Ascend evidence, so the default
-stays on index and the choice is left to a server A/B.
+Candidates, now measured individually by the new section (7):
+  - the addmm_ update, which touches W plus idx for read and write, about
+    100 MiB per step and 7.4 ms even on this x86 CPU
+  - implicit synchronisation (.item() and D2H points)
+  - kernel dispatch overhead, which is exactly what P120's HBM-bw metric was
+    added to detect and which has still never produced a reading
+  - the per-step np.array_equal(h, cache_h) on the host, 0.005 ms here
+  - H2D through the pinned buffer pool
 
-New tool tools/bench_accel_kernels.py puts all six candidates on the same
-device and the same tensors, reports best-of-N with the jitter ratio, and
-checks numerical equality per candidate. On this host, with no torch_npu and no
-ops-sparse, it degrades honestly and says what is missing.
+Two mistakes in my own benchmark, both of the same kind - measuring the wrong
+shape and therefore the wrong cost:
+  1. The update was first written as W.sub_(dp*g, alpha=eta), which
+     MATERIALISES an (n_out, k) temporary. P28 explicitly forbids that: it
+     costs an extra 1.73 GiB of device traffic per step, 40% of the total. It
+     is now the production form, W.addmm_(dp.reshape(-1,1), ht.reshape(1,-1)),
+     a rank-1 AXPY with no temporary.
+  2. The CPU-arm forward was written as W @ h, which is a shape error. It now
+     branches the same way production does: einsum on NPU, mulsum on the CPU
+     fallback.
 
-Two mistakes of mine, both fixed:
-1. Because a script edit failed twice and I retried, --readout-gather-impl got
-   inserted THREE times, and argparse rejects duplicate option strings
-   (compiles fine, only --help explodes). That is the P129 lesson repeating, so
-   verify_ms_stream now has a dedicated duplicate-option assertion
-   (43 -> 44 cases).
-2. gather_impl was passed into _mk_readout, which constructs the numba
-   Readout - a class with no _sp_gather and no such concept - giving
-   TypeError. It now goes to the AccelReadout construction site. Discipline:
-   when adding a parameter, confirm which class actually has that concept.
+Honest read on the 5 ms target: there is no room in the gather, which is about
+0.17% of the 10.99 ms. The target lives in that 10.8 ms of uncovered overhead. If
+it is dispatch, then TASK_QUEUE_ENABLE=2 plus torch.compile fusion is the right
+direction; if it is the update's 100 MiB, the lever is reducing update traffic
+rather than touching the gather. Section (7) settles which.
 
-Gates: fast 9/9, ms_stream 44/44, accel_readout 30/30, cann_env 30/30,
-accel_sparse 31/31, p116_sched 22/22, powlaw 32/32, ckpt roundtrip PASS,
-local smoke zero crashes.
+Gates: fast 9/9, benchmark --help exit 0, full benchmark run clean.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
