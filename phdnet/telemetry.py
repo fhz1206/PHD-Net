@@ -230,10 +230,30 @@ class Telemetry:
         self._smi_ticks = getattr(self, "_smi_ticks", 0) + 1
         _every = int(getattr(self, "_smi_usages_every", 4) or 4)
         if self._smi_ticks % _every == 0:
+            # P127 修复：**必须带 `-i <device_id>`**。官方文档明确
+            # `npu-smi info -t usages -i id`，且第三来源实测 910B 上无 `-i`
+            # 的行为不稳定（可能报错、也可能输出多设备混杂）→ 解析必然失败，
+            # 于是 `HBM-bw` 字段**从不出现**（2026-10-02 服务器日志证实：
+            # 跑满59k token，`HBM-bw` 出现 **0** 次，而 `[telemetry] npu-smi=`
+            # 已打印且**无 parse FAILED** → 说明是「成功执行但没解析到字段」，
+            # 正是本bug 的signature）。
+            _dev = self._accl_device_id()
+            _cmd = [self._smi_path, "info", "-t", "usages"]
+            if _dev is not None:
+                _cmd += ["-i", str(_dev)]
             try:
-                r2 = subprocess.run([self._smi_path, "info", "-t", "usages"],
-                                    capture_output=True, text=True, timeout=10)
+                r2 = subprocess.run(_cmd, capture_output=True, text=True,
+                                    timeout=10)
                 u = _parse_npu_smi_usages(r2.stdout)
+                if not u and not getattr(self, "_usages_dbg", False):
+                    # P127：**解析不到字段时必须报一次**。此前是完全静默的，
+                    # 于是「`HBM-bw` 从不出现」这件事在日志里毫无痕迹——
+                    # 这类「工具静默失效」比工具报错更难发现。
+                    self._usages_dbg = True
+                    print("[telemetry] `npu-smi -t usages` 未解析到字段；"
+                          f"cmd={' '.join(_cmd)} rc={r2.returncode}；"
+                          f"原始输出前 6 行://n"
+                          + "\n".join(r2.stdout.splitlines()[:6]), flush=True)
                 if u:
                     out.update(u)
                     if not getattr(self, "_usages_reported", False):
@@ -242,6 +262,33 @@ class Telemetry:
                               + ", ".join(sorted(u)), flush=True)
             except Exception:                           # noqa: BLE001
                 pass
+
+    def _accl_device_id(self):
+        """解析加速器设备号（供 `npu-smi ... -i <id>` 用）。
+
+        来源：训练入口把设备字符串（如 `npu:0`）存进 `_accel_device`，这里取
+        其数字部分。**取不到就返回 None**（不带 `-i`，行为由npu-smi 决定）——
+        但那正是 P127 修复前 `HBM-bw` 恒空的原因，故启动时会打印一次提示。
+        """
+        dev = getattr(self, "_accel_device", None)
+        if dev:
+            m = re.search(r"(\d+)$", str(dev))
+            if m:
+                return int(m.group(1))
+        try:                       # 退化：从 npu-smi -l 读第一块设备
+            r = subprocess.run([self._smi_path, "info", "-l"],
+                               capture_output=True, text=True, timeout=10)
+            m = re.search(r"^\s*(\d+)\s", r.stdout, re.M)
+            if m:
+                return int(m.group(1))
+        except Exception:                                   # noqa: BLE001
+            pass
+        if not getattr(self, "_devid_warned", False):
+            self._devid_warned = True
+            print("[telemetry] 未能确定 NPU 设备号 → `npu-smi -t usages` "
+                  "不带 -i，`HBM-bw` 可能仍为空（设 PHD_NPU_ID 环境变量可指定）",
+                  flush=True)
+        return None
 
     @staticmethod
     def fmt(d: dict) -> str:

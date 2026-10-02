@@ -89,12 +89,21 @@ os.environ.setdefault(  # P39：numba 缓存持久化（不被 __pycache__ 清�
 #   **numpy 与 torch 在设置环境变量之前就已经被导入了**（P122 审计实测确认）。
 #   环境变量在库初始化后设置可能失效，故绕开包 `__init__`，按文件路径加载。
 import importlib.util as _ilu                # noqa: E402
+# P127：延后到 main() 里重放的 CANN 环境报告（见下方「不能直接打印」的说明）
+_CANN_ENV_REPORT: dict = {}
+_CANN_ENV_LINES: list = []
 try:
     _cann_env_path = _ROOT / "phdnet" / "backends" / "cann_env.py"
     _spec = _ilu.spec_from_file_location("_cann_env_early", _cann_env_path)
     _cann_env = _ilu.module_from_spec(_spec)
     _spec.loader.exec_module(_cann_env)
-    _cann_env.apply_cann_env(verbose=True)
+    # P127：这里**不能**直接打印 —— 此时 `sys.stdout` 还是终端
+    # （`sys.stdout = TeeLogger(log_path)` 要到 main() 里才建立，400行之后），
+    # 于是 `[cann-env]` 的四行只出现在终端、**日志文件里没有**，
+    # 2026-10-02 的服务器日志正是如此（grep cann-env = 0 命中）。
+    # 改为**先静默应用、再把报告文本存起来**，由 main() 在 TeeLogger 建立后重放。
+    _CANN_ENV_REPORT = _cann_env.apply_cann_env(verbose=False)
+    _CANN_ENV_LINES = [_cann_env.describe()]
 except Exception as _e:                       # noqa: BLE001
     print(f"[cann-env] 设置失败（不致命）：{type(_e).__name__}: {_e}",
           flush=True)
@@ -444,6 +453,24 @@ def main() -> None:
         log_path = LOG_DIR / f"train_1b_{args.preset}_{args.data}_{stamp}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     sys.stdout = TeeLogger(log_path)
+    # P127：重放 CANN 环境报告（此刻 stdout 已是日志文件 → 一定落盘）
+    # ⚠ 用纯 ASCII 标签：这行在 `install_stream_filter()` **之后**打印，
+    # 中文字面量会被输出层翻译器改写（曾出现「运行环境」被译成「run 环境」
+    # 这种中英混杂）。诊断信息必须**两种语言下完全一致**。
+    if _CANN_ENV_REPORT:
+        print("[cann-env] CANN/torch_npu runtime env (MUST precede import torch):",
+              flush=True)
+        for _k, _v in _CANN_ENV_REPORT.items():
+            # ⚠ 不能用 `os.environ` 判断「显式设置」—— 那些值是**本进程刚设的**。
+            # `apply_cann_env` 返回的 dict 里，值等于我们内置默认值即为我们所设。
+            _built_in = {"TASK_QUEUE_ENABLE": "2", "COMBINED_ENABLE": "1",
+                         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+                         "MULTI_STREAM_MEMORY_REUSE": "1",
+                         "CPU_AFFINITY_CONF": None}
+            _tag = ("(user-set, kept)" if _v != _built_in.get(_k)
+                    else ("(default OFF)" if _v is None else "(default ON)"))
+            print(f"  {_k} = {_v if _v is not None else '(unset)'}   {_tag}",
+                  flush=True)
     sys.stderr = sys.stdout          # P57：warnings / inductor 日志也落盘
 
     # 后端 × 设备能力矩阵：显式说明「numba 只能上 CPU」这一物理限制，
@@ -584,6 +611,10 @@ def main() -> None:
     cfg.torch_compile = args.torch_compile             # P38 kernel 融合（默认开）
     cfg.torch_compile_mode = args.torch_compile_mode   # P44 模式（default=无 cudagraph）
     _tel = Telemetry()                                 # P41：系统/设备遥测
+    # P127：把设备号告知遥测，让 `npu-smi -t usages` 能带 `-i <id>`
+    # （不带 -i 时该子命令在 910B 上行为不稳 → HBM-bw 字段恒空）。
+    _tel._accel_device = getattr(lm.net.readout, "_device", None) or \
+        getattr(lm.net, "_readout_device", None)
 
     data_path = DATA_FILES[args.data]
     remote_active = bool(args.remote_data and args.data != "eval")
