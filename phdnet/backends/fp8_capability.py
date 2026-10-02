@@ -86,7 +86,16 @@ def probe_8bit_ops(device: str = "cpu", probe_size: int = 64) -> FPCapability:
     cap = FPCapability(device=str(device))
     n = int(probe_size)
 
-    # ① 原生 fp8：逐个变体试 matmul
+    # ① 原生 fp8：**必须让 fp8 张量真正参与 matmul**。
+    # ⚠⚠ **P148 修正一个自我实现的探测**（原实现在这里写着
+    #   `a.to(torch.float16) @ b`）—— 那**全程没跑任何 fp8 kernel**
+    #   （a 先被 cast 成 fp16 了），所以在**任何**设备上都会成功 →
+    #   `has_fp8` 恒为 True → 三级自适应恒走第一级。
+    #   实测反证（本机 CPU）：
+    #     探测方式（先 cast）      成功← 假阳性
+    #     fp8 @ fp16 直接         FAIL: expected m1 and m2 to have the same dtype
+    #   → 这比 P86 的硬编码禁用**更危险**：它给出虚假的安全感。
+    #   现在改为**让 fp8 直接进 matmul**（不预先 cast），失败即真不支持。
     for name in _FP8_NAMES:
         dt = getattr(torch, name, None)
         if dt is None:
@@ -94,30 +103,37 @@ def probe_8bit_ops(device: str = "cpu", probe_size: int = 64) -> FPCapability:
         try:
             a = torch.ones(n, n, dtype=dt, device=device)
             b = torch.ones(n, n, dtype=torch.float16, device=device)
-            _ = (a.to(torch.float16) @ b).sum().item()      # 强制同步
+            # 关键：dtype **不匹配的** matmul 才是真正的fp8 路径；
+            # 若框架要求同 dtype，则试 fp8×fp8（同样不预先 cast）。
+            try:
+                _ = (a @ b).float().sum().item()
+            except (RuntimeError, TypeError):
+                b2 = torch.ones(n, n, dtype=dt, device=device)
+                _ = (a @ b2).float().sum().item()
             cap.has_fp8 = True
             cap.fp8_variant = name
             break
         except Exception as e:                             # noqa: BLE001
             cap.fp8_error = f"{type(e).__name__}: {str(e)[:90]}"
-    # ①b 纯 fp8×fp8（有些设备只支持这个组合）
+    # ①b 显式的 fp8 存储往返（有些设备能存 fp8 但不能 matmul → 不可用于计算）
     if not cap.has_fp8:
-        dt = getattr(torch, "float8_e4m3fn", None)
-        if dt is not None:
-            try:
-                a = torch.ones(n, n, dtype=dt, device=device)
-                b = torch.ones(n, n, dtype=dt, device=device)
-                _ = (a.to(torch.float32) @ b.to(torch.float32)).sum().item()
-                cap.has_fp8 = True
-                cap.fp8_variant = "float8_e4m3fn(×fp8)"
-            except Exception:                                # noqa: BLE001
-                pass
+        try:
+            a = torch.ones(n, n, dtype=getattr(torch, "float8_e4m3fn"),
+                           device=device)
+            _ = a.clone().to(torch.float16).sum().item()
+            cap.notes.append("fp8 可存储但不可 matmul → 不能用于计算")
+        except Exception as e:                             # noqa: BLE001
+            cap.fp8_error = cap.fp8_error or f"{type(e).__name__}: {str(e)[:60]}"
 
     # ② int8 路径（P105 的实现：存储 int8、计算在 fp16 域）
+    # ⚠ P148：`p8.to(fp16) @ p16` 里 p8 也先被 cast 了 → 同样测不到 int8 算子。
+    #   但 int8 路径（P105）的**计算本来就在 fp16 域**（存储 int8、算时反量化），
+    #   所以「int8→fp16 再 matmul」**正是它真实的执行路径** → 这里保持原样是正确的，
+    #   但要在注释里写明「这测的是 P105 语义（存储 int8/ 计算 fp16）」。
     try:
         p8 = torch.ones(n, n, dtype=torch.int8, device=device)
         p16 = torch.ones(n, n, dtype=torch.float16, device=device)
-        _ = (p8.to(torch.float16) @ p16).sum().item()
+        _ = (p8.to(torch.float16) @ p16).sum().item()   # P105 的真实计算路径
         cap.has_int8 = True
     except Exception as e:                                 # noqa: BLE001
         cap.int8_error = f"{type(e).__name__}: {str(e)[:90]}"

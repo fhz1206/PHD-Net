@@ -311,11 +311,21 @@ def main() -> None:
         check("F5 w_clip 在重量化时裁剪（码 ≤ w_clip/scale）",
               int(_ro_c.W.abs().max()) <= _lim,
               f"max|码|={int(_ro_c.W.abs().max())} ≤ {_lim}（w_clip=0.05）")
-        # 旧名别名：dtype="fp8" 构造出的是 int8 码本。
+        # P148：`dtype="fp8"` 已**不再是 int8 的别名**（P147 起它是独立路径：
+        # 有原生 fp8 算子就用 fp8，否则转int8），且 fp8 会被**运行时探测**。
+        # → 断言改为「fp8 走的是 fp8 或 int8，且**探测被真正执行过**」
+        #    （审计 BUG-1：此前 fp8 被别名归一成 int8，探测是死代码）。
         _ro_a = AccelReadout(_h8, _n8, None, device="cpu", dtype="fp8", w0=_W08)
-        check("F6 旧名 fp8 → int8 码本（别名归一）",
-              _ro_a.W.dtype == torch.int8 and _ro_a.dtype_name == "int8",
-              f"W.dtype={_ro_a.W.dtype}")
+        _is8 = str(_ro_a.W.dtype) in ("torch.int8", "torch.float8_e4m3fn")
+        check("F6a dtype=fp8 构造出 8-bit 码本（fp8 或 int8）",
+              _is8, f"W.dtype={_ro_a.W.dtype}")
+        check("F6b fp8 **运行时探测被真正执行**"
+              + ("（原生 fp8）" if getattr(_ro_a, "_fp8_native", False)
+                 else "（回落 int8）" if getattr(
+                     _ro_a, "_fp8_fallback_to_int8", False) else "（未执行←回归!)"),
+              getattr(_ro_a, "_fp8_native", False)
+              or getattr(_ro_a, "_fp8_fallback_to_int8", False)
+              or getattr(_ro_a, "_fp8_cap", None) is not None)
         # 检查点往返：W_cpu 给实值、load_W 重量化，一次往返后稳定（不再漂移）。
         _v1 = ro_i.W_cpu()
         ro_i.load_W(_v1)
