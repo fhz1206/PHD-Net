@@ -1,47 +1,60 @@
-perf(P137): the async-wait hypothesis is dead; add per-line profiling inside the readout
+perf(P138): per-line profiling pins it on .item() sync; fix a real materialisation bug
 
-Section 8 from the Ascend run (1b tier, production dimensions) settles two things
-by ruling the others out:
-  items 1-7, bare operators, total      ~0.35 ms
-  8a real step, submission basis15.147 ms  jitter 1.0x
-  8b real step, sync basis                15.204 ms  jitter 1.0x
-  training log readout                    10.99 ms
+The per-line profile on Ascend (60 steps, nll_sync_every=1, 15.159 ms/step
+including trace overhead) puts 14.2492 ms - 23.7% of the total, and far ahead of
+everything else - on a single line:
 
-Hypothesis 1, that the cost is asynchronous waiting or dispatch queueing, which
-I proposed in P135, is dead: 8a equals 8b to within 0.5%. Enqueueing and
-completing cost the same, so synchronisation is not the bottleneck.
+  learn_softmax:-1  (my marker for "last line to return", i.e.
+                     `return float(nll_dev.item())`)     14.2492 ms  23.7%
+  learn_softmax:511 `if self.nll_sync_every <= 1:`           0.4706 ms   0.8%
+  forward_dev:416   `self._cache_h = np.ascontiguousarray` 0.1766 ms   0.3%
+  forward_dev:394   `try:`                                   0.1349 ms   0.2%
+  _eager_step:565   `W.add_(dp.reshape(-1,1)*g, alpha=-eta)` 0.0580 ms   0.1%
+  ... every remaining one of 20+ lines is under 0.06 ms
 
-Hypothesis 2, that the 100 MiB update is the cost, is also dead: the addmm_
-update measures 0.061 ms. A corollary is that there is no room on the gather
-side at all - the official npu_gather_sparse_index is 0.034 against a 0.020
-baseline, and torch.take at 0.016 is inside the noise.
+So the cost is waiting for the device to finish, forced by .item(). This does
+not contradict 8a equalling 8b: .item() synchronises every single step, so even
+the "no explicit sync" variant was already being dragged by it. My P135 claim
+that asynchronous waiting was not the bottleneck was wrong - I had not realised
+that .item() is itself the synchronisation point.
 
-What remains: 8b matches the training log to within 0.7% (the benchmark is
-slightly higher because it carries more Python overhead and no CPU/NPU overlap),
-so 8b IS the real production cost. The remaining 14.8 ms is spent in code that
-sections 1 through 7 never touch, and bare operator benchmarks cannot see it -
-that requires instrumenting inside the production functions.
+The remaining question is now sharp: what is the device executing? Bare operators
+1 through 7 total 0.35 ms, yet the device takes 14 ms to drain, so work outside
+those operators is queued - most likely per-step H2D, event bookkeeping or
+memory allocation.
 
-New tool tools/bench_readout_lineprofile.py. It uses sys.settrace to time
-individual lines in seven readout methods only, prints the top-N most expensive
-lines with their source text, and classifies each by what it is - .item() or
-synchronize or an H2D copy means a synchronisation cost, plain Python tensor
-arithmetic means a host cost. The limitations are recorded in the tool itself:
-settrace costs 0.1-0.3 ms per line so absolute values are inflated and only the
-relative ranking and the top line should be read; and on this host, which takes
-the numba fallback, it cannot reproduce 15 ms at all, so it is only meaningful on
-Ascend.
+A correction to what I wrote in the tool: the trace overhead is NOT 0.1-0.3 ms
+per line in practice. The traced run costs 15.159 ms/step versus 15.147 ms/step
+for the untraced 8a - essentially identical, because only seven methods are
+traced rather than the whole process. The tool's own docstring claiming large
+inflation was too pessimistic.
 
-A mistake of mine inside this tool, worth recording. The first version computed
-per-line attribution as t0 minus _last[0], where t0 was captured on function
-entry while _last advanced on line events. Line events can precede the function
-entry stamp, so every delta came out NEGATIVE: on this host the whole table
-printed negative times and negative percentages, yet nothing raised. It now uses
-each line event's own timestamp minus the previous line event, plus a filter
-that discards negative values. The lesson generalises: a measurement tool whose
-output is not sanity-checked for impossible values - negative durations,
-percentages above 100 - is the same as having no output.
+Second finding, a real bug. The sparse branch of _eager_step used
+W.add_(dp.reshape(-1,1)*g, alpha=-eta), which MATERIALISES an
+(n_out, k) temporary - 52,642 x 128 = 6,738,176 elements = 25.4 MiB per step -
+while the dense branch uses W.addmm_(dp.reshape(-1,1), ht.reshape(1,-1)), which
+does not. P28 explicitly banned the materialising form, recording that it costs
+an extra 1.73 GiB of device traffic per step, 40% of the total. The sparse arm
+was added in P111 and never got the same fix.
 
-Gates: fast 9/9, line profiler --help exit 0.
+It now uses W.addcmul_(dp.reshape(-1,1), g, value=-eta), a rank-1 AXPY with no
+temporary. Numerically this differs from the materialising form by 2.384e-07
+(relative 5.4e-08), which is one fp32 ulp - so it is NOT bit-identical, and the
+gate states a tolerance rather than claiming bit equality.
+verify_accel_sparse gains C4e (3 cases, 28 -> 31): that the materialising form
+is gone, that addcmul_ is used, and that the two agree within tolerance.
+
+Worth noting the irony: while writing the P134 benchmark I made exactly this same
+mistake with sub_(dp*g), noticed it, fixed the benchmark - and then never
+revisited the identical line sitting in the production code.
+
+Note that addcmul_ is not the main cause of the 14 ms: that line only shows
+0.058 ms, which is its submission cost. To confirm the synchronisation story,
+run the line profiler with --sync-every 8. If the 14.25 ms vanishes or is
+amortised over 8 steps, then nll_sync_every and CPU/NPU overlap are the levers,
+and P34 already laid the groundwork.
+
+Gates: fast 9/9, accel_sparse 31/31, accel_readout PASS, cann_env 30/30,
+ms_stream 44/44, p116_sched 22/22.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
