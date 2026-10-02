@@ -69,7 +69,7 @@ class AccelReadout:
                  nll_sync_every: int = 1, compile: bool = False,
                  compile_mode: str = "default", conn_k: int = 0,
                  csr=None, lognormal_init: bool = False, exc_ratio: float = 0.8,
-                 gather_impl: str = "index",
+                 gather_impl: str = "index", gather_dtype: str = "fp32",
                  sparse_fwd_kernel: str = "mulsum"):
         if torch is None:
             raise RuntimeError("未安装 torch，加速读出不可用")
@@ -272,12 +272,28 @@ class AccelReadout:
         self._cache_g_epoch = -1                            # P112：主机侧 epoch 判据
         self._ht_epoch = 0                                  # 每次上传新 h 递增
         self._ht_epoch_at_cache = -1# P122：`_cache_ht` 上传时的 epoch
-        # P134：gather 实现（"index" = 高级索引基线/ "take" = 另一条 device kernel）
-        self._gather_impl = str(gather_impl or "index").lower()
         # P134：gather 实现（"index" = 高级索引基线 / "take" = 另一条 device kernel）
+        # ⚠ P145 清理：这里原本有**三份重复赋值**（P134 那次脚本失败重试的残留，
+        #   功能上无害但属死代码，且说明「重试式插入」的纪律漏洞）。
         self._gather_impl = str(gather_impl or "index").lower()
-        # P134：gather 实现（"index"= 高级索引基线 / "take" = 另一条 device kernel）
-        self._gather_impl = str(gather_impl or "index").lower()
+        # P145：gather 输出的精度（"fp32" | "fp16" | "bf16"），**默认 fp32=保持现状**。
+        # 动机（msprof 昇腾实测，600 步）：
+        #   aclnnIndex_IndexAiCore_Index  占 81.0%，耗时 3,975,871 μs，
+        #   其中 **aiv_time = 99.6%** → 它在 **Vector 单元**上真执行（非排队），
+        #   流量 50.8 MiB → 有效带宽仅 **8.1 GB/s**；
+        #   而同流量的 BatchMatMul 在 Cube 上只需 1.41 ms（**38 GB/s**，快 4.7×）。
+        #   → `g` 若降到 fp16，**流量减半 → 理论 AIV 6.63 → ~3.3 ms**，
+        #     每步总量 8.18 → **~4.9 ms**（接近 5 ms 目标）。
+        # ⚠⚠ **但精度代价必须由 fhz 的 PPL A/B 判定，我不替他拍板**：
+        #   本机实测（8192×64×128，含稀疏激活 h）fp16 的 g 带来
+        #     前向 y 相对误差 ~1.6e-4~1.9e-4
+        #     **更新量dW 相对误差 ~2.1e-4~2.3e-4**（≈1800× fp32 eps）
+        #   对比参照：P131 的 einsum 非逐位是 3e-5（fp16 的 g **大一个量级**）；
+        #   而 P110 的 fp16 **权重**是破坏性的（保留率 26.67%）。
+        #   **关键区别**：W 是**累积状态**（每步读回都丢精度→累积），而 g 是
+        #   **中间量**（算完即弃、不累积）→ P110 的结论**不能直接套到 g**。
+        #   但 2e-4 的相对误差是否会侵蚀学习效果，**只有 PPL 能回答**。
+        self._gather_dtype = str(gather_dtype or "fp32").lower()
         self._csr_val_host = None                           # P111：_csr 导出缓存
 
     # ---------- 前向 ----------
@@ -348,6 +364,14 @@ class AccelReadout:
                 and getattr(self, "_cache_g_src", None) is ht):
             return self._cache_g
         g = ht[self.Wi]                                  # (n_out, k) 高级索引 gather
+        # P145：按 `gather_dtype` 转换（fp32 = 不动，零开销）。
+        # ⚠ 只降**中间量 g** 的精度，**W 保持 fp32**（P110：W 降精度会累积丢）。
+        # ⚠ 转换后**立刻在下游转回 fp32**（`_matmul` / `addcmul_` 都按 W 的
+        #   dtype 走），所以本函数之外看不到 dtype 变化 → 影响面被限在这一次
+        #   gather 的取数精度上。
+        if self._gather_dtype != "fp32" and g.dtype == torch.float32:
+            g = g.to({"fp16": torch.float16,
+                      "bf16": torch.bfloat16}[self._gather_dtype]).to(torch.float32)
         self._cache_g = g
         self._cache_g_src = ht                # 记住张量**对象**（P143）
         self._cache_g_epoch = self._ht_epoch  # 保留供诊断
