@@ -1,48 +1,45 @@
-perf(P132): add a per-segment readout benchmark - stop guessing from x86
+fix(P133): the segment benchmark measured the wrong model; source it from the production ckpt
 
-fhz asked whether readout can be made faster. Short answer: yes, but not by
-guessing on this host - I have now guessed wrong three more times.
+Server run 2026-10-02 14:48 crashed, and the output shows why the whole run was
+meaningless before it even started:
 
-What I measured here (x86, best-of-5), all wrong or useless:
-  chunking so gather fits L2        0.83-0.91x (slower; just adds kernels)
-  idx int64 -> int32 (saves 25 MiB) 0.58x (halved throughput; type conversion)
-  index_select / take instead of    0.92-0.93x (no difference)
-    advanced indexing
-  embedding(W, Wi) fused            0.02x (catastrophic - it is a lookup, not a sum)
-  CSR SpMM A @h                     15.1 ms (slower than einsum; x86 has no good
-                                    SpMM kernel)
-The revealing one: at smaller sizes the gather costs only 1.38 ms, so "gather is
-slow" is ASCEND-SPECIFIC, not an intrinsic property of the algorithm. Any
-optimisation aimed at it has to be driven by Ascend measurements, not by x86
-relative timings.
+  [bench] backend accel:auto | n_out=1,021 n_h=3,072 conn_k=0 dtype=fp32
 
-Traffic accounting per step at 1b tier, total 152.6 MiB:
-  idx read (int64)   50.7 MiB   33%
-  W read + write     50.7 MiB   33%
-  g read + write     50.7 MiB   33%   <- einsum already removes this (P131)
-  y read + write      0.4 MiB
-So einsum removes a third of the traffic and 10.99 ms should land near 7.3 ms.
-Being straight about the target: 5 ms is NOT reachable by swapping kernels
-alone, because the remaining three items are each a third and W cannot drop to
-fp16/bf16 - P110 measured that doing so destroys the perceptron update rule.
+n_out should be 51,962, and conn_k should be 128, not 0. The tool read the
+vocabulary snapshot, then fed PHDWordLM a 4000-character slice of it - which
+re-tokenized into a 1,021-word vocabulary. Every number that run could have
+produced would have described a different model.
 
-New tool tools/bench_readout_segments.py. It times each stage in dependency
-order: (1) H2D of h, (2) gather, (3) mul+sum, (4) einsum, (5) forward total,
-(6) softmax+CE, (7) update addmm_. Every stage is best-of-N and prints its
-jitter ratio; anything above 1.3x is labelled "noise dominated, not a basis for
-optimisation" so a single noisy sample cannot be mistaken for a finding.
+Fixed properly rather than patched: the tool now sources everything from a
+production checkpoint, which already carries the real structure -
+tok_vocab for n_out, ro_ip/ro_idx for conn_k and the n_h bound, plus the stack
+weights. Added --ckpt to point at a specific file; by default it picks
+outputs/models/*1b*pretrain*.npz. When conn_k comes out as 0 the tool says so
+loudly, because that is the signature of "you are not measuring the production
+path".
 
-It handles both the sparse accelerated arm (torch tensors) and the dense
-numba fallback (numpy arrays) - running it here end to end is what proves
-neither path crashes. On this host it reports the CPU fallback, so its numbers
-are reference-only; run it on Ascend for the real breakdown of that 10.99 ms.
+Also fixed a genuine trap in my own code: getattr(ro, "_csr", None) does NOT
+return None when the readout is dense - `_csr` is a property that RAISES
+NotImplementedError, getattr's default does not suppress exceptions. That was
+the traceback. Wrapped in try/except, and noted in the comment so it is not
+rediscovered.
 
-Gates: fast 9/9, py_compile clean, bench --help exit 0.
+One more robustness fix: the n_h back-inference from ro_idx only holds when the
+CSR row count equals n_out. When it does not (the local smoke ckpt has 637
+vocab words against 2611 CSR rows), n_h stayed None and then blew up when used
+to build the test vector. It now always resolves to an integer and prints the
+value for the operator to check.
 
-Lesson, and it is the fourth time: every wrong conclusion about "readout is
-slow" came from measuring on x86 and extrapolating to Ascend. This project has
-now recorded seven platform direction reversals. For anything device-side,
-segment-measure on the device first and only then choose an optimisation; the
-local host is for checking that the code runs, not for predicting speed.
+Verified locally end to end (the local ckpt is a small dense one, so the
+numbers are reference-only, but both the sparse and dense paths execute without
+error). fast 9/9, --help exit 0.
+
+Please rerun on Ascend with
+
+  python tools/bench_readout_segments.py --preset 1b
+
+The line that matters is "[bench] sparse CSR: rows=... conn_k=... nnz=..." - if
+it does not appear, the ckpt is not the production pre-training one and the
+measurements will not transfer.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

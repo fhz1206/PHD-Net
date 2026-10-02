@@ -79,40 +79,90 @@ def main() -> int:
                     help="要测的前向算子，逗号分隔")
     ap.add_argument("--reps", type=int, default=9, help="best-of-N 的 N")
     ap.add_argument("--device", default="", help="留空=auto")
+    ap.add_argument("--ckpt", default="",
+                    help="生产 ckpt 路径（含 tok_vocab + ro_ip/idx/val）。"
+                         "默认取 outputs/models/*1b*pretrain*.npz。"
+                         "P133：词表与 CSR 必须来自 ckpt，**不能**用快照重建")
     args = ap.parse_args()
 
     os.environ.setdefault("NUMBA_CACHE_DIR", str(_ROOT / "outputs" / "numba_cache"))
     from config_1b import PRESETS, SEG_KWARGS, build_cfg
-    from phdnet.word_lm import PHDWordLM
     from phdnet.config import PHDNetConfig
+    from phdnet.backends.accel_readout import pick_readout_backend
 
-    # 构词表：用**已训练模型的 ckpt**（若存在）否则用快照词表 + 完整
-    # WordTokenizer 路径。⚠ 不手工拼装 tokenizer（其私有字段 n_sdr/seed 等
-    # 会随版本漂移 → P129 那类脆弱依赖）。
+    # ⚠ P133：数据来源改为**生产 ckpt**，不再从词表快照重建。
+    # 之前用 `PHDWordLM("".join(words[:4000]))` 重建 → tokenizer 会**重新分词**，
+    # 得到一个与生产无关的小词表（服务器实测 n_out=**1021** vs 真实 51,962，
+    # 且 conn_k 退化成 0）→ 整场测的是另一个模型，结论全无意义。
+    # ckpt 里带齐了真实结构：`tok_vocab`（词表）、`ro_ip/ro_idx/ro_val`（稀疏 CSR）、
+    # 以及各权重（据此可反推 n_sdr/n_top/pred_in_readout → n_h）。
     import json
-    from phdnet.word_lm import PHDWordLM
-    snap = sorted((_ROOT / "outputs").rglob("vocab_*_pretrain.json"))
-    if not snap:
-        print("[bench] 找不到词表快照（outputs/**/vocab_*pretrain.json）；"
-              "先跑一次训练或 tools/build_vocab.py")
+    import numpy as _np
+    ckpts = sorted((_ROOT / "outputs" / "models").glob("*1b*pretrain*.npz"))
+    if not ckpts:
+        ckpts = sorted((_ROOT / "outputs").rglob("*.npz"))
+    if not ckpts:
+        print("[bench] 找不到任何 ckpt（outputs/**/vocab_*.npz 旁的 *.npz）；"
+              "先跑一次训练或用 --ckpt 指定")
         return 2
-    meta = json.loads(snap[-1].read_text(encoding="utf-8"))
-    words = meta["words"] if isinstance(meta, dict) else meta
-    print(f"[bench] 词表快照 {snap[-1].name} → {len(words):,} 词")
+    ck_path = Path(args.ckpt) if args.ckpt else ckpts[-1]
+    print(f"[bench] ckpt {ck_path.name}")
+    z = _np.load(ck_path, allow_pickle=True)
+    keys = set(z.keys())
 
+    # ① 词表（决定 n_out）
+    n_out = None
+    if "tok_vocab" in keys:                # 项目权威口径（docs: tok_vocab≠tok_tokens）
+        n_out = int(z["tok_vocab"].shape[0])
+        print(f"[bench] 词表来自 ckpt['tok_vocab'] → n_out = {n_out:,}")
+    else:
+        snap = sorted((_ROOT / "outputs").rglob("vocab_*pretrain.json"))
+        if not snap:
+            print("[bench] ckpt 里没有 tok_vocab，且找不到词表快照")
+            return 2
+        meta = json.loads(snap[-1].read_text(encoding="utf-8"))
+        words = meta["words"] if isinstance(meta, dict) else meta
+        n_out = len(words)
+        print(f"[bench] ckpt 无 tok_vocab → 用快照 {snap[-1].name}（n_out={n_out:,}）")
+
+    # ② 由 CSR 反推 conn_k与 n_h（idx 的最大值上界即 n_h）
+    conn_k = int(args.conn_k) if args.conn_k > 0 else 0
+    n_h = None
+    if "ro_ip" in keys and "ro_idx" in keys:
+        _ip = z["ro_ip"].astype(_np.int64)
+        _idx = z["ro_idx"].astype(_np.int64)
+        n_rows = int(_ip.shape[0] - 1)
+        if n_rows == n_out and _idx.size:
+            conn_k = int(_idx.size // max(1, n_rows))
+            n_h = int(_idx.max()) + 1
+            print(f"[bench] 稀疏 CSR: rows={n_rows:,} conn_k={conn_k} "
+                  f"nnz={_idx.size:,} → n_h>= {n_h}（由 idx 上界反推）")
+
+    # ③ 若 ckpt 带栈配置，直接读；否则用 preset 补
     cfg = build_cfg("1b" if args.preset == "1b" else args.preset)
-    if args.conn_k > 0:
-        cfg = PHDNetConfig(**{**cfg.__dict__, "readout_conn_k": args.conn_k})
-    # 最小语料：仅用于让 tokenizer 走完构造流程（段间字符）
-    lm = PHDWordLM("".join(words[:4000]) or "test", cfg, seg_kwargs=SEG_KWARGS)
-    tok = lm.tok
-    n_out = len(tok)
-    ro = lm.net.readout
-    backend = getattr(lm.net, "_readout_backend", "?")
-
-    n_h = cfg.n_top * (3 if cfg.pred_in_readout else 2)
-    print(f"[bench] 后端 {backend} | n_out={n_out:,} n_h={n_h:,} "
+    if conn_k > 0:
+        cfg = PHDNetConfig(**{**cfg.__dict__, "readout_conn_k": conn_k})
+    if n_h:
+        # pred_in_readout=2/3 通路，决定 n_h = n_top * (2 or 3)
+        _ntop = max(1, n_h // 3)
+        if n_h % 2 == 0 and (n_h // 2) % 3 != 0:
+            _ntop = n_h // 2
+        cfg = PHDNetConfig(**{**cfg.__dict__, "n_top": _ntop,
+                              "pred_in_readout": bool(n_h % 3 == 0)})
+    #⚠ n_h 的兜底：ckpt 的 ro_idx 反推只在「rows 恰等于 n_out」时成立。
+    # 不成立（如本机 smoke ckpt n_out=637 而 CSR rows=2611）时n_h 仍为 None，
+    # 后面用它造 h 会炸。→ 统一在此定为整数，并打印实际值供核对。
+    _n_h_eff = int(n_h) if n_h else int(
+        cfg.n_top * (3 if cfg.pred_in_readout else 2))
+    n_h = _n_h_eff
+    ro, backend = pick_readout_backend(cfg, n_h, n_out,
+                                      _np.random.default_rng(cfg.seed))
+    print(f"[bench] 后端 {backend} | n_out={n_out:,} n_h={n_h or cfg.n_top*3:,} "
           f"conn_k={getattr(ro, 'conn_k', 0)} dtype={getattr(ro, 'dtype_name', '?')}")
+    if getattr(ro, "conn_k", 0) == 0:
+        print("[bench] ⚠ conn_k=0（稠密）——分段数据与生产稀疏路径**不同口径**。")
+        print("        若要测生产路径，请确认 ckpt 是 1b 预训练 ckpt（含 ro_ip/idx）。")
+
 
     dev = getattr(ro, "device", None)
     if dev is None:
@@ -130,10 +180,17 @@ def main() -> int:
         nb = getattr(t, "nbytes", None)
         return nb if isinstance(nb, int) else int(t.nbytes())
 
-    # 稀疏臂才有 Wi；稠密回落路径（numba Readout）用 CSR 的 idx
+    # 稀疏臂才有 Wi；稠密回落路径（numba Readout）用 CSR 的 idx。
+    # ⚠⚠ **不能用 `getattr(ro, "_csr", None)`**：`_csr` 是 **property**，稠密
+    # 模式下它**抛 NotImplementedError**（见 accel_readout.py:651）→ getattr
+    # 的默认值**不生效**，异常直接冒出来。这正是 2026-10-02 14:48 服务器报的错。
+    # → 必须用 try/except 包住。
     Wi = getattr(ro, "Wi", None)
     if Wi is None:
-        _csr = getattr(ro, "_csr", None)
+        try:
+            _csr = ro._csr                              # noqa: SLF001
+        except (NotImplementedError, AttributeError):
+            _csr = None
         Wi = _t.as_tensor(_csr[1]) if _csr is not None else None
     if Wi is not None:
         print(f"[bench] W{tuple(W.shape)} idx{tuple(Wi.shape)} "
