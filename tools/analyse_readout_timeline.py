@@ -86,6 +86,15 @@ _SUBSTR_MTE2 = ("aic_mte2_ratio",)
 _SUBSTR_SCALAR = ("aic_scalar_ratio",)
 _SUBSTR_MAC = ("aic_mac_ratio",)
 _SUBSTR_CUBE = ("cube_utilization",)
+# P144：**别只看 aicore_time**。fhz 质疑「Index 是不是测占用率的」——
+# 数据显示 `aicore_time = 0` 而 `Task Wait Time` 巨大 →它**根本没占 AI Core**
+#，而是在 **Vector（AIV）** 单元上跑。gather 是访存/向量型，
+# 跑AIV 才是它的自然归属。第一版只取 aicore，把 0 当「没数据」→ 结论错。
+_SUBSTR_AIV = ("aiv_time",)
+_SUBSTR_AIVVEC = ("aiv_vec_time",)
+_SUBSTR_MTE1T = ("aic_mte1_time",)
+_SUBSTR_MTE2T = ("aic_mte2_time",)
+_SUBSTR_FIXPIPE = ("aic_fixpipe_time",)
 
 
 def main() -> int:
@@ -140,11 +149,17 @@ def main() -> int:
         c_mac = _ci(_SUBSTR_MAC)
         c_scalar = _ci(_SUBSTR_SCALAR)
         c_cube = _ci(_SUBSTR_CUBE)
+        c_aiv = _ci(_SUBSTR_AIV)
+        c_aivvec = _ci(_SUBSTR_AIVVEC)
+        c_mte1t = _ci(_SUBSTR_MTE1T)
+        c_mte2t = _ci(_SUBSTR_MTE2T)
+        c_fix = _ci(_SUBSTR_FIXPIPE)
 
         # 累加：按算子名聚合
         agg: dict[str, list[float]] = defaultdict(list)
         dec: dict[str, list[float]] = defaultdict(
-            lambda: [0.0] * 6)      # wait, aicore, mte1, mte2, mac, scalar
+            lambda: [0.0] * 10)     # 0wait 1aicore 2mte1% 3mte2% 4mac 5scalar
+                                        # 6aiv 7aiv_vec 8mte1_t 9mte2_t
         cube: list[float] = []
 
         def _num(row, i):
@@ -173,6 +188,10 @@ def main() -> int:
             dec[nm][3] += _num(row, c_mte2)
             dec[nm][4] += _num(row, c_mac)
             dec[nm][5] += _num(row, c_scalar)
+            dec[nm][6] += _num(row, c_aiv)
+            dec[nm][7] += _num(row, c_aivvec)
+            dec[nm][8] += _num(row, c_mte1t)
+            dec[nm][9] += _num(row, c_mte2t)
             if c_cube >= 0:
                 cube.append(_num(row, c_cube))
             n += 1
@@ -220,14 +239,37 @@ def main() -> int:
         print("\n" + "=" * 92)
         print("时间去向（msprof 分解列，单位 μs；ratio 类列是 **%**，不是 μs）")
         print("=" * 92)
-        print(f"{'算子':<40}{'耗时':>11}{'aicore':>11}"
-              f"{'mte1%':>8}{'mte2%':>8}{'mac%':>8}{'排队':>11}")
+        hdr = (f"{'算子':<38}{'耗时':>11}{'AICore':>10}{'AIV/Vector':>12}"
+               f"{'mte1_t':>9}{'mte2_t':>9}{'排队':>12}")
+        print(hdr)
         print("-" * 92)
         for nm, vals in items[:12]:
             s_ = sum(vals)
             d = dec[nm]
-            print(f"{nm[:38]:<40}{s_:>11,.0f}{d[1]:>11,.0f}"
-                  f"{d[2]:>8.1f}{d[3]:>8.1f}{d[4]:>8.1f}{d[0]:>11,.0f}")
+            print(f"{nm[:36]:<38}{s_:>11,.0f}{d[1]:>10,.0f}{d[6]:>12,.0f}"
+                  f"{d[8]:>9,.0f}{d[9]:>9,.0f}{d[0]:>12,.0f}")
+        # 硬件单元归属判读（P144：这是 fhz 质疑引出的关键维度）
+        print("\n  硬件单元归属判读：")
+        for nm, vals in items[:12]:
+            s_ = sum(vals)
+            if s_ <= 0:
+                continue
+            d = dec[nm]
+            wa, wv = d[1], d[6]
+            mv = d[8] + d[9]
+            wait = d[0]
+            if wa / s_ > 0.5:
+                where = "**AI Core（Cube）** ← 真的在算矩阵"
+            elif wv / s_ > 0.3:
+                where = "**Vector/AIV** ← 访存/向量型（gather 属此类）"
+            elif mv / s_ > 0.3:
+                where = "**搬运为主**（mte1/mte2）← memory-bound"
+            elif wait > 3 * s_:
+                where = ("**几乎全在排队**（wait ≫ 耗时）→ 不是它慢，"
+                         "是**没被调度到**")
+            else:
+                where = "混合/待判读"
+            print(f"{nm[:36]:<38}→ {where}")
         tot_d = sum(sum(v) for v in agg.values())
         tot_a = sum(d[1] for d in dec.values())
         tot_w = sum(d[0] for d in dec.values())

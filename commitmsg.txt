@@ -1,44 +1,47 @@
-perf(P143): msprof puts 89.3% of the readout in Index; cache identity made explicit
+fix(P144): fhz's question about Index overturned P143's conclusion
 
-The timeline parser works now, and the answer is unambiguous. From op_summary on
-Ascend, 600 steps, 12 operators:
-  aclnnIndex_IndexAiCore_Index     1200 calls   7,867,902 us   89.3%  13.11 ms/step
-  aclnnBatchMatMul_V2               600 calls     843,672 us    9.6%   1.41 ms/step
-  aclnnAddcmul                      600 calls      51,694 us    0.6%   0.086 ms/step
-  the other nine                    600 each      ~96,000 us    1.1%   ~0.16 ms/step
-Total 14.68 ms per step, consistent with the 10.99 ms the training log reports.
-The entire 26x gap is Index, which is the gather. P135's "bare operators total
-0.35 ms" missed the real cost of the gather completely.
+fhz asked whether aclnnIndex_IndexAiCore_Index might be an occupancy
+measurement rather than real work. That question sent me back to the
+aicore_time column, and P143's conclusion does not survive it.
 
-I made a mistake worth recording. I measured "the gather runs twice per step" and
-changed code on the strength of it. The measurement was wrong: my spy counted
-function entries, not executions of the gather itself. Counting only the branch
-that actually gathers gives 1 call for the same h and 2 for a different h, so
-the cache does work on this host. Ascend still shows 1200 Index calls for 600
-steps, so either the cache does not take effect there or advanced indexing is
-split into two kernels. That stays open.
+Here is what the data actually says:
+  Index (gather)     7,867,902 us   aicore_time = 0      wait = 53,268,212
+  BatchMatMul         843,672 us   aicore_time = 842,527  wait = 142,059
+  the other seven     4k-13k each  aicore_time = 0      wait all >> duration
 
-What I changed is conservative and does not alter semantics. The _sp_gather
-predicate now compares tensor object identity rather than an epoch counter, and
-_lookup_ht aligns _cache_g_epoch when it hits. P122 fixed using the wrong gather
-when the h differs, a silent numeric error; P143 concerns repeating the gather
-when the h is the same. The two pull in opposite directions and both must hold.
-Verified locally: one call for the same h, five for five steps, and two when the
-h changes so nothing is wrongly reused.
+So aicore_time = 0 is not missing data, it is a real zero. Index never occupies
+the AI Core. A gather is a memory and vector operation, so it belongs on the
+Vector/AIV unit, and its wait time is 6.8x its duration, meaning most of that
+"duration" is spent waiting for resources rather than executing.
 
-The 655x between P135's 0.020 ms and msprof's 6556 us is still unexplained. P135
-measured best-of-N over one fixed h, so the gather kept hitting L2, whereas in
-production every step brings a new h. I suspect P135 measured a warm path. A new
-section 9 in bench_accel_kernels.py measures cold versus hot, using a rotating
-pool of 16 distinct h tensors. On x86 here the two are identical, 0.832 versus
-0.759 ms, because there is no cache effect to see; it has to be run on Ascend.
+My P143 write-up said "Index is 89.3% and that is the bottleneck, so the fix is
+in the gather kernel". That framing is wrong. msprof's Task Duration includes
+queueing, and the AI Core is only actually busy during BatchMatMul, which is
+1.41 ms per step out of 14.68. The correct statement is that the device spends
+most of its time idle waiting for the CPU, because each step submits only twelve
+small kernels.
 
-If the cold number lands near 6.5 ms, then P135 was a warm-path illusion and the
-remedy is to reduce how much h gets moved or to raise its reuse, not to swap
-kernels. The kernel-swapping direction is already dead: the official operator is
-slower and torch.take is within noise.
+Three independent measurements now agree: this msprof column, the P139
+diagnostic where _staged_to_dev cost 54x more inside the loop than standalone,
+and the 609% wait ratio in P142. All three say the same thing.
 
-Gates: fast 9/9, accel_sparse PASS, accel_readout PASS, smoke_benchmarks all
-green.
+The direction therefore changes. It is not about swapping the gather operator,
+which P134 and P135 already refuted twice. It is about pipelining, removing
+synchronisation points, and letting the CPU run ahead of the NPU.
+
+The analyser now also collects aiv_time, aiv_vec_time, aic_mte1_time and
+aic_mte2_time, and prints a hardware-attribution table: over 50% AICore means
+real matrix work, over 30% AIV means memory or vector work, over 30% transfer
+means memory-bound, and wait far exceeding duration means the operator is not
+slow, it simply is not being scheduled.
+
+Lesson, and it is the third variant of the same failure. In P140 a static scan
+reported confident false positives; in P142 a parser confidently printed a table
+built from the wrong columns. This time the parse was correct but I looked at a
+single dimension. Any device profiler metric raises the question of whether a
+zero is a real zero or missing data, and reading one hardware unit tells you
+neither what the others are doing nor how much of the time is queueing.
+
+Gates: fast 9/9, analyser py_compile clean.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
