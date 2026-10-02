@@ -1,51 +1,45 @@
-perf(P135): Ascend segment data overturns the "gather is slow" assumption
+perf(P136): the 31x gap was a measurement-basis mismatch; add a sync-basis probe
 
-fhz ran the kernel benchmark on Ascend at production dimensions (n_out=52,642,
-n_h=3,072, k=128; per-step traffic Wi 51.4 MiB + W 51.4 MiB):
-  (1) h[Wi] baseline              0.019 ms   jitter 1.7x (noise dominated)
-  (2) index_select                0.025 ms   bit-identical
-  (3) torch.take                  0.016 ms   bit-identical
-  (4) einsum, full forward        0.143 ms   <- the P131 default
-  (5) npu_gather_sparse_index     0.033 ms   bit-identical, SLOWER than baseline
-  (6) aclsparseSpMM               library not found; needs a ctypes binding
+fhz ran section 7 on Ascend. Everything is fast: baseline gather 0.020 ms,
+index_select 0.026, take 0.011, the official gather operator 0.033 (still slower
+than the baseline it would replace), einsum forward 0.155, the addmm_ update
+(which touches roughly 100 MiB) only 0.060, cross-entropy 0.116, and the
+per-step host-side np.array_equal 0.007.
 
-On Ascend the gather takes 0.019 ms, against 10.26 ms on the x86 host - a 540x
-difference. My P132/P134 reasoning that gather was the single biggest item is
-simply wrong on the real hardware. The x86 1.7x win for torch.take shrinks to
-1.2x and sits inside the noise, while the official operator is slower than the
-baseline it would replace.
+Items 1 through 7 total about 0.35 ms, yet the training log reports the readout
+at 10.99 ms - a 31x gap. That gap is the whole story, and I now think I know
+what it is.
 
-The most important number in that run is a ratio, not a measurement: the bare
-operators total under 0.2 ms while the training log reports the readout at
-10.99 ms - a 77x gap. So roughly 10.8 ms per step is spent somewhere the
-benchmark does not cover. That, not the gather, is what needs to be found.
+Every number above is a SUBMISSION measurement. The NPU executes
+asynchronously, so when you run best-of-N back to back, the previous result is
+still sitting in the queue and what you are timing is the cost of enqueueing
+work, not the cost of finishing it. The training log's "readout ms/tok" is a
+main-thread wall clock from time.perf_counter (model.py:370-410), which
+includes waiting for the H2D copy and every host-side cost, so it corresponds
+to the SYNCHRONOUS basis. The two differ by 31x precisely because one measures
+enqueueing and the other measures completion.
 
-Candidates, now measured individually by the new section (7):
-  - the addmm_ update, which touches W plus idx for read and write, about
-    100 MiB per step and 7.4 ms even on this x86 CPU
-  - implicit synchronisation (.item() and D2H points)
-  - kernel dispatch overhead, which is exactly what P120's HBM-bw metric was
-    added to detect and which has still never produced a reading
-  - the per-step np.array_equal(h, cache_h) on the host, 0.005 ms here
-  - H2D through the pinned buffer pool
+New section 8 measures this directly: it builds a production AccelReadout,
+calls forward_dev plus learn_softmax, and times both the bare call and the same
+call followed by a device synchronize. 8b is the number that reconciles with the
+training log.
 
-Two mistakes in my own benchmark, both of the same kind - measuring the wrong
-shape and therefore the wrong cost:
-  1. The update was first written as W.sub_(dp*g, alpha=eta), which
-     MATERIALISES an (n_out, k) temporary. P28 explicitly forbids that: it
-     costs an extra 1.73 GiB of device traffic per step, 40% of the total. It
-     is now the production form, W.addmm_(dp.reshape(-1,1), ht.reshape(1,-1)),
-     a rank-1 AXPY with no temporary.
-  2. The CPU-arm forward was written as W @ h, which is a shape error. It now
-     branches the same way production does: einsum on NPU, mulsum on the CPU
-     fallback.
+A latent trap found while writing it: forward_dev only exists on the accelerated
+backend, while the numba fallback arm has just __call__ plus learn. My first
+version only implemented the device path, so on this host - which takes the
+fallback - section 8 would never run, while on Ascend it would. "Verified
+locally" would have been a fiction. Both branches are now handled and the tool
+prints which interface it took.
 
-Honest read on the 5 ms target: there is no room in the gather, which is about
-0.17% of the 10.99 ms. The target lives in that 10.8 ms of uncovered overhead. If
-it is dispatch, then TASK_QUEUE_ENABLE=2 plus torch.compile fusion is the right
-direction; if it is the update's 100 MiB, the lever is reducing update traffic
-rather than touching the gather. Section (7) settles which.
+Direction depends on what 8b reports. If it is around 10 ms, the cost is real
+device execution or waiting, and the levers are fewer kernels per step
+(torch.compile fusion, already unblocked in P128 but off by default) and less
+traffic. If it is far below 10 ms, then the 10 ms is host-side: the per-step
+array_equal in _lookup_ht, the h assembly in _build_h, the pinned-buffer
+rotation, in which case the answer is to cut host work rather than touch NPU
+kernels. Note that the update is NOT the culprit at 0.060 ms, which rules out
+one of my earlier hypotheses.
 
-Gates: fast 9/9, benchmark --help exit 0, full benchmark run clean.
+Gates: fast 9/9, benchmark --help exit 0.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
