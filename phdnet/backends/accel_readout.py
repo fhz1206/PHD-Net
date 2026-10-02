@@ -562,7 +562,22 @@ class AccelReadout:
             # `addmm_` 是稠密 (n_out,n_h) 的；稀疏下等价写法是 gather 后逐行
             # 外积累加，流量只有 (n_out,k) 而非 (n_out,n_h)。
             g = self._sp_gather(ht)
-            self.W.add_(dp.reshape(-1, 1) * g, alpha=-float(eta))
+            # ⚠⚠ **P138：这里曾用 `W.add_(dp.reshape(-1,1) * g, ...)`，它会
+            # **物化一个 (n_out, k) 的临时张量**（1b 档 52,642×128 = 6,738,176
+            # 元素 = **25.4 MiB**）。P28 早就明确禁止过这个写法（记录：物化版单步
+            # 多 1.73 GiB 设备流量、占总流量 40%），稠密臂用的正是
+            # `W.addmm_(dp.reshape(-1,1), ht.reshape(1,-1))` —— **稀疏臂漏改了**。
+            #
+            # 正确写法：稀疏下 `ht` 是 gather 前的 (n_h,)，没有对应的
+            # (1, n_out) 矩阵可做 addmm_ → 用 **rank-1 AXPY 逐行**实现，
+            # 数值逐位相同（`W[i,j] -= eta·dp[i]·g[i,j]`）且**不物化**：
+            #     W[i, j] -= eta * dp[i] * g[i, j]
+            # 用 `addcmul_`（W 是 torch 张量，支持逐元素 + 张量系数）。
+            # ⚠ 数值契约：`add_(alpha*x)` 与 `addcmul_` 的**乘法次序**不同
+            #   （前者 `(dp[i]*g)*alpha`、后者 `dp[i]*g` 先算再整体乘），
+            #   fp32 下**可能差 1 ulp**。故下方 verifier 会用容差判据，
+            #   而非宣称逐位。**若必须逐位**，退回 `add_`（但那带物化）。
+            self.W.addcmul_(dp.reshape(-1, 1), g, value=-float(eta))
             if self.w_clip > 0.0:
                 self.W.clamp_(-self.w_clip, self.w_clip)
             return nll_dev

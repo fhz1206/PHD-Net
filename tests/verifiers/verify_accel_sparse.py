@@ -372,6 +372,31 @@ def main() -> int:
     check("_sparse" not in _src and "conn_k" not in _src,
           "C4d4 融合核实现里不含稀疏分支（故放开是安全的）")
 
+    # C4e. 稀疏更新**不得物化** (n_out,k) 临时张量（P138）
+    print("\n[C4e] 稀疏更新不物化（P138：P28 禁令的稀疏臂漏改）")
+    import inspect as _i2
+    _, ro_mat, _, _ = build_pair(n_h, n_out, k, seed=41)
+    _src = _i2.getsource(type(ro_mat)._eager_step)
+    _has_mat = "dp.reshape(-1, 1) * g" in _src and "add_(" in _src
+    check(not _has_mat,
+          "C4e1 稀疏更新不用 `add_(dp*g)`（会物化 25.4 MiB 临时张量）",
+          "已改为 addcmul_" if "addcmul_" in _src else "未见addcmul_")
+    check("addcmul_" in _src, "C4e2 用 `addcmul_`（rank-1 AXPY，不物化）")
+    # 数值契约：与旧物化式在 fp32 容差内一致（**非逐位**，乘法次序不同）
+    import torch as _t2
+    _Wd = _t2.randn(4096, 16)
+    _a = _Wd.clone()
+    _b = _Wd.clone()
+    _dp = _t2.randn(4096, 1)
+    _g = _t2.randn(4096, 16)
+    _a.add_(_dp * _g, alpha=-0.15)
+    _b.addcmul_(_dp, _g, value=-0.15)
+    _d = float((_a - _b).abs().max())
+    _scale = max(1e-12, float(_Wd.abs().max()))
+    check(_d <= 1e-6 * _scale,
+          "C4e3 addcmul_ 与物化式**容差内一致**（fp32 1 ulp，非逐位）",
+          f"max|Δ|={_d:.3e} 相对={_d/_scale:.3e}")
+
     # ── D. 零回归 ─────────────────────────────────────────────────────────
     print("\n[D] 零回归：conn_k=0 稠密路径未被污染")
     dense_ref = AccelReadout(n_h, n_out, np.random.default_rng(23), device="cpu",
