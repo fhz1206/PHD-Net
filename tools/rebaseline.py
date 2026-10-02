@@ -60,6 +60,12 @@ if __name__ == "__main__":
         a = ANCHOR[lim if lim else "full"]
         d = (r["ppl_char"] - a) / a * 100
         flag = "✅ 一致" if abs(d) < 0.01 else f"⚠ 偏差 {d:+.2f}%"
+        # ⚠ **标签澄清**（P126）：这里的「连接率」取自 `lm.net.pc.stats()`，
+        # 是 **M2 预测编码主干**的连接率（BASE 栈 256 维 → conn_k=32 → 12.5%），
+        # **不是 M6 读出的**。M6 读出连接率 = `readout_conn_k / n_readout_input`
+        # （生产口径 128/3072 = **4.2%**，或幂律 P124 下按 alpha 倾斜）。
+        # 两者差3 倍，打印在一起极易误读 → 故显式标注。
         print(f"{label:<10} ppl_char = {r['ppl_char']:.4f}  bpc {r['bpc']:.3f}  "
-              f"{r['ms_per_token']:.3f} ms/token  连接率 {r['connectivity']*100:.1f}%  "
+              f"{r['ms_per_token']:.3f} ms/token  "
+              f"[M2主干] 连接率 {r['connectivity']*100:.1f}%  "
               f"锚点 {a}  {flag}", flush=True)

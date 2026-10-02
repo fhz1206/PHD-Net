@@ -59,10 +59,15 @@ def l1_unit() -> bool:
     Wb -= tmp
 
     _force(True)
-    ok = R._ro_fused(Wa, dp, h, eta)
+    # P126：这个核在 **P9（2026-09-27）** 就被重命名为 `_ro_dense_update`
+    # （见 readout.py:36-44 与其上方注释「融合核只用于更新」），但本验证器
+    # 一直还在调旧名`_ro_fused` → 每次跑都 AttributeError。**门禁腐烂了 3 个月**
+    # 没人发现，因为没人跑它 —— 与 P122/P124 的「verifier 假通过/假失败」同源：
+    # 验证器自身没有随代码演进更新。
+    ok = R._ro_dense_update(Wa, dp, h, eta)
     same = np.array_equal(Wa, Wb) and np.array_equal(Wa.view(np.uint64),
                                                      Wb.view(np.uint64))
-    print(f"[L1] 融合核启用={ok}  逐位相同={same}")
+    print(f"[L1] 稠密更新核启用={ok}  逐位相同={same}")
     if not same:
         d = np.abs(Wa - Wb)
         print(f"     最大偏差 {d.max():.3e}  不同元素 {int((d > 0).sum())}")

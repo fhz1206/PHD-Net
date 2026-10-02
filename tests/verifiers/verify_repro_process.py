@@ -16,7 +16,13 @@ from tests.eval_common import BASE, SEG                      # noqa: E402
 from phdnet.config import PHDNetConfig                       # noqa: E402
 from phdnet.word_lm import PHDWordLM                         # noqa: E402
 
-DOC = ROOT / "datasets" / "eval" / "internal_corpus.txt"
+# P126 修复：语料早已从 `datasets/eval/` 迁到**仓库根 `eval_corpus/`**
+# （`datasets/README.md` 有记录），但本验证器一直指旧路径 → FileNotFoundError。
+# 与 verify_readout_fused 同源：**门禁自身腐烂**，只是没人跑它。
+# 加 fallback：两个位置都试，给出清晰错误而不是裸 FileNotFoundError。
+_DOC_CANDIDATES = (ROOT / "eval_corpus" / "internal_corpus.txt",
+                   ROOT / "datasets" / "eval" / "internal_corpus.txt")
+DOC = next((p for p in _DOC_CANDIDATES if p.exists()), _DOC_CANDIDATES[0])
 
 
 def main() -> None:
