@@ -308,7 +308,7 @@ def main() -> None:
                          "下多次 learn 造成 dt=0 → 迹不衰减 → 权重污染，"
                          "生产尺寸实测 max|Δw| 达 7~12）。"
                          "传 >1 会**直接报错退出**而非静默走错路径")
-    ap.add_argument("--sparse-fwd-kernel", default="mulsum",
+    ap.add_argument("--sparse-fwd-kernel", default="einsum",
                     choices=["mulsum", "einsum"],
                     help="P116：稀疏读出（conn_k>0）的前向算子。"
                          "**默认 mulsum**=`(W*h[Wi]).sum(1)`，每步物化一个 "
@@ -316,7 +316,9 @@ def main() -> None:
                          "总流量 22%%）；`einsum` 不物化，本机 x86 快 ~21%%，"
                          "但**归约顺序不同 → 非逐位**（max|Δ|≈3e-05）且"
                          "**昇腾收益未实测**（x86 结论不构成昇腾证据）。"
-                         "试 --sparse-fwd-kernel einsum 看服务器读出耗时")
+                         "⚠ **P131 起默认 einsum**（省掉 25.37 MiB "
+                         "中间张量；**昇腾速度收益待实测**——本机 x86 无法稳定"
+                         "区分两者）；要回逐位基线用 --sparse-fwd-kernel mulsum")
     ap.add_argument("--m2-kernel", default="plain",
                     choices=["serial", "fused", "plain"],
                     help="P76/P99/P113：M2 推理核。**默认 plain**——"

@@ -1,46 +1,55 @@
-fix(P130): three stacked defects in the npu-smi device-id resolution
+perf(P131): switch the sparse forward kernel to einsum by default; decline B
 
-Server evidence (2026-10-02 14:0x):
-  [telemetry] could not determine NPU device id -> no -i, HBM-bw may stay empty
-  [telemetry] `npu-smi -t usages` parsed no fields; rc=215
-  This command must input card id.
-fhz confirmed by hand that the subcommand genuinely requires a card id.
+Two of the three asks, and one I did not do.
 
-Three defects, all introduced when the telemetry was added:
+B (imprint amortization) is NOT enabled. P122's audit measured it: the benefit
+is exactly zero - the learn call count goes 23/22/21/20 for N=1/2/3/4, so it
+defers rather than saves, and the buffered tail pairs are never flushed - and
+at N>=2 it corrupts weights, because several learn calls under the same
+step_count give shared neurons dt=0, so the trace never decays. At production
+size (n_dim=1024, m_out=72) max|delta w| is 7.10 at N=2 and 11.98 at N=3; at small
+sizes the delta is zero, which is exactly why it hid. amortize>1 now raises
+ValueError. Turning B on by default would mean enabling a switch already proven
+harmful, so I left it off and am flagging the disagreement rather than quietly
+doing it.
 
-1. The `npu-smi info -l` regex was wrong. It was written `^\s*(\d+)\s`, i.e. for
-   table rows, but that command prints Key-Value lines. Both real forms must be
-   recognised - `NPU ID : 0` (Huawei docs) and `NPU : 0` (observed) - while
-   EXCLUDING count lines like `Total : 8` / `Card Count : 8`, which would
-   otherwise be picked up as the id.
+C (einsum) IS now the default, in config, in the CLI and in the gates.
 
-2. Only the readout instance's `.device` was consulted. On the server that is an
-   AccelReadout and does have it, but the numba Readout fallback has no such
-   attribute, so getattr returned None and the code silently degraded to running
-   without -i. Now three sources in descending reliability: the PHD_NPU_ID
-   environment variable, the digits of the device string, then `npu-smi info -l`.
+But I have to correct my own earlier number. P116 reported "einsum is 21%
+faster" from a single measurement, and that was noise. Best-of-5 on this x86 8
+-core host, same sizes, several rounds: one round 16.02 vs 15.79 ms (no
+difference), another 18.19 vs 14.38 ms (einsum 21% faster), with run-to-run
+jitter of 1.1x on identical code. This host simply cannot distinguish the two
+kernels reliably.
 
-3. The backend description string `accel:auto@npu` carries no digits, so even
-   once passed in it yielded no card id. Added a fallback: if the string mentions
-   npu/cuda/rocm, assume card 0 and say so once. The risk is recorded in the
-   comment - on a multi-card box bound to another card this reads the WRONG card,
-   which still yields valid numbers but not for this process, so PHD_NPU_ID
-   exists to correct it.
+So the default change rests on a STRUCTURAL argument, not on speed: mulsum
+materialises a (51962, 128) = 6,651,136 element intermediate every step (25.37
+MiB at 1b tier) which einsum does not. The Ascend speedup is still unmeasured
+and is written up as such in the code comment.
 
-Also added `-c <chip_id>`, since essentially every official and observed sample
-uses `npu-smi info -t usages -i 0 -c 0` (including
-`watch npu-smi info -t usages -i 0 -c 0`). Overridable via PHD_NPU_CHIP_ID.
+New breakdown of where readout time actually goes (x86, relative reference
+only, n_out=51962 / n_h=3072 / k=128):
+  gather h[Wi] alone          9.5-12.3 ms   <- the single biggest item
+  mulsum (W*g).sum(1)         16-18 ms
+  einsum                      14.4-15.8 ms
+  CSR SpMM A@h                15.1 ms
+  (W.unsqueeze(2)*g.unsqueeze(1)).sum(2)   955 ms  (materialises n_out*k*k)
+The real bottleneck is the gather - 6.65 million random pulls from a 3072
+element vector - not the multiply and not the sum. einsum only removes the
+multiply and the materialisation, i.e. roughly half.
 
-Gate: verify_cann_env.py section E grows 5 -> 9 cases (-c present / env vars /
-both -l formats / no-index fallback), 30/30 overall. fast 9/9, ms_stream 43/43,
-accel_sparse 31/31, accel_readout and powlaw PASS, local smoke zero crashes.
+So getting from 10.99 ms to 5 ms is NOT reachable by swapping kernels alone; it
+needs a different algorithm that removes the gather (bucketing by n_h to turn
+it into contiguous slices, or a real SpMM kernel - Ascend may have one, x86 does
+not). I am not going to guess further without measurement.
 
-The lesson is the same one for the third time: I guessed the external CLI's
-argument shape twice in a row (first missing -i, then missing -c and parsing -l
-wrongly). Anything that shells out to a device tool must have its full argument
-form confirmed against the official documentation first, and must keep a "print
-the raw output once on failure" hook. The hook is in place now, and it is what
-surfaced rc=215 and pointed straight at the root cause - with it still silent
-this would have been the fourth round of "I could not find it".
+Gates: p116_sched 22/22 (three default-value assertions updated), fast 9/9,
+accel_sparse 31/31, cann_env 30/30, accel_readout and powlaw PASS, ms_stream
+43/43, --help exit 0.
+
+Lesson, and it repeats: a single performance measurement is not evidence. The
+project already had a "best-of-3 for any timing" rule and I nearly shipped
+another single-sample conclusion. From now on, any performance default change
+requires best-of-N plus a structural argument.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
