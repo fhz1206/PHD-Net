@@ -31,11 +31,18 @@ except Exception:                                            # pragma: no cover
     torch = None
 
 _DT = {"fp32": "float32", "fp16": "float16", "bf16": "bfloat16",
-       "int8": "int8"}
-# P105：旧名别名（与 readout.py 的 _RO_DTYPE_ALIASES 同口径）——"fp8" 本来就
-# 是 1 字节码本，P100 已正名为 int8；加速后端同样接受旧名，避免配置里的
-# dtype="fp8" 在这里被 ValueError 拒绝而静默回落。
-_DTYPE_ALIASES = {"fp8": "int8"}
+       "int8": "int8",
+       # P147：fp8 不再是 int8 的别名 → 能力表必须有它，
+       # 否则 §「别名归一化」之后会在 `dtype not in _DT` 处 ValueError。
+       "fp8": "float8_e4m3fn"}
+# P105 旧名别名（与 readout.py 的 _RO_DTYPE_ALIASES 同口径）。
+# ⚠⚠ **P147 修正**：原来这里是 `{"fp8": "int8"}`（fp8 是 int8 的别名，P100 正名），
+#   而那个别名在 `__init__` **开头**就把 `dtype` 归一化了 → 后面
+#   `_fp8_req = dtype == "fp8"` **恒为 False** → **整个 fp8 三级自适应是死代码**。
+#   实测：fp8 臂与 int8 臂 `tdtype` 完全相同、**零告警零探测**。
+#   现在 fp8 是**独立路径**（有原生 fp8 算子就用 fp8，否则转int8），
+#   不再是别名。int8 走P105 的既有路径，两者在 `__init__` 里**汇合**。
+_DTYPE_ALIASES: dict = {}
 
 # int8 模式的**计算** dtype：存储是 int8 码本，但 ht/y 的 matmul 在 fp16 域做
 # （昇腾/CUDA 的 fp16 矩阵乘是原生快路径）。构造期探测失败则整体回落 fp16。
@@ -73,6 +80,11 @@ class AccelReadout:
                  sparse_fwd_kernel: str = "mulsum"):
         if torch is None:
             raise RuntimeError("未安装 torch，加速读出不可用")
+        # P148：fp8 三级自适应的结果。**必须在此先初始化**——稀疏分支
+        # （`if conn_k and conn_k>0`）在 fp8 分支**之前**执行，会读这两个标志。
+        self._fp8_native = False
+        self._fp8_fallback_to_int8 = False
+        self._fp8_cap = None
         dtype = _DTYPE_ALIASES.get(str(dtype), str(dtype))
         if dtype not in _DT:
             raise ValueError(f"不支持 dtype={dtype!r}；可用 {sorted(_DT)}")
@@ -136,6 +148,11 @@ class AccelReadout:
                 self._fp8_native = True
                 self._fp8_cap = _dec["cap"]
                 print(_dec["msg"], flush=True)
+            # P148：稀疏臂在 fp8 分支**之前**就已决定好tdtype，
+            #   故原生 fp8 时**就地改写 tdtype**（稠密臂的分支在后面，
+            #   不会重复应用 —— 那里只处理非 fp8 的回落）。
+            if self._fp8_native and self.tdtype == "fp32":
+                self.tdtype = torch.float8_e4m3fn
         self._int8 = (self.tdtype == torch.int8)
         self._wscale = None
         if self._int8:
@@ -201,13 +218,60 @@ class AccelReadout:
             # 不同，本机 max|Δ|≈3e-05），且昇腾收益未实测 → 默认 mulsum。
             self._sp_fwd = str(sparse_fwd_kernel or "mulsum").lower()
             self.Wi = torch.tensor(_idx, device=self.device, dtype=torch.long)
-            self.W = torch.tensor(_val, device=self.device, dtype=torch.float32)
-            # 稀疏模式**只支持 fp32**：低精度会丢弃非目标行更新（P110 实测），
-            # 而稀疏读出的可用性正是为了省流量，不能再叠加语义损失。
-            self.tdtype = torch.float32
-            self._cdtype = torch.float32
-            self._int8 = False
-            self._wscale = None
+            # ⚠ P148：`W` 的 dtype 必须在**下面的 tdtype 决定之后**才能建
+            #   （此前这里硬写 float32，即使 tdtype 被设成 fp8/int8 也不会生效）。
+            #   故先留 None，等dtype 定下来再量化/转换。
+            self.W = None
+            # ⚠⚠ **P148（fhz 2026-10-02 决策「稀疏也用 fp8」）**：
+            #   此前这里**硬置 fp32**（P110 的理由：低精度会丢非目标行更新），
+            #   于是「模型本体 fp8」在**生产默认路径（conn_k=128）上完全不生效**。
+            #   fhz 明确选择「稀疏也用 fp8」→ 改为**遵从 fp8 探测的结果**。
+            # ⚠ 代价必须说清（P110 实测）：fp32 非目标行更新保留率 **99.95%**、
+            #   fp16 **26.67%**、bf16 5.79%；**fp8 的量化步长比 fp16 粗约 4 倍**
+            #   （mantissa 3bit vs 10bit）→ 非目标行更新可能**几乎全丢**，
+            #   学习规则将大幅退化为纯 Hebbian（"use it or lose it" 变成全丢）。
+            #   → 故**必须告警**（不静默），且验收只能靠固定探针 PPL
+            #     （`--probe-every`；训练流 PPL 波动 ±20% 不可用，见 P146）。
+            if self._fp8_native:
+                # 设备真有 fp8 算子 → 稀疏臂直接用 fp8 存 W
+                self.tdtype = torch.float8_e4m3fn
+                self._cdtype = torch.float8_e4m3fn
+                self._int8 = False
+                self._wscale = None
+                import warnings as _w8
+                _w8.warn(
+                    f"[fp8] 稀疏读出（conn_k={k}）**已启用 fp8 存储**"
+                    f"（fhz 2026-10-02 决策）。⚠ P110 实测低精度会丢弃"
+                    f"感知器 p−t 的**非目标行**更新（fp32 99.95% / fp16 26.67%），"
+                    f"**fp8 步长比 fp16 粗约 4 倍** → 学习规则将大幅退化为"
+                    f"纯 Hebbian。**请用 --probe-every 的 probe_PPL 验证"
+                    f"是否还在学习**。",
+                    RuntimeWarning)
+            else:
+                # fp8 不可用而int8 可用 → 稀疏臂的 W 也走 int8 码本
+                # （P105 语义：存储 int8、per-tensor scale=2·max|W|/127）
+                if self._fp8_fallback_to_int8:
+                    self.tdtype = torch.int8
+                    self._cdtype = torch.float16
+                    self._int8 = True
+                    self._wscale = None      # 由下方 int8 量化块按_init_t 计算
+                else:
+                    self.tdtype = torch.float32
+                    self._cdtype = torch.float32
+                    self._int8 = False
+                    self._wscale = None
+            # P148：dtype 已定，按它建 W（稀疏臂的存储 = tdtype）
+            if self.tdtype in (torch.int8,):
+                # P105 语义：per-tensor scale = 2·max|W|/127
+                _amax = float(np.abs(_val).max())
+                self._wscale = (2.0 * _amax / _INT8_QMAX) if _amax > 0 else 1.0
+                _q = np.clip(np.rint(_val / self._wscale),
+                             -_INT8_QMAX, _INT8_QMAX).astype(np.int8)
+                self.W = torch.tensor(_q, device=self.device,
+                                      dtype=torch.int8)
+            else:
+                self.W = torch.tensor(_val, device=self.device,
+                                      dtype=self.tdtype)
             # 融合核走的是稠密 addmm_，稀疏不适用 → 永久eager（P38/P55 纪律）。
             self._compiled = False
             self._fused = None
@@ -393,15 +457,28 @@ class AccelReadout:
         if (self._cache_g is not None
                 and getattr(self, "_cache_g_src", None) is ht):
             return self._cache_g
-        g = ht[self.Wi]                                  # (n_out, k) 高级索引 gather
-        # P145：按 `gather_dtype` 转换（fp32 = 不动，零开销）。
-        # ⚠ 只降**中间量 g** 的精度，**W 保持 fp32**（P110：W 降精度会累积丢）。
-        # ⚠ 转换后**立刻在下游转回 fp32**（`_matmul` / `addcmul_` 都按 W 的
-        #   dtype 走），所以本函数之外看不到 dtype 变化 → 影响面被限在这一次
-        #   gather 的取数精度上。
-        if self._gather_dtype != "fp32" and g.dtype == torch.float32:
-            g = g.to({"fp16": torch.float16,
-                      "bf16": torch.bfloat16}[self._gather_dtype]).to(torch.float32)
+        # ⚠⚠ **P148 修正一个「方向完全相反」的实现**（P145 写的）：
+        #   原代码是 `g = ht[Wi].to(fp16).to(fp32)` —— gather **已经物化出
+        #   fp32**（1b 档 25.37 MiB），再cast 成 fp16 又立刻转回 fp32，
+        #   **两次 cast 各自读+写那 25.37 MiB** → 纯负优化。
+        #   流量核算（1b 档 51962×128）：
+        #     fp32（现状）              写 25.37 MiB
+        #     **P145 的实现**  写 25.4 + 读25.4 + 写12.7 + 读12.7 + 写25.4
+        #                          = **101.5 MiB（比现状多 76 MiB/步）**
+        #     正确做法（本次）让 gather **直接产出 fp16** → 写出 12.69 MiB
+        #   实测墙钟（P148 审计，本机）：Index 8.35 ms → 带往返 cast 14.83 ms
+        #   （**慢 1.78×**），而 P145 的原意是省流量。
+        #   → 现在把 cast **移到 gather 之前**（对 `ht` 做，而不是对 `g`）。
+        if self._gather_dtype == "fp32":
+            g = ht[self.Wi]                              # (n_out, k) fp32
+        else:
+            # 先把 **h 本身**（n_h 个数，极小）降到目标精度，**再 gather**
+            # → `Index` 的**写出量**直接减半/减四，这是真正的省流量。
+            _dt = {"fp16": torch.float16,
+                   "bf16": torch.bfloat16}[self._gather_dtype]
+            # ⚠ 下游（`_matmul` 的 einsum / `addcmul_`）都按 W 的 dtype 走，
+            #   故这里产出目标精度即可，**不做往返 cast**（那才是负优化）。
+            g = ht.to(_dt)[self.Wi]
         self._cache_g = g
         self._cache_g_src = ht                # 记住张量**对象**（P143）
         self._cache_g_epoch = self._ht_epoch  # 保留供诊断
@@ -1052,6 +1129,13 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
                              w_clip=cfg.readout_w_clip,
                              gather_impl=str(
                                  getattr(cfg, "readout_gather_impl", "index")),
+                             # ⚠⚠ **P148 修正（审计 BUG-3）**：这个参数之前**漏传**，
+                             #   于是 `cfg.readout_gather_dtype` / CLI 的 fp16
+                            #   一路走到后端又退回签名默认 "fp32"
+                             #   → 「P147唯一真正生效的改动」完全落空。
+                             #   实测：cfg 是 fp16 而 `ro._gather_dtype` 是 fp32。
+                             gather_dtype=str(
+                                 getattr(cfg, "readout_gather_dtype", "fp32")),
                              nll_sync_every=int(getattr(cfg, "nll_sync_every", 1)),
                              compile=bool(getattr(cfg, "torch_compile", False)),
                              compile_mode=str(getattr(cfg,
