@@ -168,8 +168,13 @@ def main() -> int:
     #      就证明是「等 NPU」而非「拷贝慢」。
     print("\n[diag] pinned buffer 拷贝的真实成本（区分「等NPU」vs「memcpy 慢」）")
     _pb = getattr(ro, "_pin_bufs", None)
-    _use_pin = _pb is not None
-    print(f"    pinned 池启用: {_use_pin}（cap={getattr(ro, '_pin_cap', '?')}）")
+    _use_pin = bool(getattr(ro, "_pin_ok", False))
+    print(f"    pinned 池启用: {_use_pin}"
+          f"（cap={getattr(ro, '_pin_cap', '?')}）")
+    if not _use_pin:
+        print("    → 回落臂/无 pinned：测的是 `_staged_to_dev` 的上传成本本身"
+              "（**不是** pinned 轮转等待）。该分支**必须执行**，否则本机会形成"
+              "盲区：分支内的拼错名字抓不到（P140 实测）。")
     _sink = 0.0
     _chunk = 2000
 
@@ -181,17 +186,20 @@ def main() -> int:
             acc_ += (i * 2654435761) & 0xFFFF
         return acc_
 
+    # ⚠ P140 修正：原实现 `if not _use_pin: break` 会让**整段被跳过**——
+    #   而本机（回落臂，`_pin_bufs` 属性都不存在）恰好总走这条路
+    #   → **盲区**：`_ro` vs `ro` 这类拼错在此分支内也不会被冒烟抓到
+    #   （已实测：把拼错改回去，冒烟仍报 OK）。故改为**无论有无 pinned 都执行**，
+    #   回落臂测的是「`_staged_to_dev` 的同步/异步上传成本」，
+    #   加速臂测的是「pinned 池的轮转等待」——两者都有诊断价值。
     for _work, _lbl in ((0, "CPU 不加活"), (400, "CPU 加活(模拟跑更快)")):
-        if not _use_pin:
-            print("    （本机无 pinned 池/非加速臂，跳过）")
-            break
         _sink = 0.0
         for _ in range(4):
-            _ro._staged_to_dev(h)
+            ro._staged_to_dev(h)
         _t0 = time.perf_counter()
         for _ in range(20):
             _sink += _spill(_work)
-            _ro._staged_to_dev(h)
+            ro._staged_to_dev(h)
         _dt = (time.perf_counter() - _t0) / 20 * 1e3
         print(f"    {_lbl:<22} _staged_to_dev = {_dt:.4f} ms/次")
     print("    → 若「加活」后**下降**：说明是「等 NPU」→ 队列已满，"

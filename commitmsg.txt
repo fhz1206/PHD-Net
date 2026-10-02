@@ -1,49 +1,45 @@
-perf(P139): two sync bases separate "sync overhead" from "the work being synced"
+fix(P140): a typo crash, plus a static gate I had to withdraw after measuring it
 
-fhz ran the line profiler with --sync-every 8 (60 steps, 15.698 ms/step). The
-table is short and decisive:
-  learn_softmax:518      73.7882 ms   8 occurrences  self._nll_sum = None
-                                                            (previous line: .item())
-  forward_dev:394         5.0729 ms  60             try: (covers _staged_to_dev)
-  _staged_to_dev:822      4.9447 ms  60             buf.copy_(torch.from_numpy(a))
-  everything else         under 0.45 ms
+The crash was mine: in the line profiler's diagnostic section I wrote
+_ro._staged_to_dev(h) where the variable is ro, so the Ascend run died with
+NameError. Fixed, two occurrences.
 
-Device execution is really about 9.2 ms per step, not 14.25. Line 518 fires only
-8 times in 60 steps at 73.79 ms each, which is 9.84 ms per step amortised, and
-since that wait is for eight steps of queued work, the device's own execution
-is 73.79/8 = 9.2 ms while the synchronisation overhead on top is only about
-0.6 ms. Bare operators 1 through 7 total 0.35 ms, so there is a 26x gap between
-what the device is executing and what those operators account for. That gap is
-the thing to chase.
+More interesting is the gate I tried to build to catch that class of error. I
+wrote an AST scan for locals that are read but never assigned, expecting it to
+be a cheap permanent guard. On this host it produced 15 false positives against
+1 real finding: RESULTS is assigned at module level on line 35 of
+audit_brain_parity.py, rows is a closure variable defined in main() and read by a
+nested rec(), and train_tokens and resume are the same shape. Reliable
+detection of undefined names needs a real symbol table such as pyflakes;
+a few dozen lines of AST can only approximate it, and mine approximated badly.
 
-Second, and new: the H2D staging copy costs 4.94 ms per step on the host. That is
-a 12 KiB CPU-to-CPU copy, which should take microseconds. The only coherent
-explanation is that the CPU is being blocked when writing the pinned buffer. The
-Event records when the H2D transfer completes, but it does not wait for the NPU
-kernels to finish consuming that buffer - an assumption baked in when the Event
-was introduced. The CPU runs ahead of the device, the queue backs up, and by the
-time the rotation reaches the fourth buffer it has to wait.
+So I withdrew the gate, and left a comment explaining why not to add it again.
+A gate with a 15:1 false positive ratio is worse than no gate at all, because
+people learn to ignore it. Reliability beats coverage for a check that is
+supposed to be trusted.
 
-That second effect is a consequence of the first rather than an independent
-problem: the device is slow at 9.2 ms, the CPU cannot keep up, the H2D queue
-grows, and that is where the 5 ms comes from. So the fix belongs on the device
-side, or in giving the CPU more room with a larger pinned pool.
+The replacement is tools/smoke_benchmarks.sh, which short-runs five benchmark
+tools. It has zero false positives and genuinely catches import-time explosions,
+misspelled names and bad arguments. Verified: reintroducing the _ro typo makes
+it report SKIP with exit code 1 (correctly classified as an NPU-environment
+failure while still detecting the error), and restoring the file returns it to
+all green.
 
-The tool now distinguishes these. A new diagnostic makes the CPU do extra work
-per step, simulating it running further ahead: if the _staged_to_dev time goes
-DOWN, that proves it is waiting on the device rather than being slow memcpy. A
---pin-cap flag overrides the pool size, since if the hypothesis holds, growing
-it is the remedy.
+The smoke script had a blind spot of its own, now fixed. The diagnostic section
+began with `if not _use_pin: break`, and this host always takes the numba
+fallback, which has no _pin_bufs - so the whole section was skipped, and a typo
+inside it went undetected even with the smoke script in place. I confirmed that
+empirically before changing it. It now runs regardless of whether pinned memory
+is available: the fallback measures the upload cost itself, the accelerated path
+measures the pinned pool rotation wait. The general lesson: every early-return
+or guard in a gate is a blind spot, and the question to ask is which branch the
+default local configuration actually takes.
 
-A lesson from my own P138 conclusion. I attributed the 14.25 ms to
-"the .item() synchronisation overhead", which is wrong in a way that would have
-sent the work in the wrong direction: it is really 9.2 ms of device execution
-plus 5 ms of the CPU waiting on H2D. You cannot separate the cost of
-synchronising from the cost of the work being synchronised, so a single basis
-gives the wrong answer. The way out is to measure at two sync bases -
-sync_every=1 waits every step, sync_every=8 waits once per eight - and solve the
-pair.
+I also tripped over this file's check() signature once more - it is check(name,
+cond) with two arguments and no detail, unlike most verifiers which take
+(cond, name, detail) in the opposite order. There is now a prominent comment and
+a _CHECK_ARITY constant at the top of verify_ms_stream.py.
 
-Gates: fast 9/9, line profiler --help exit 0, --pin-cap accepted.
+Gates: fast 9/9, ms_stream 44/44, smoke_benchmarks all five OK.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
