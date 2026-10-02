@@ -1,0 +1,38 @@
+fix(P126): full regression - and two verifiers that had rotted for 3 months
+
+Server anchors came back identical (4,000-char 394.4687 / full-corpus
+359.2603), so P110's switch to fp32 did not regress the default path. Full
+local regression: fast 9/9 plus all 25 verifiers PASS.
+
+But that "all PASS" would have been unfounded a moment ago, because two
+verifiers had been broken since 2026-09-27 and nobody ran them:
+
+  verify_readout_fused - AttributeError: no attribute '_ro_fused'. P9 renamed
+  that kernel to '_ro_dense_update' (see readout.py:36-44) and the verifier was
+  never updated. Every invocation died immediately.
+  verify_repro_process - FileNotFoundError: datasets/eval/internal_corpus.txt.
+  The corpus moved to the repo-root eval_corpus/ long ago; the verifier still
+  pointed at the old location.
+
+Both fixed. The fused verifier now exercises the current kernel and its four
+layers all pass again (bit-identical, end-to-end PPL 281.5637 on both arms,
+1.13x speedup). The repro verifier resolves the corpus through a two-candidate
+fallback.
+
+The process lesson is the valuable part, recorded as BUGS B18. The root cause
+is not code, it is process: a verifier that nobody explicitly runs can rot
+unnoticed. So "26 verifiers all PASS" was an unsupported claim until it was
+actually run. This is the same family as B15 (silent numeric error), P122's
+false pass and P124's false failure - gates are code, they rot as the code
+under test evolves, and running them is not a default action. "How many gates
+exist" matters less than "when was the last full run". Concretely I would add
+a meta-gate that at minimum imports every verifier and enters its main, the same
+idea as the --help gate that sweeps every argparse entry point.
+
+Also clarified an ambiguous label: tools/rebaseline.py printed "connectivity
+12.5%", which comes from lm.net.pc.stats() - that is M2 trunk connectivity
+(BASE stack 256 dims -> conn_k=32), NOT the M6 readout (128/3072 = 4.2%).
+Three times apart and printed side by side, it reads as if the readout were
+12.5%. The label now says [M2 trunk].
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
