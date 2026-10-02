@@ -103,9 +103,16 @@ def probe_nll(lm, n_tokens: int = 2048) -> dict:
     tok = getattr(lm, "tok", None)
     if tok is None:
         raise ValueError("lm 没有 tok 属性——探针必须用 LM 的 tokenizer")
+    # ⚠ 自动加载：调用方（训练循环）不该需要先调 load_probe_text()——
+    #   P147 实测「探针不可用：ValueError 探针文本未load」就是这里漏了自动加载。
     src = _PROBE_SRC
     if src is None:
-        raise ValueError("探针文本未加载（先调 get_probe_tokens 或置 _PROBE_SRC）")
+        try:
+            src = load_probe_text()
+        except Exception as e:                              # noqa: BLE001
+            raise ValueError(
+                f"探针文本加载失败（{type(e).__name__}: {e}）；"
+                f"需要 eval_corpus/internal_corpus.txt") from e
     toks = tok.seg.tokenize(src)[:n_tokens + 1]
     nlls = []
     t0 = time.perf_counter()

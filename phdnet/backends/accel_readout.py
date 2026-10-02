@@ -106,6 +106,36 @@ class AccelReadout:
         # （tdtype/_cdtype 跟随）+ 告警。⚠ P90 的 forward 级兜底（try/except
         # around matmul）仍然保留在 forward_dev：探测通过不代表运行期所有 shape
         # 都不炸，int8 matmul 在某些平台可能跑着跑着才失败。
+        # ⚠⚠ **P147（fhz 2026-10-02 指令）：fp8 的三级自适应**——
+        #   原生 fp8 → 直接用（**不告警**）；只有 int8 → **告警 + 自动转 int8**
+        #   （**转换在 CPU**，效率已实测记录）；两者都无 → **报错**。
+        #   取代原先「只试int8、失败就静默回落 fp16」的做法——后者把
+        #   「设备没有 8-bit 算子」与「用户要 fp8」两件事混在一起，
+        #   用户永远不知道自己被降级了。
+        # ⚠ 用构造参数 `dtype`（**不是 cfg** —— `AccelReadout.__init__` 没有
+        # cfg 形参，门禁与工具都直接构造它）。
+        _fp8_req = str(dtype or "fp32").lower() == "fp8"
+        if _fp8_req:
+            from .fp8_capability import resolve_fp8_request
+
+            class _CfgView:                # 最小只读视图（模块只读 cfg.readout_dtype）
+                readout_dtype = "fp8"
+            _dec = resolve_fp8_request(_CfgView(), str(self.device))
+            if _dec["action"] == "error":
+                raise RuntimeError(_dec["msg"])
+            if _dec["action"] == "int8":
+                import warnings as _w
+                _w.warn(_dec["msg"], RuntimeWarning)
+                # 转int8：走 P105 已有的 int8 语义（存储 int8 码本 +
+                # per-tensor scale=2·max|W|/127，计算在 fp16 域）
+                self.tdtype = torch.int8
+                self._cdtype = torch.float16
+                self._fp8_fallback_to_int8 = True
+                self._fp8_cap = _dec["cap"]
+            elif _dec["action"] == "fp8":
+                self._fp8_native = True
+                self._fp8_cap = _dec["cap"]
+                print(_dec["msg"], flush=True)
         self._int8 = (self.tdtype == torch.int8)
         self._wscale = None
         if self._int8:
@@ -915,13 +945,19 @@ def _unsupported_reason(cfg) -> str | None:
     # P111：稀疏读出**已在加速后端实现**（均匀 k 的 gather-GEMV），不再回落。
     # 仍需拒绝的只有非均匀行宽（幂律变长 CSR）——那是另一种结构，见AccelReadout
     # 的「只支持均匀 k」注释。若将来有人传入变长 CSR，构造期会fail-fast。
-    # P86（fhz 2026-09-30：「针对昇腾设备禁用 fp4, fp8」）：加速后端**禁用
-    # 量化码本**——昇腾实测 fp8 抛 "Float8_e4m3fn has not been supported"
-    # （ERR01007），fp4 的 MX 块缩放同样没有算子。回落 numba CPU 路径，那里
-    # P9/P12 的 fp8/fp4 位算法量化核是可用的（**不是能力缺失，只是没有加速
-    # 算子**）。CPU 上想要量化码本可以直接 `--accel cpu --readout-dtype fp8`。
+    # ⚠⚠ **P86 的 fp8 禁用已按 fhz 2026-10-02 指令解除**：
+    #   原 P86 记录「昇腾实测 fp8 抛 Float8_e4m3fn has not been supported
+    #   (ERR01007)」→ 一度硬编码禁用。但**驱动/算子库会升级**，「这台机器不
+    #   支持」≠「昇腾都不支持」，硬编码会在支持 fp8 的机器上白白浪费2 倍
+    #   存储与带宽。
+    #   → 改为**运行时探测**（`phdnet/backends/fp8_capability.py`）：
+    #     原生 fp8 → 直接用（**不告警**）；只有 int8 → **告警 + 自动转 int8**
+    #     （转换在 CPU，效率已实测并记录）；两者都无 → **报错**并给可选方案。
+    #   ⚠ 探测**不在这里**做（那是运行期的事，见 `AccelReadout.__init__`），
+    #     能力表只负责「不能静态判定」的配置。
     _rd = str(getattr(cfg, "readout_dtype", "fp32"))
     if _rd in ("int4", "fp4"):
+        # fp4/int4 维持 P86 的禁用（**未被本次指令解除**——指令只说 fp8）。
         return ("readout_dtype=int4（910B 无 INT4 矩阵乘单元，只能反量化→FP16 "
                 "再算，省存储不省算力；int4 请用 --accel cpu 的 4-bit 打包核）")
     # P105：int8 已实现（存储 int8 + fp16 计算，构造期探测失败时在 AccelReadout
