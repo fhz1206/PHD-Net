@@ -8,7 +8,7 @@
 > 后端矩阵与昇腾踩坑见《PHD-Net_硬件后端适配报告.md》；CPU/NPU 重叠的三方案与执行顺序见
 > 《PHD-Net_CPU-NPU重叠执行计划.md》；缺陷台账（症状 → 根因 → **门禁缺口**）见 `BUGS.md`。
 >
-> **数据截止：2026-10-01**（对应 P113 `--m2-kernel plain` 成为默认之后的稳态日志
+> **数据截止：2026-10-02**（对应 P113 `--m2-kernel plain` 成为默认之后的稳态日志
 > `train_1b_1b_pretrain_20261001-182721.log`）。
 >
 > **前一段基线（P111，`--m2-kernel serial`）** 保留在本文档里作为**历史对照**，
@@ -102,7 +102,9 @@
 | `sliding PPL … X ms/tok` | 端到端步时。**跨 run 比较必须同数据、同 `--remote-fraction`、同机器、同 token 预算** |
 | `readout X ms/tok (后端@设备, Y% of total)` | 读出分项。`% of total` 直接判断加速是否生效、耗时是否转移到 PC 栈 |
 | `loop: tokenize A  encode_onehot B  step C` | **主循环三段**（需 `--step-profiling`）。此前主循环开销从未被测量 |
-| `segments: <名> <ms/tok> …` | **`net.step` 内部九段**，按耗时降序取前 6 |
+| `segments(cum): <名> <ms/tok> …` | **`net.step` 内部九段**的历史平均（从 token 0 起累加，`_prof` **从不清零**）→ ⚠ **混着启动期编译开销，系统性高估稳态**。判断加速生效看下面这行 |
+| `segments(win): <名> <ms/tok> … [N steps]` | **P115 新增**：上一个打印间隔内的**真实平均**。**做性能判断一律用这行**。这就是「readout 从 28.77 衰减到 7.68」的真相——不是模型变快，是早期昂贵样本被摊薄 |
+| `HBM-bw X%/vec Y%/aicpu Z%` | **P120 新增**（来自 `npu-smi info -t usages`，每 4 tick 抽样）。**判读规则：高 AICore + 低带宽 = 瓶颈在 kernel 下发/调度**，既不在算力也不在 HBM 带宽。⚠ 高 AICore 单独**不能**说明算力用满（大量小 kernel 也能顶到 99%） |
 | `CPU …%  proc X核 … CS/s … GC …` | `proc X核` = 进程实际用核数；`CS/s` = 上下文切换频率（线程空转的指纹） |
 | `NPU/GPU …%  HBM …GB` | AI Core%（瞬时，设备忙不忙）与 HBM（host 侧计数器）。**AI Core% ≠ 带宽利用率**，见 §三 |
 | `[readout] backend=… \| fallback reason: …` | **读出是否真在设备上**。判断加速生效看这行，**不看「检测到设备」** |

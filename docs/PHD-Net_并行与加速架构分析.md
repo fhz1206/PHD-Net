@@ -5,7 +5,7 @@
 > **不写**：具体优化步骤（那是《PHD-Net_性能评估与迭代方案.md》）、机制实现细节
 > （《PHD-Net_架构设计.md》）、后端 × 设备适配矩阵（《PHD-Net_硬件后端适配报告.md》）。
 >
-> **数据截止：2026-10-01（P113）。** 本文引用的端到端与分段数字全部来自
+> **数据截止：2026-10-02（P113）。** 本文引用的端到端与分段数字全部来自
 > `outputs/models/train_logs/train_1b_1b_pretrain_20261001-182721.log`，
 > 口径 = `1b` 档（width=1024、conn_k=128）、vocab 51,962、`--readout-conn-k 128`、
 > `--readout-dtype fp32`、`--m2-kernel **plain**`、昇腾 191 核 + NPU、16 个远程分片。

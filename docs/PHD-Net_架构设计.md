@@ -12,7 +12,7 @@
 > - 硬件后端矩阵与昇腾踩坑——见《PHD-Net_硬件后端适配报告.md》。
 > - 与 Transformer / 大脑的对比结论——见《PHD-Net_竞争力与脑同构性评估.md》。
 >
-> **数据截止：2026-10-01。** 与代码冲突时**一律以代码为准**。全项目事实基线与禁写项见
+> **数据截止：2026-10-02。** 与代码冲突时**一律以代码为准**。全项目事实基线与禁写项见
 > `docs/文档写作规范.md`（该规范的基线截止日为 2026-09-30，本文以源码为准并在其之上更新）。
 >
 > **相关文档**：
@@ -448,6 +448,57 @@ mode = "encode" if z > 0.3 else "retrieve"
   `Wv[i] -= η·dp[i]·h[Wi[i,:]]`。此前 `readout_conn_k > 0` 命中 `_unsupported_reason`
   → 整个读出回落 numba CPU（等于关掉了全部设备加速）。对拍见
   `tests/verifiers/verify_accel_sparse.py`。
+
+#### 2.7.1 M6 的第三层稀疏化：幂律异质连接（P124，本轮新接入）
+
+均匀 k-conn 有个结构性缺陷：**高频词（如"的"）与长尾词获得同等容量** ——
+长尾被过分配、高频被欠分配。`phdnet/sparse_alloc.py` 实现了按词频分配行宽
+（k_i ∝ counts_i^alpha），但从诞生起docstring 就写着「未接入 readout」，**P124 完成接线**。
+
+| 层 | 结构 | 行宽 | 连接率 | 加速器 | 开关 |
+|---|---|---|---|---|---|
+| 均匀 k（P108） | CSR，`indptr` 等差 | 恒 = k | 4.2% | ✅ gather-GEMV（P111） | `--readout-conn-k 128` |
+| **幂律（P124）** | CSR，`indptr` 用 **cumsum** | **不等** | 预算受控 | ❌ **fail-fast** | `--readout-powlaw-alpha`（默认 **0=关**） |
+
+- **生物学依据**：突触巩固 / 修剪（synaptic consolidation & pruning）——
+  发育期先铺设**过量**突触，随后活动依赖地修剪：被反复激活的通路被**巩固**
+  （保留更多突触），长期沉默的低效通路被**消除**。结果是连接密度随**神经元实际
+  使用频率**呈幂律倾斜。这正是 Hebbian 学习（"use it or lose it"）在**连接数**
+  这一结构层面（而非仅权重数值层面）的表达。
+- **零回归**：`alpha=0` 时**逐位走原均匀路径**（实测 `idx`/`val`/`indptr` 全等）。
+- **实测**（Zipf counts，n_out=200, k=8）：
+
+  | alpha | 行宽范围 | k 与词频秩相关 | 总 nnz |
+  |---|---|---|---|
+  | 0（基线） | 8~8 均匀 | −1.00 | = 预算 |
+  | 0.10 | 不等 | +0.56 | **= 预算** |
+  | 0.25 | 6~19 | +0.77 | **= 预算** |
+  | 0.50 | 不等 | +0.95 | **= 预算** |
+
+  **总 nnz 在任何 alpha 下恒等于预算、不膨胀** —— 这正是分配器做预算控制的意义
+  （`assign_conn_counts` 用 `total_budget` 硬约束，撞上 `k_max` 时会花不完，
+  那是夹紧的**正常**结果而非 bug）。
+- **不变式**：每行入边 ≥ 1（读出行不允许 0 条边）、列索引**行内升序且无重复**
+  （`_csr_matvec` 的隐含契约）。对拍 `tests/verifiers/verify_powlaw_readout.py`（32 例）。
+- **⚠ 加速器不支持非均匀行宽**：行宽不等需要变长 CSR + segment sum，与均匀 k 的
+  「稠密张量 gather-GEMV」是**不同算法**（P19纪律：不能「能跑但语义不同」）→
+  开 `alpha>0` 会**回落 numba 读出**，NPU 加速失效。**这是正确行为，不是 bug。**
+
+**⚠⚠ 必须如实记录的局限：词频目前是「代理值」**
+
+构造读出发生在 `PHDNet.__init__`，那时词表刚由 `vocab_text` 建好、**语料尚未流过**
+→ **拿不到真实 Zipf 频次**。`phdnet/word_lm.py::_powlaw_proxy_counts` 返回
+`1/rank` 造出单调递减形状（Zipf 的形状），但：
+
+> 词表是 `sorted(set(...))` = **字典序**，**不是频次序** → 该代理**依据不足**，
+> 幂律倾斜的方向**可能是反的**。
+
+故**默认 `alpha=0`（关闭）**。开启前**必须先 A/B 验证代理与真实频次是否相关**。
+正解是两阶段：先用均匀 k-conn 跑一段收集真实频次，再重建读出 —— **未实现**
+（它会改变 checkpoint 结构）。
+
+**剩余欠账**：即使幂律开启，与人脑 ~2e-8 的连接率仍差约**6 个数量级**；
+且频次来源尚是代理而非真实统计。
   ⚠ **idx 刻意用 int64** —— int32 会让 NPU 侧 gather 走类型转换。
 
 **两种学习规则**（`readout.py:1061-1157`）：
@@ -819,7 +870,7 @@ LUT 反量化到 fp32、更新后重量化写回。**内存流量 ∝ 存储位�
 | M4a 工作记忆 | PFC 持续放电 + 基底核门控 | `phdnet/wm.py` | `n_wm_slots=4`、`gamma_wm=0.85`、`gate_thresh=0.35` | 有限槽位 |
 | M4b 长期记忆 | 海马快印迹 + 皮层慢巩固 + 吸引子补全 | `phdnet/bigltm.py`、`sparse_table.py`、`ltm.py` | `big_ltm_N=2^24`、`big_ltm_m=60`、`big_ltm_k=4`、`ltm_imprint_gate=0.8` | 突触存在性 |
 | M5 神经调制 | 蓝斑 NE / DA + 胆碱能编码-检索切换（Hasselmo、Yu & Dayan） | `phdnet/modulator.py` | `mod_gain=1.5`、`multi_modulation=False` | — |
-| M6 读出 | IT → 前额叶/前运动皮层 | `phdnet/readout.py`、`backends/accel_readout.py` | `readout_softmax=False`、`eta_readout=0.15`、`readout_conn_k=0`（库）/ **128（生产 CLI）**、`readout_dtype="fp32"` | 连接 4.2%（生产） |
+| M6 读出 | IT → 前额叶/前运动皮层 | `phdnet/readout.py`、`backends/accel_readout.py`、`sparse_alloc.py` | `readout_softmax=False`、`eta_readout=0.15`、`readout_conn_k=0`（库）/ **128（生产 CLI）**、`readout_powlaw_alpha=0.0`（默认关）、`readout_dtype="fp32"` | 均匀 k 连接 4.2%（生产）；幂律**已接入但默认关闭**（词频是代理，见 §2.7.1） |
 
 **跨机制的架构强化开关**（全部默认关闭）：稳态突触缩放 `homeostasis`、
 错误触发检索 `error_triggered_retrieval`、发育期临界期 `critical_period` + 突触修剪
@@ -837,6 +888,9 @@ LUT 反量化到 fp32、更新后重量化写回。**内存流量 ∝ 存储位�
 |---|---|---|---|
 | 1 | `phdnet/config.py:194` vs `train/train.py:291` | `readout_conn_k` **库默认 0（稠密）**、**生产 CLI 默认 128** | 两者都写，并标明各自口径 |
 | 2 | `docs/文档写作规范.md` §2.2 表 | 仍写「M6 读出**100% 稠密 = 架构欠账**」 | **已过时**。P108（2026-10-01）起 CLI 默认 `readout_conn_k=128`（4.2% 连接率）；P111 起加速器已实现均匀 k 的 gather-GEMV |
+| 20 | `tools/rebaseline.py:9-10` / `phdnet/sparse_pc.py:29-32` | P124 之后 M6 已**三层稀疏化**（均匀 k / 加速器 gather-GEMV / 幂律异质），但 `phdnet/sparse_alloc.py` docstring 的「未接入 `readout.py`」**已过时** | **P124 已接入**（`alpha=0` 逐位等价）。建议把该 docstring 改成「P124 起已接入，默认 alpha=0」 |
+| 21 | 幂律的**词频来源** | 文档若写「按词频分配」而不提来源，会误导读者以为用的是真实 Zipf 频次 | 实为**代理值** `1/rank`（`word_lm.py::_powlaw_proxy_counts`），因构造期语料未流过；且词表是**字典序非频次序** → 代理依据不足。**默认 alpha=0**，见 §2.7.1 |
+| 22 | `phdnet/backends/accel_readout.py:148-153` | `AccelReadout.__init__` 只在**构造期**检查行宽均匀性 | 幂律路径下会走到构造期抛 `ValueError` → 被 `pick_readout_backend` 兜底 except 吞掉 → **回落原因丢失**。**P124 已在 `_unsupported_reason` 提前拒绝**（P19 纪律） |
 | 3 | `tools/rebaseline.py:29` 注释 | 写「冻结语料 **27,405** 字符」 | 三个口径：磁盘 CRLF **27,397** / 归一 **27,034**（= `eval_suite` 实际）/ 73,934 字节。**27,405 与三者都不符** |
 | 4 | `tools/rebaseline.py:9-10` docstring | 仍写「冻结语料 **23,504** 字符」+ 旧锚点 `96.7241 / 77.5261` | 与同文件 `ANCHOR` 字典（`394.4687 / 359.2603`）**自相矛盾** |
 | 5 | `docs/文档写作规范.md` §2.2 / §2.7 | 1B 档容量写 `1.370e9`（稠密读出、V=51,962 口径） | **三个都对**：V=51,962/k=128 → **1.2172e9**；V=73,958/k=128 → 1.2201e9；V=51,962/k=0 → 1.3702e9。差异来自词表与稀疏档位，必须标明 |
@@ -847,7 +901,7 @@ LUT 反量化到 fp32、更新后重量化写回。**内存流量 ∝ 存储位�
 | 10 | ~~`train/train.py:250-255`~~ | ~~`--m2-kernel` 的 `default="serial"`，但 help 文本写「**默认 plain**」~~ | **P113 已修**：默认改`plain`（有服务器实测支撑），help 同步为实测数字。见§1 M2 三态核 |
 | 11 | `phdnet/sparse_pc.py:29-32` 文档字符串 | 说「开关（默认关闭，默认路径逐位不变）：`cfg.sparse_conn` —— True 时主干改用本模块」 | **已过时**（写于稠密栈仍在时）。2026-09-28 稠密栈已删除，`sparse_conn` 恒 `True`，False 会 fail-fast |
 | 12 | `phdnet/config.py:84-85` vs `phdnet/model.py:53-57` | config 仍保留 `backend` / `torch_dtype` 字段和「昇腾部分型号建议 float16」的说明 | `model.py` 对非 `auto/numpy/cpu` 的 backend **fail-fast**（旧 torch 栈已随 P30 删除）。字段为**兼容保留** |
-| 13 | `tools/bench_readout_sparse.py:113-115` 注释 | 「`sparse_alloc.py` 由另一位同事并行实现中」 | `sparse_alloc.py` **已存在**（21 个 verifier 已在 `verify_readout_sparse_gate.py:375-390` 探测它）。但它**仍未接入 `readout.py`**（纯分配函数） |
+| 13 | `tools/bench_readout_sparse.py:113-115` 注释 | 「`sparse_alloc.py` 由另一位同事并行实现中」 | `sparse_alloc.py` **已存在**（26 个 verifier 已在 `verify_readout_sparse_gate.py:375-390` 探测它）。但它**仍未接入 `readout.py`**（纯分配函数） |
 | 14 | `tools/audit_brain_parity.py:139-146` | A4 结论仍写「直接稀疏化读出不可接受」 | 该结论基于 256 维栈 `conn_k=8`（1.0%）。1B 档取 k=128（4.2%）后 PPL 反而**更优**（477 vs 608，4M 档）—— 两者不矛盾但**口径不同**，须标明维度 |
 | 15 | `phdnet/config.py:293-298` 注释 | 注释写「`bf16` 语义在读出侧已由 `readout_dtype`（**默认 bf16**，NPU 原生）落地」 | `readout_dtype` 默认已是 **fp32**（同文件 292 行），注释未同步 |
 
