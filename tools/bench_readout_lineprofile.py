@@ -58,6 +58,12 @@ def main() -> int:
     ap.add_argument("--n-out", type=int, default=52642)
     ap.add_argument("--n-h", type=int, default=3072)
     ap.add_argument("--top", type=int, default=18, help="显示前 N 行")
+    ap.add_argument("--pin-cap", type=int, default=0,
+                    help="P139：覆盖 pinned buffer 池大小（0=用默认4）。"
+                         "P138 观测到 `_staged_to_dev` 的 `buf.copy_()` 要~5 ms"
+                         "（12 KiB 的 CPU 拷贝本该微秒级）→ 怀疑是**CPU 写 pinned "
+                         "buffer 时被 NPU 阻塞**（Event 只等H2D 传输完成、不等"
+                         "kernel 消费完）。若成立，**增大 cap** 才是解法")
     ap.add_argument("--sync-every", type=int, default=1,
                     help="每 N 步 sync 一次（对齐生产的 nll_sync_every）")
     args = ap.parse_args()
@@ -75,6 +81,8 @@ def main() -> int:
     csr = _random_csr(np.random.default_rng(0), n_out, n_h, k,
                       0.05 * np.sqrt(n_h / k), False, 0.8)
     ro, backend = pick_readout_backend(cfg, n_h, n_out, np.random.default_rng(1))
+    if args.pin_cap > 0:
+        ro._pin_cap = int(args.pin_cap)
     print(f"[pf] 后端 {backend} | device {getattr(ro, 'device', '?')} "
           f"| conn_k {getattr(ro, 'conn_k', 0)} "
           f"| nll_sync_every {cfg.nll_sync_every}")
@@ -149,6 +157,47 @@ def main() -> int:
 
     # acc 的键是 (函数名, 行号) → 行是 (均ms, 次数, 函数名, 行号)
     rows = [(float(np.mean(v)), len(v), k[0], k[1]) for k, v in acc.items()]
+    # ── P139诊断：`buf.copy_()` 那5 ms 是「CPU 撞上NPU」还是真实 memcpy？──
+    # 观测：`_staged_to_dev:822 buf.copy_(torch.from_numpy(a))` = 4.94 ms。
+    # 那是**12 KiB 的 CPU→CPU 拷贝**，正常应是微秒级。两个候选解释：
+    #  (a) 真实 memcpy 慢（不可能）；
+    #  (b) **CPU 写pinned buffer 时被NPU 阻塞** —— Event 只等「H2D 传输完成」，
+    #      **不等 NPU kernel 消费完这块 buffer**（P28 写Event 时的假设是错的）。
+    #      CPU 跑得比NPU 快 → 队列积压 → 到第 4 个 buffer 时必须等。
+    # 验证：让 CPU 每步多干一件事（模拟「跑得更快」）→ 若该行耗时**下降**，
+    #      就证明是「等 NPU」而非「拷贝慢」。
+    print("\n[diag] pinned buffer 拷贝的真实成本（区分「等NPU」vs「memcpy 慢」）")
+    _pb = getattr(ro, "_pin_bufs", None)
+    _use_pin = _pb is not None
+    print(f"    pinned 池启用: {_use_pin}（cap={getattr(ro, '_pin_cap', '?')}）")
+    _sink = 0.0
+    _chunk = 2000
+
+    def _spill(work: int):
+        # 每步额外消耗 CPU 时间：若 _staged_to_dev 的耗时随CPU 变忙而**下降**，
+        # 证明它是在**等 NPU**（队列有空间时就不用等）。
+        acc_ = 0
+        for i in range(work):
+            acc_ += (i * 2654435761) & 0xFFFF
+        return acc_
+
+    for _work, _lbl in ((0, "CPU 不加活"), (400, "CPU 加活(模拟跑更快)")):
+        if not _use_pin:
+            print("    （本机无 pinned 池/非加速臂，跳过）")
+            break
+        _sink = 0.0
+        for _ in range(4):
+            _ro._staged_to_dev(h)
+        _t0 = time.perf_counter()
+        for _ in range(20):
+            _sink += _spill(_work)
+            _ro._staged_to_dev(h)
+        _dt = (time.perf_counter() - _t0) / 20 * 1e3
+        print(f"    {_lbl:<22} _staged_to_dev = {_dt:.4f} ms/次")
+    print("    → 若「加活」后**下降**：说明是「等 NPU」→ 队列已满，"
+          "**减小 pin_cap 无效、增大才有意义**；")
+    print("       若「加活」后**上升**：说明是真 memcpy 成本（与 12 KiB 不符，需查驱动）。")
+
     rows = [r for r in rows if r[0] >= 0.0]      # 负值=归因错误，宁可丢弃
     rows.sort(key=lambda r: -r[0])
     total = sum(r[0] for r in rows) or 1.0

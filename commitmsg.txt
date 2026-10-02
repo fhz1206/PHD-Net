@@ -1,60 +1,49 @@
-perf(P138): per-line profiling pins it on .item() sync; fix a real materialisation bug
+perf(P139): two sync bases separate "sync overhead" from "the work being synced"
 
-The per-line profile on Ascend (60 steps, nll_sync_every=1, 15.159 ms/step
-including trace overhead) puts 14.2492 ms - 23.7% of the total, and far ahead of
-everything else - on a single line:
+fhz ran the line profiler with --sync-every 8 (60 steps, 15.698 ms/step). The
+table is short and decisive:
+  learn_softmax:518      73.7882 ms   8 occurrences  self._nll_sum = None
+                                                            (previous line: .item())
+  forward_dev:394         5.0729 ms  60             try: (covers _staged_to_dev)
+  _staged_to_dev:822      4.9447 ms  60             buf.copy_(torch.from_numpy(a))
+  everything else         under 0.45 ms
 
-  learn_softmax:-1  (my marker for "last line to return", i.e.
-                     `return float(nll_dev.item())`)     14.2492 ms  23.7%
-  learn_softmax:511 `if self.nll_sync_every <= 1:`           0.4706 ms   0.8%
-  forward_dev:416   `self._cache_h = np.ascontiguousarray` 0.1766 ms   0.3%
-  forward_dev:394   `try:`                                   0.1349 ms   0.2%
-  _eager_step:565   `W.add_(dp.reshape(-1,1)*g, alpha=-eta)` 0.0580 ms   0.1%
-  ... every remaining one of 20+ lines is under 0.06 ms
+Device execution is really about 9.2 ms per step, not 14.25. Line 518 fires only
+8 times in 60 steps at 73.79 ms each, which is 9.84 ms per step amortised, and
+since that wait is for eight steps of queued work, the device's own execution
+is 73.79/8 = 9.2 ms while the synchronisation overhead on top is only about
+0.6 ms. Bare operators 1 through 7 total 0.35 ms, so there is a 26x gap between
+what the device is executing and what those operators account for. That gap is
+the thing to chase.
 
-So the cost is waiting for the device to finish, forced by .item(). This does
-not contradict 8a equalling 8b: .item() synchronises every single step, so even
-the "no explicit sync" variant was already being dragged by it. My P135 claim
-that asynchronous waiting was not the bottleneck was wrong - I had not realised
-that .item() is itself the synchronisation point.
+Second, and new: the H2D staging copy costs 4.94 ms per step on the host. That is
+a 12 KiB CPU-to-CPU copy, which should take microseconds. The only coherent
+explanation is that the CPU is being blocked when writing the pinned buffer. The
+Event records when the H2D transfer completes, but it does not wait for the NPU
+kernels to finish consuming that buffer - an assumption baked in when the Event
+was introduced. The CPU runs ahead of the device, the queue backs up, and by the
+time the rotation reaches the fourth buffer it has to wait.
 
-The remaining question is now sharp: what is the device executing? Bare operators
-1 through 7 total 0.35 ms, yet the device takes 14 ms to drain, so work outside
-those operators is queued - most likely per-step H2D, event bookkeeping or
-memory allocation.
+That second effect is a consequence of the first rather than an independent
+problem: the device is slow at 9.2 ms, the CPU cannot keep up, the H2D queue
+grows, and that is where the 5 ms comes from. So the fix belongs on the device
+side, or in giving the CPU more room with a larger pinned pool.
 
-A correction to what I wrote in the tool: the trace overhead is NOT 0.1-0.3 ms
-per line in practice. The traced run costs 15.159 ms/step versus 15.147 ms/step
-for the untraced 8a - essentially identical, because only seven methods are
-traced rather than the whole process. The tool's own docstring claiming large
-inflation was too pessimistic.
+The tool now distinguishes these. A new diagnostic makes the CPU do extra work
+per step, simulating it running further ahead: if the _staged_to_dev time goes
+DOWN, that proves it is waiting on the device rather than being slow memcpy. A
+--pin-cap flag overrides the pool size, since if the hypothesis holds, growing
+it is the remedy.
 
-Second finding, a real bug. The sparse branch of _eager_step used
-W.add_(dp.reshape(-1,1)*g, alpha=-eta), which MATERIALISES an
-(n_out, k) temporary - 52,642 x 128 = 6,738,176 elements = 25.4 MiB per step -
-while the dense branch uses W.addmm_(dp.reshape(-1,1), ht.reshape(1,-1)), which
-does not. P28 explicitly banned the materialising form, recording that it costs
-an extra 1.73 GiB of device traffic per step, 40% of the total. The sparse arm
-was added in P111 and never got the same fix.
+A lesson from my own P138 conclusion. I attributed the 14.25 ms to
+"the .item() synchronisation overhead", which is wrong in a way that would have
+sent the work in the wrong direction: it is really 9.2 ms of device execution
+plus 5 ms of the CPU waiting on H2D. You cannot separate the cost of
+synchronising from the cost of the work being synchronised, so a single basis
+gives the wrong answer. The way out is to measure at two sync bases -
+sync_every=1 waits every step, sync_every=8 waits once per eight - and solve the
+pair.
 
-It now uses W.addcmul_(dp.reshape(-1,1), g, value=-eta), a rank-1 AXPY with no
-temporary. Numerically this differs from the materialising form by 2.384e-07
-(relative 5.4e-08), which is one fp32 ulp - so it is NOT bit-identical, and the
-gate states a tolerance rather than claiming bit equality.
-verify_accel_sparse gains C4e (3 cases, 28 -> 31): that the materialising form
-is gone, that addcmul_ is used, and that the two agree within tolerance.
-
-Worth noting the irony: while writing the P134 benchmark I made exactly this same
-mistake with sub_(dp*g), noticed it, fixed the benchmark - and then never
-revisited the identical line sitting in the production code.
-
-Note that addcmul_ is not the main cause of the 14 ms: that line only shows
-0.058 ms, which is its submission cost. To confirm the synchronisation story,
-run the line profiler with --sync-every 8. If the 14.25 ms vanishes or is
-amortised over 8 steps, then nll_sync_every and CPU/NPU overlap are the levers,
-and P34 already laid the groundwork.
-
-Gates: fast 9/9, accel_sparse 31/31, accel_readout PASS, cann_env 30/30,
-ms_stream 44/44, p116_sched 22/22.
+Gates: fast 9/9, line profiler --help exit 0, --pin-cap accepted.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
