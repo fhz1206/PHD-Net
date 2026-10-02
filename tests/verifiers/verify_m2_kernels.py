@@ -132,6 +132,39 @@ def main() -> int:
               f"max|Δ|={d_ps:.3e}—— 若在昇腾上出现非逐位，需在文档注明"
               f"「plain 与 serial 非逐位」，不可宣称零回归")
 
+    # ── C5. nogil 覆盖（P123）──────────────────────────────────────────
+    # 全部 `parallel=True` 的核都必须带 `nogil=True`：生产主进程有个**nogil
+    # 分词线程**（日志「tokenisation thread (numba nogil)=153」）要占大量核，
+    # 核若持 GIL 就会阻塞它。
+    # ⚠ 这条是**覆盖性检查**、不是性能断言 —— nogil 的实际收益必须由服务器
+    # A/B 判定（本机 x86 8 核实测单次调用慢 7.8%、并发场景慢 14%，见
+    # sparse_pc.py 的 P123 注释）。这里只保证「不会有人悄悄把 nogil 删掉」。
+    print("\n[C5] parallel 核的 nogil 覆盖（P123）")
+    import re as _re2
+    from pathlib import Path as _P2
+    _root = _P2(__file__).resolve().parents[2]
+    _tot = _miss = 0
+    _miss_list = []
+    for _f in sorted((_root / "phdnet").glob("*.py")):
+        _src = _f.read_text(encoding="utf-8")
+        for _m in _re2.finditer(r"@(?:njit|jit)\(([^)]*)\)", _src, _re2.S):
+            _a = _m.group(1).replace(" ", "")
+            if "parallel=True" in _a:
+                _tot += 1
+                if "nogil=True" not in _a:
+                    _miss += 1
+                    _ln = _src[:_m.start()].count("\n") + 1
+                    _miss_list.append(f"{_f.name}:{_ln}")
+    check(_tot > 0 and _miss == 0,
+          "C5 所有 parallel=True 的核都带 nogil=True",
+          f"共 {_tot} 个，缺 {_miss}" + (f"：{_miss_list[:4]}" if _miss_list else ""))
+    _pc = (_root / "phdnet" / "sparse_pc.py").read_text(encoding="utf-8")
+    _csr_n = len(_re2.findall(
+        r"@njit\(cache=True, fastmath=True, parallel=True, nogil=True\)\s*\n\s*def _csr_",
+        _pc))
+    check(_csr_n == 5, "C5b M2 的 5 个 CSR 核都带 nogil（plain 默认路径）",
+          f"实际 {_csr_n} 个")
+
     # ── C. 三态映射 + 零回归 ──────────────────────────────────────────────
     print("\n[C] 三态映射与零回归")
     # C1 fused 参数的映射：True / "fused" → fused；"serial" → serial；False → plain
