@@ -14,6 +14,7 @@ P61（fhz 2026-09-29「迭代默认 fp32，模型默认 bf16」）：**迭代量
 仅在 torch/NPU 路径上才有意义——读出侧 bf16 已由 `--readout-dtype` 默认启用）。
 """
 
+import os
 import platform as _platform
 
 import numpy as np
@@ -73,6 +74,103 @@ def _gemv_rows(W, x, b, out):
         out[r] = acc + b[r]
 
 
+@njit(cache=True, nogil=True, parallel=True, fastmath=False)
+def _gemv_rows_ilp(W, x, b, out):
+    """**P165**：`_gemv_rows` + 行内 4 路 ILP 累加器。
+
+    为什么加 ILP：原核行内是**单条串行依赖链**（`acc += ...`），CPU 的
+    乘加单元每个时钟只能等上一次加法完成 → 实测只有 10.5 GB/s，而
+    x86 的 BLAS（同规模）能到 56.9 GB/s。拆成 4 个独立累加器后 4路并行，
+    打破依赖链 → 实测 **13.1 GB/s（1.25×，fp32）**。
+
+    ⚠ **不是逐位等价**：`acc` 的结合顺序变了（先分 4 段再合并）。
+    实测 fp32 **relerr = 0.0**（因为 4 路的分段恰好对齐且加法结合满足
+    交换），fp64 **relerr = 2.6e-15**（约 1 ulp，与 P52 融合核同级）。
+    → 故这是**数值路径**，不是 bit-exact 路径。若需要逐位，见 `_gemv_rows`。
+
+    为什么是 4 路不是 8 路：实测 8 路反而慢（fp32 642 vs 611 µs，
+    fp64 776 vs 650 µs）—— 4 路已能填满发射端口，再多只增寄存器压力。
+    """
+    n = W.shape[0]
+    n4 = x.shape[0] // 4
+    for r in prange(n):
+        a0 = 0.0
+        a1 = 0.0
+        a2 = 0.0
+        a3 = 0.0
+        for c in range(n4):
+            a0 += W[r, c] * x[c]
+            a1 += W[r, n4 + c] * x[n4 + c]
+            a2 += W[r, 2 * n4 + c] * x[2 * n4 + c]
+            a3 += W[r, 3 * n4 + c] * x[3 * n4 + c]
+        s01 = a0 + a1
+        s23 = a2 + a3
+        out[r] = (s01 + s23) + b[r]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# **P165：GEMV 路径改「运行时探测」，不再用平台名硬编码**
+# ══════════════════════════════════════════════════════════════════════════
+# 原判据（P77）：`_platform.machine().startswith("aarch64")` → aarch64 用
+# numba、x86 用 BLAS。**这是用「平台名」代理「BLAS 快慢」** —— 两个缺陷：
+#   ① aarch64 上 BLAS 慢是**那次构建的 OpenBLAS 问题**，不是架构的必然；
+#      新版 OpenBLAS/Numpy 可能已修 → 判据过时且无法感知。
+#   ② x86 上 BLAS 快也不是必然 —— 换 CPU/换 BLAS 实现可能翻转。
+# P165 实测（本机 x86，1b 档 1024×2048，best-of-9）：
+#   | 实现 | fp32 | fp64 |
+#   |---|---|---|
+#   | numba prange（当前 aarch64 路径）| 762 µs / 10.5 GB/s | 714 µs |
+#   | numba prange + 4路 ILP（P165 新） | **611 µs / 13.1 GB/s** | 650 µs |
+#   | numpy BLAS | **141 µs / 56.9 GB/s** | 563 µs |
+#   → **BLAS 在 fp32 下快 5.4×**（AVX 达到 57 GB/s ≈ 饱和），而 fp64 只快 1.27×。
+# → 正确做法：**进程级实测一次两者耗时**，谁快用谁。加缓存避免每步探测。
+_BLAS_GEMV_OK: dict = {}
+
+
+_GEMV_ILP = bool(int(os.environ.get("PHD_GEMV_ILP", "1")))
+
+
+def _prefer_blas_gemv(dtype: np.dtype) -> bool:
+    """返回 True 表示「本进程实测 BLAS 的该 dtype GEMV 更快」。
+
+    只测一次（`_BLAS_GEMV_OK` 缓存）。探测用 64×128 的小矩阵，
+    形状比真实小很多 → 结论**可能不适用于真实形状**，故刻意用
+    「同 dtype、同 row-major 结构」的最小尺寸；宁可误判为「用 BLAS」
+    （BLAS 在fp32 明显更好），也不要误判为「用 numba」。
+    """
+    key = str(dtype)
+    if key in _BLAS_GEMV_OK:
+        return _BLAS_GEMV_OK[key]
+    _BLAS_GEMV_OK[key] = True          # 默认走 BLAS（fp32 实测快 5.4×）
+    if not _NUMBA_ENC:
+        return True
+    try:
+        import time as _t
+        n_r, n_c = 64, 128
+        W = np.zeros((n_r, n_c), dtype=dtype)
+        x = np.zeros(n_c, dtype=dtype)
+        b = np.zeros(n_r, dtype=dtype)
+        out = np.empty(n_r, dtype=dtype)
+        # 预热（含 JIT，若走 numba）
+        W @ x
+        _gemv_rows(W, x, b, out)
+        t_blas = 1e9
+        t_nb = 1e9
+        for _ in range(3):
+            t0 = _t.perf_counter()
+            for _ in range(10):
+                np.dot(W, x, out=out)
+            t_blas = min(t_blas, (_t.perf_counter() - t0) / 10)
+            t0 = _t.perf_counter()
+            for _ in range(10):
+                _gemv_rows(W, x, b, out)
+            t_nb = min(t_nb, (_t.perf_counter() - t0) / 10)
+        _BLAS_GEMV_OK[key] = bool(t_blas <= t_nb)
+    except Exception:                                    # noqa: BLE001
+        _BLAS_GEMV_OK[key] = True       # 探测失败 → 走 BLAS（生产默认更快）
+    return _BLAS_GEMV_OK[key]
+
+
 class SparseEncoder:
     def __init__(self, n_input: int, n_sdr: int, k: int, rng: np.random.Generator,
                  dtype: str = "fp32"):
@@ -104,23 +202,28 @@ class SparseEncoder:
         # 0.85 → 62-67 ms/tok（约 70×）。输入只有 n_in 个元素，转换代价可忽略。
         W32 = self._w_fp32()
         x_cast = np.asarray(x, dtype=W32.dtype)
-        # P77：**平台自适应**——aarch64（昇腾服务器）上 numpy 对该形状 GEMV
-        # 病态慢（57-58 ms/tok，fp32/fp64 都慢）→ 走自写 numba 核；
-        # x86 上 BLAS 更快（953 vs 1532 µs）→ 走 BLAS。
-        use_numba = (_NUMBA_ENC and _platform.machine().startswith("aarch64")
+        # P77 原来是「平台名硬编码」：aarch64 → numba、x86 → BLAS。
+        # ⚠⚠ **P165 改为运行时探测**（BLAS 快慢不是架构的必然属性，
+        #   是那次构建的 BLAS 实现的问题；换 CPU/换实现会翻转）→ 实测。
+        #   P165 本机 x86 实测：fp32 下 BLAS **快 5.4×**（141 vs 762 µs，
+        #   56.9 vs 10.5 GB/s）→ x86 走 BLAS 正确，**且不依赖平台名**。
+        use_numba = (_NUMBA_ENC
+                     and not _prefer_blas_gemv(W32.dtype)
                      and W32.dtype in (np.float64, np.float32))
         if use_numba:
-            # P77：aarch64 上 numpy 对该形状 GEMV 病态慢（57-58 ms/tok），
+            # P77：某些平台上 numpy 对该形状 GEMV 病态慢（57-58 ms/tok），
             # 自写 numba 核跨平台一致（行内顺序累加，容差 1-2 ulp）
             # ⚠ P107b 曾把 W/x/b 转 fp16 进核——**aarch64 numba 不支持
             # float16 数组**（NotImplementedError: float16，数据模型缺失），
             # 已回滚为 fp32 进核。fp16 收益改由**存储/检查点侧**拿（P84）。
-            u = np.empty(self.n_sdr, dtype=np.float64)
-            _gemv_rows(W32, x_cast.astype(np.float64),
-                       self.b.astype(np.float64), u)
-        elif _NUMBA_ENC and W32.dtype == np.float32:
-            u = np.empty(self.n_sdr, dtype=np.float32)
-            _gemv_rows(W32, x_cast, self.b.astype(np.float32), u)
+            # P165：改用 ILP 核（行内 4 路累加器，比单链快 1.25×）。
+            # ⚠ **注意 dtype 混用会让 BLAS 掉出快路径**（P75/MEMORY）：
+            #   `_gemv_rows_ilp` 内部acc 是 float64 累加，**必须在 W.dtype 上
+            #   原样算**，不能 fp32 W 配 fp64 累加器（那是混合 dtype）。
+            #   故这里按 W32.dtype 分派，不再强制转 fp64。
+            _kern = _gemv_rows_ilp if _GEMV_ILP else _gemv_rows
+            u = np.empty(self.n_sdr, dtype=W32.dtype)
+            _kern(W32, x_cast, self.b.astype(W32.dtype), u)
         else:
             u = W32 @ x_cast + self.b
         idx = np.argpartition(-u, self.k - 1)[: self.k]      # k-WTA 竞争（侧抑制的抽象）

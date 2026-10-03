@@ -1,0 +1,24 @@
+{
+  "env": {
+    "python": "3.14.5",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "machine": "AMD64",
+    "cpu_count": 8,
+    "numpy": "2.5.2",
+    "numba": "0.67.0",
+    "torch": "2.13.0+cpu",
+    "commit": "b70b790",
+    "ts": "2026-10-03 14:34:04"
+  },
+  "note": "本地 x86 回归基准；**不可作为昇腾/文档数字**（今天已实测三次平台方向相反）",
+  "mechanisms": {
+    "threads=default": {
+      "M1_encode_us": 923.9,
+      "M2_infer_fused_us": 845.1,
+      "M2_infer_plain_us": 1257.1,
+      "M4b_predict_arr_us": 480.8,
+      "LTM_encode_us": 139.0
+    }
+  },
+  "smoke": null
+}
