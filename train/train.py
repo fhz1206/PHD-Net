@@ -255,6 +255,17 @@ def main() -> None:
                          "→ **只能用差值**")
     ap.add_argument("--probe-tokens", type=int, default=2048,
                     help="P146：探针集 token 数（越大越稳，代价是每次多跑一遍前向）")
+    ap.add_argument("--readout-int8-compute", default="auto",
+                    choices=["auto", "on", "off"],
+                    help="P153/P154：int8 **计算域**（int8 x int8 → int32 累加）。"
+                         "auto（**默认**）= 总是开 → **fp8 存储 + int8 计算**"
+                         "（fhz 2026-10-03 指令「fp8 不行就默认降级到 int8 计算，"
+                         "fp8 存储」）；on=强制开；off=回退到 fp16 计算。"
+                         "⚠ 激活是**动态量化**（per-tensor scale），且M1 k-WTA 的"
+                         "稀疏激活动态范围很宽 → **必须用 --probe-every 的probe_PPL"
+                         "判定**是否可接受。P155/P156 实测：位转换在 CPU，"
+                         "行内积用 **int16 中间 + int32 累加**（int8 累加数学上"
+                         "不可能：127x127=16129 > 127）。")
     ap.add_argument("--readout-gather-dtype", default="fp16",
                     choices=["fp32", "fp16", "bf16"],
                     help="P145：稀疏读出**中间量 g**（gather 输出）的精度，"
