@@ -248,6 +248,44 @@ pub extern "C" fn phdnet_soc_name_c() -> *const c_char {
     })) as *const c_char
 }
 
+/// 本机是否支持 AVX2+FMA（**真跑一次**，不是查表）。
+#[no_mangle]
+pub extern "C" fn phdnet_has_avx2() -> c_int {
+    c_int::from(crate::simd::has_avx2())
+}
+
+/// GEMV（**SIMD 路径**：AVX2 + 4 路 FMA 累加器 + 常驻线程池）。
+///
+/// # 逐位性
+/// ⚠ **与标量版不逐位**（4 路累加器改变了求和顺序，fp32 relerr ~1e-7）。
+///   门禁对这条路径用**容差**（1e-5），标量路径仍要求逐位。
+///
+/// # Safety
+/// `w` 须 C 连续 `rows*cols` 个 f32；`x`/`b`/`out` 长度匹配。
+#[no_mangle]
+pub unsafe extern "C" fn phdnet_m1_gemv_simd(
+    w: *mut c_float,
+    rows: usize,
+    cols: usize,
+    x: *mut c_float,
+    b: *mut c_float,
+    out: *mut c_float,
+    n_threads: usize,
+) -> c_int {
+    unsafe {
+        crate::simd::gemv_avx2(
+            w as *const f32,
+            rows,
+            cols,
+            x as *const f32,
+            b as *const f32,
+            out as *mut f32,
+            n_threads,
+        );
+    }
+    0
+}
+
 /// 浮点哨兵：让 Python 侧能确认符号表正确（避免 dlopen 到了错的库）。
 #[no_mangle]
 pub extern "C" fn phdnet_build_f64_probe() -> c_double {

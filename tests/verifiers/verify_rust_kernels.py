@@ -194,6 +194,30 @@ check("E3 M5 的 Welford 统计量逐位一致",
       m_rs == np.float32(mean).astype(np.float64).__float__() or abs(m_rs - mean) < 1e-6,
       "Rust mean=%.10f Py mean=%.10f" % (m_rs, mean))
 
+# ── F. SIMD 路径（P171）─────────────────────────────────────────────
+print("[F] SIMD（AVX2）路径")
+check("F0 has_avx2 可调用", True, "avx2=%s" % K.has_avx2())
+if K.has_avx2():
+    ysimd = np.zeros(r, dtype=np.float32)
+    K.m1_gemv_simd(W, x, b, ysimd, 8)
+    rel_s = float(np.abs(ysimd - ref).max() / max(1e-30, np.abs(ref).max()))
+    # ⚠ SIMD **不要求逐位**（4 路 FMA 累加器改变求和顺序）→ 容差
+    check("F1 SIMD vs numpy BLAS（**容差 1e-5**，非逐位）", rel_s < 1e-5,
+          "relerr=%.3e（4 路 FMA 改求和顺序 → 预期 ~1e-7）" % rel_s)
+    ysimd1 = np.zeros(r, dtype=np.float32)
+    K.m1_gemv_simd(W, x, b, ysimd1, 1)
+    d_s = float(np.abs(ysimd1 - ysimd).max()
+                / max(1e-30, np.abs(ysimd).max()))
+    check("F2 SIMD 1 线程 vs 8 线程：容差内（分块不改行内 SIMD 序）",
+          d_s < 1e-6, "relerr=%.3e" % d_s)
+    # 标量路径仍**要求逐位**（SIMD 不影响它）
+    ysc = np.zeros(r, dtype=np.float32)
+    ysc8 = np.zeros(r, dtype=np.float32)
+    K.m1_gemv(W, x, b, ysc, 1)
+    K.m1_gemv(W, x, b, ysc8, 8)
+    check("F3 标量路径 1 vs 8 线程：**逐位**（未受 SIMD 影响）",
+          np.array_equal(ysc, ysc8))
+
 n_fail = sum(1 for ok, _, _ in _RESULTS if not ok)
 print()
 print("=" * 72)

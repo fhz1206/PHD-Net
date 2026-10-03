@@ -56,6 +56,11 @@ class RustKernels:
                                            ctypes.c_size_t]
         L.phdnet_has_npu.restype = ctypes.c_int
         L.phdnet_has_npu.argtypes = []
+        L.phdnet_has_avx2.restype = ctypes.c_int
+        L.phdnet_has_avx2.argtypes = []
+        L.phdnet_m1_gemv_simd.restype = ctypes.c_int
+        L.phdnet_m1_gemv_simd.argtypes = [f32p, ctypes.c_size_t, ctypes.c_size_t,
+                                           f32p, f32p, f32p, ctypes.c_size_t]
 
     # ── M1 ──────────────────────────────────────────────────────────────
     def m1_gemv(self, W, x, b, out, n_threads: int = 1) -> None:
@@ -64,6 +69,24 @@ class RustKernels:
         assert W.flags["C_CONTIGUOUS"] and x.dtype == np.float32
         r, c = W.shape
         self.lib.phdnet_m1_gemv(
+            W.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), r, c,
+            x.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            b.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(n_threads))
+
+    def has_avx2(self) -> bool:
+        """本机是否支持 AVX2+FMA（**真跑一次**探测）。"""
+        return bool(self.lib.phdnet_has_avx2())
+
+    def m1_gemv_simd(self, W, x, b, out, n_threads: int = 8) -> None:
+        """SIMD 版 GEMV（AVX2 + 4 路 FMA）。
+
+        ⚠ **与 `m1_gemv` 不逐位**（累加器分组改变求和顺序，fp32 ~1e-7）。
+        无 AVX2 时会静默回落到标量路径 —— 用 `has_avx2()` 预先确认。
+        """
+        r, c = W.shape
+        self.lib.phdnet_m1_gemv_simd(
             W.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), r, c,
             x.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             b.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
