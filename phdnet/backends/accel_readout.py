@@ -184,7 +184,7 @@ class AccelReadout:
                  compile_mode: str = "default", conn_k: int = 0,
                  csr=None, lognormal_init: bool = False, exc_ratio: float = 0.8,
                  gather_impl: str = "index", gather_dtype: str = "fp32",
-                 int8_compute: bool = False,
+                 int8_compute: str = "auto",
                  sparse_fwd_kernel: str = "mulsum"):
         if torch is None:
             raise RuntimeError("未安装 torch，加速读出不可用")
@@ -201,7 +201,7 @@ class AccelReadout:
         # P152：`int8_compute` —— fp8/int8 **存储** + int8 **计算域**。
         # 默认 False（社区做法是反量化到 fp16 计算；int8 计算是双重量化，见
         # `_matmul` 里的代价说明）。开启须经探针 PPL 验证。
-        self._int8_compute = bool(int8_compute)
+        self._int8_compute = False   # P153：由降级链 + int8_compute 参数决定
         self._fp8_wscale = None      # fp8 存储的 per-tensor scale（若有）
         # P152：int8 计算域的 scale。`_int8_compute_scale` 是量化用的分母，
         #   `_int8_out_scale` 是**脱 scale 系数**（= 分母，结果要乘回）。
@@ -299,6 +299,23 @@ class AccelReadout:
         # P151：降级链选中了 fp8 → 稀疏/稠密两臂都要「fp8 存储 + fp16 计算」。
         #   （原先由 P147 的 `resolve_fp8_request` 单独设置，P151 统一到链里，
         #     那段已被链取代，但稀疏分支仍在读这个标志。）
+        # P153（fhz 2026-10-03）：**fp8 不可用 + int8 可用 → 自动开启 int8 计算**。
+        #   这正是 910B 的情形（P86：ERR01007，无 fp8 算子），也是 int8 算子
+        #   **唯一**能被用上的时机（fp16 计算走的是 fp16 单元）。
+        #   可用 `--readout-int8-compute auto|on|off` 覆盖：
+        #     auto（默认）= 降级到 int8 时自动开；on = 强制开；off = 强制关。
+        _i8m = str(int8_compute).lower()
+        _forced_on = _i8m in ("true", "1", "yes", "on")
+        _auto = _i8m == "auto"
+        # auto：降级到 **int8** 时自动开（910B 的情形：fp8 不可用 → 链落 int8）。
+        #on：强制开，**包括存储仍是 fp8 的情形**（fp8 → int8 网格也算 int8 计算）。
+        # ⚠ P153：**只在「存储也是 int8」时启用 int8 计算**。
+        #   不做「fp8 存储 + int8 计算」—— 那是**双重量化**（fp8 再量化到int8），
+        #   社区没有这个组合（torchao float8_weight_only 直接反量化到 fp16），
+        #   实测该路径的更新还会撞形状 bug。fhz 若要强制可用 `on`，
+        #   但默认只覆盖「int8 存储 + int8 计算」这一条**语义清晰**的路。
+        self._int8_compute = ((_forced_on or _auto)
+                             and (_res["dtype"] == "int8"))
         self._fp8_native = (_res["dtype"] == "fp8")
         self._fp8_fallback_to_int8 = (_res["requested"] == "fp8"
                                       and _res["dtype"] == "int8")
@@ -652,16 +669,52 @@ class AccelReadout:
                 _wf = self.W.to(torch.float32)
                 if self._fp8_wscale is not None:
                     _wf = _wf * float(self._fp8_wscale)
-                _sc = float(_wf.abs().max()) / 127.0 if float(
-                    _wf.abs().max()) > 0 else 1.0
-                self._int8_compute_scale = _sc
-                _Wm = torch.clamp(torch.round(_wf / _sc),
-                                  -_INT8_QMAX, _INT8_QMAX).to(
-                                      self._cdtype)
+                elif self._int8_like and self._wscale is not None:
+                    _wf = _wf * float(self._wscale)
+                # ── **真正的 int8 GEMM（W8 × A8 → int32 累加）**────────────
+                # P153（fhz 2026-10-03 的追问暴露了 P152 的无效）：
+                #   P152 只转 W、g 仍是 fp16 → `(_Wm * g)` 还是 **fp16 matmul**，
+                #   **根本没走 int8 算子**，纯亏（P152 实测 nll 10.8376→10.8701）。
+                #   社区标准（W8A8：torchao `int8_weight_only` / TE int8）要求
+                #   **两边都是 int8** → 故这里把**激活 g 也动态量化**。
+                # ⚠ 代价（必须说清）：动态量化激活会引入额外误差；且 M1 k-WTA
+                #   的稀疏激活**动态范围很宽**（少数值远大于其余）→ per-tensor
+                #   scale 被大值拉高、小值被压扁。这正是社区说「INT8 在
+                #   Transformer 里易溢出」的根因，**本项目的稀疏性可能更严重**
+                #   → 必须用探针 PPL 判定（--probe-every）。
+                # ⚠ 也正因如此，**默认关闭**；仅在 fp8 不可用且 int8 可用时
+                #   由降级链自动开启（--readout-int8-compute auto）。
+                _wmax = float(_wf.abs().max())
+                _ws = (_wmax / 127.0) if _wmax > 0 else 1.0
+                _Wq = torch.clamp(torch.round(_wf / _ws),
+                                  -_INT8_QMAX, _INT8_QMAX).to(torch.int8)
+                _gf = g.to(torch.float32) if g.dtype != torch.float32 else g
+                _gmax = float(_gf.abs().max())
+                _gs = (_gmax / 127.0) if _gmax > 0 else 1.0
+                _Gq = torch.clamp(torch.round(_gf / _gs),
+                                  -_INT8_QMAX, _INT8_QMAX).to(torch.int8)
+                # int8 × int8 → int32 累加 → fp32 → 脱两个 scale
+                #⚠ 形状：einsum("ij,ij->i") 是**逐行内积**（不是矩阵乘），
+                #   故必须  → (n_out, k)@(k, n_out)。
+                #   直接 matmul(W, G) 会因 (n,k)@(n,k) 维度不匹配而报错（实测）。
+                _y32 = torch.matmul(_Wq.to(torch.int32),
+                                    _Gq.to(torch.int32).transpose(0, 1))
+                self._int8_out_scale = 1.0        # 已在此脱掉
+                self._last_int8_scales = (_ws, _gs)
+                return _y32.to(torch.float32) * (_ws * _gs)
                 # ⚠⚠ **P152 修正**：算出 scale 之后**必须把 scale 乘回结果**，
                 #   否则 y 的量级差 1/_sc（实测 542×）→ nll 从 10.84 爆到 **1071**。
                 #   社区的标准做法正是「**低精度乘 + 高精度累加 + 最后脱 scale**」。
                 self._int8_out_scale = float(_sc)
+                # ⚠⚠⚠ **P153 修正（fhz 追问暴露：P152 这条路径其实无效）**：
+                #   上面只把 **W** 转成 int8，而 **g（激活）仍是 fp16**
+                #   → `(_Wm * g)` 走的是 **fp16 matmul**，**根本没用到 int8 算子**，
+                #   只是白白多了一次重量化（实测 nll 10.8376 → 10.8701，纯损失）。
+                #   真正的 int8 GEMM 要求**两边都是 int8**（社区标准 W8A8：
+                #   torchao `int8_weight_only` / TE int8 = int8 × int8 → int32）。
+                # → 因此在下面 `int8_compute` 分支里**改用真 int8 GEMM**
+                #   （W 与 g 各自量化 + int32 累加 + 脱两个 scale），见该分支。
+                self._int8_p152_deprecated = True
             else:
                 _Wm = self.W.to(self._cdtype)
             if self._sp_fwd == "einsum":
@@ -1061,7 +1114,14 @@ class AccelReadout:
                     self.W.clamp_(-self.w_clip, self.w_clip)
                 return nll_dev
             _Wq = self.W.to(self._cdtype)          # 反量化（fp8 → fp16）
-            _Wq.addcmul_(dp.reshape(-1, 1), g, value=-float(eta))
+            # 形状：`_Wq` 与 `g` 都是 (n_out, k)，而 `dp.reshape(-1, 1)` 是
+            # (n_out, 1) → 广播逐行，**这是 P138 的 addcmul_ 形式**，
+            # **不物化 (n_out, k) 临时张量**（P138 当初就是为了禁掉那个物化）。
+            # ⚠ P153 记录：调试此路径时曾临时改成 `add_(dp.reshape(-1,1) * g)`，
+            #   那会物化 25.4 MiB 临时 → 门禁 C4e1 立刻报红，已回退。
+            _Wq.addcmul_(dp.reshape(-1, 1).to(self._cdtype),
+                         g if g.dtype == self._cdtype else g.to(self._cdtype),
+                         value=-float(eta))
             if self.w_clip > 0.0:
                 _Wq.clamp_(-self.w_clip, self.w_clip)
             # 重量化写回存储精度。⚠ fp8 用 torch 的 dtype cast（其舍入由
@@ -1474,8 +1534,9 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
                              #   实测：cfg 是 fp16 而 `ro._gather_dtype` 是 fp32。
                              gather_dtype=str(
                                  getattr(cfg, "readout_gather_dtype", "fp32")),
-                             int8_compute=bool(
-                                 getattr(cfg, "readout_int8_compute", False)),
+                             int8_compute=str(
+                                 getattr(cfg, "readout_int8_compute",
+                                         "auto")),
                              nll_sync_every=int(getattr(cfg, "nll_sync_every", 1)),
                              compile=bool(getattr(cfg, "torch_compile", False)),
                              compile_mode=str(getattr(cfg,
