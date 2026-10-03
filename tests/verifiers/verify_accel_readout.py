@@ -167,8 +167,14 @@ def main() -> None:
           _unsupported_reason(PHDNetConfig(readout_dtype="int8")) is None)
     check("A3 fp8 旧名别名放行（=int8，P100 正名 / P105 同步）",
           _unsupported_reason(PHDNetConfig(readout_dtype="fp8")) is None)
-    check("A3 int4 仍拒绝（910B 无 INT4 矩阵乘单元）",
-          _unsupported_reason(PHDNetConfig(readout_dtype="int4")) is not None)
+    # P151（fhz 2026-10-03「解禁 fp8, fp4, int4, int8」）：4-bit **已解禁**。
+    #   P86 当初的理由「910B 无 INT4 矩阵乘单元」对稀疏 gather-GEMV 不成立——
+    #   4-bit 在加速臂是 **uint8 打包 + fp16 计算域**（`_pack4`/`_unpack4`），
+    #   **不需要 int4 矩阵乘单元**。存储省 8×（vs fp32）是真实的。
+    check("A3 int4 放行（P151 解禁：uint8 打包 + fp16 计算，不需 int4 单元）",
+          _unsupported_reason(PHDNetConfig(readout_dtype="int4")) is None)
+    check("A3b fp4 放行（P151 解禁）",
+          _unsupported_reason(PHDNetConfig(readout_dtype="fp4")) is None)
 
     # ── A4：接口完整性自动扫描（P23 根治：三次崩溃都是漏属性）──
     print("[A4] 接口完整性（扫描全仓库 readout.X 访问面）")

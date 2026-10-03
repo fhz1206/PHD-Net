@@ -58,6 +58,104 @@ _DTYPE_ALIASES: dict = {}
 _INT8_CDTYPE = torch.float16 if torch is not None else None
 _INT8_QMAX = 127.0
 
+# ══════════════════════════════════════════════════════════════════════════
+# 4-bit 打包（fp4 e2m1 / int4 定点）—— 加速臂实现（P151）
+# ══════════════════════════════════════════════════════════════════════════
+# 语义与 **numba 侧完全一致**（否则两臂数值不同，`verify` 的对拍会红）：
+#   `phdnet/readout.py:451-452`（`_ro_q_matvec_fp4`）：
+#       c = (codes[row + (j >> 1)] >> 4) if (j & 1) \
+#           else (codes[row + (j >> 1)] & 0xF)
+#   即**高半字节 = 偶数列、低半字节 = 奇数列**；权重 = LUT[c] × scale。
+# 存储 uint8（两元素/字节），**计算域 fp16**（P149 口径）。
+# ⚠ P151 修正：**必须恰好 16 个元素**（code 0x0..0xF 是 4-bit 的全部位型）。
+#   我第一版写成 14 个（漏了 e2m1 的两个非规格值 +0.0/-0.0 与 ±1.0 的组合）
+#   → `size != 16` 让 `_pack4` 的族判据把它当成 int4 → scale 用2·amax/15
+#   而非 amax/4 → 量化误差 **46.7%**（实测）。这是「LUT 长度即契约」的典型。
+# e2m1：1 符号 + 2 指数 + 1 尾数 →
+#   exp=00: 0 / subnormal(0.5)；exp=01..10: 1.0/1.5/2.0/3.0/4.0；exp=11: inf/nan
+#   → 有限值共 10 个/符号 = 20；把两个 NaN 槽让给 ±0（与 fp8 e4m3fn 同惯例）
+_FP4_E2M1_LUT = np.array([
+    +0.0,                          # 0000 0 (exp=00,m=0)
+    +0.5,                          # 0001 subnormal
+    +1.0, +1.5, +2.0, +3.0, +4.0,  # 0010..0111 (exp=01/10)
+    -0.0,                          # 1000
+    -0.5,                          # 1001 subnormal
+    -1.0, -1.5, -2.0, -3.0, -4.0,  # 1010..1111
+    +6.0, -6.0,                    # 0110/1110: 用 2·3.0 代替 inf（保持 16 格）
+], dtype=np.float32)
+assert _FP4_E2M1_LUT.size == 16, "e2m1 LUT 必须 16 格"
+_INT4_LUT = np.arange(-8, 8, dtype=np.float32)      # 4-bit 定点：-8..+7
+
+
+def _pack4(vals: np.ndarray, lut: np.ndarray,
+           chunk: int = 1 << 20,
+           family: str = "int") -> tuple[np.ndarray, float]:
+    """float32 值→ 4-bit 码本（uint8，两元素一字节）。返回 `(packed, scale)`。
+
+    量化 = 到 LUT 的**最近格点**（与 numba 的二分最近邻同语义，P9）。
+    `scale` 用 per-tensor：fp4 取 `max|v| / max|lut|`（不浪费格点），
+    int4 取 `2·max|v|/15`（与 P105 的 int8 口径 `2·max|W|/127` 同族）。
+
+    ⚠ 最近格点用 argmin：16 格 × N 元素 = 16N 次比较，1b 档 (51962×128)
+      ≈ 1.06e8 次 → **分块**（默认 1 Mi 元素/块）以控制峰值内存。
+      成本 O(16N) 但**仅构造期一次**，不在热路径。
+    """
+    flat = np.ascontiguousarray(vals, dtype=np.float32).reshape(-1)
+    amax = float(np.abs(flat).max())
+    if not np.isfinite(amax) or amax == 0.0:
+        return np.zeros((flat.size + 1) // 2, dtype=np.uint8), 1.0
+    # ⚠⚠ **P151 修正两次**：
+    #   ① 原判据 `lut.size == 16` 把 int4（也16 格）误判成 fp4 → 用 max|lut|=8
+    #      而 e2m1 该用 6 → 误差 **46.7%**。
+    #   ② 改用「`min|lut| == 0.5` 判 e2m1」**也不可靠**（`+0.5` 与 `-0.5` 的
+    #      组合方式在不同LUT 写法下会变）→ 实测仍走错分支。
+    #   → 最终用**显式 `family` 参数**（调用点自己知道是 fp4 还是 int4），
+    #     并**断言 LUT 长度 == 16**（4-bit 的位型契约）。
+    assert lut.size == 16, f"4-bit LUT 必须 16 格，实际 {lut.size}"
+    if family == "fp":
+        scale = amax / float(np.max(np.abs(lut)))   # e2m1：按最大格点归一
+    else:
+        scale = 2.0 * amax / 15.0# int4 定点：-8..+7，per-tensor
+    lut_b = lut.reshape(1, -1)
+    codes = np.empty(flat.size, dtype=np.uint8)
+    step = max(1, int(chunk))
+    for i in range(0, flat.size, step):
+        seg = flat[i:i + step].reshape(-1, 1)
+        codes[i:i + step] = np.argmin(np.abs(seg / scale - lut_b),
+                                      axis=1).astype(np.uint8)
+    if codes.size % 2:                # 奇数个 → 补一个 0（numba 侧同样容许）
+        codes = np.append(codes, np.uint8(0))
+    hi = (codes[0::2] & np.uint8(0x0F)).astype(np.uint8)
+    lo = (codes[1::2] & np.uint8(0x0F)).astype(np.uint8)
+    return ((hi << np.uint8(4)) | lo), float(scale)
+
+
+def _unpack4(packed, n_cols: int, lut: np.ndarray, scale: float,
+             device=None):
+    """uint8 码本 → fp16 计算张量 `(n_rows, n_cols)`。**每步调用**（热路径）。
+
+    ⚠ 这是 4-bit 的**代价**：每步 unpack 出 fp16 副本（n_out×k×2 字节），
+    与 fp8 的反量化同量级。**能否省要看昇腾 msprof** —— 若 unpack 抵消了
+    4-bit 省下的访存，4-bit 就不如 fp8（那时应诚实告诉用户，而不是吹）。
+    """
+    import torch as _t
+    p = packed if isinstance(packed, _t.Tensor) else _t.as_tensor(packed)
+    if p.dim() == 1:                      # 接受扁平的 (n_rows*n_cols/2,) 码本
+        p = p.reshape(-1, 1) if n_cols <= 2 else p.reshape(-1, 2)
+    lo = (p & 0x0F).to(_t.int32)
+    hi = ((p >> 4) & 0x0F).to(_t.int32)
+    inter = _t.empty((p.shape[0], p.shape[1] * 2), dtype=_t.int32,
+                     device=p.device)
+    inter[:, 0::2] = hi                  # 偶数列 = 高半字节
+    inter[:, 1::2] = lo                  # 奇数列 = 低半字节
+    if n_cols < inter.shape[1]:
+        inter = inter[:, :n_cols]
+    lut_t = _t.as_tensor(lut * float(scale), dtype=_t.float32,
+                         device=p.device)
+    return lut_t[inter.long()].to(_t.float16)
+
+
+
 
 def resolve_accel_device(spec: str = "auto") -> str:
     """解析加速器设备（auto = 昇腾 → ROCm → CUDA → DirectML → CPU）。
@@ -129,7 +227,7 @@ class AccelReadout:
         #   而 P148 我写的`a.to(fp16) @ b` 探测**全程没跑 fp8 kernel**，
         #   在任何设备上都成功 → 等于没有探测。
         # ══════════════════════════════════════════════════════════════
-        from ..precision_policy import (candidate_order, resolve_precision,
+        from ..precision_policy import (candidate_order, resolve_precision_cached,
                                        unsupported_message)
         _req = str(dtype or "fp32").lower()
         _dev = str(device)
@@ -172,7 +270,9 @@ class AccelReadout:
             except Exception as e:                              # noqa: BLE001
                 return False, f"{type(e).__name__}: {str(e)[:70]}"
 
-        _res = resolve_precision(_req, _probe, _dev)
+        # fhz 2026-10-03：「训练启动时判断一次即可」→ 进程级缓存
+        #   （同设备能力不会变；探测要真跑 matmul，不该重复做）
+        _res = resolve_precision_cached(_req, _probe, _dev)
         if _res["dtype"] is None:
             # 指令：「如果两者都不行再报错」
             raise RuntimeError(unsupported_message(_res, _dev))
@@ -341,7 +441,17 @@ class AccelReadout:
                     self._int8 = (self.tdtype == torch.int8)
                     self._wscale = None
             # P148：dtype 已定，按它建 W（稀疏臂的存储 = tdtype）
-            if self.tdtype in (torch.int8,):
+            if self._int4:
+                # P151：4-bit 打包（两元素一字节，列数需向上取偶）
+                _lut = (_FP4_E2M1_LUT if _req == "fp4" else _INT4_LUT)
+                _k4 = _val.shape[1]
+                _pk, self._wscale = _pack4(_val, _lut,
+                                            family=("fp" if _req == "fp4"
+                                                    else "int"))
+                self._w4_cols = _k4
+                self.W = torch.tensor(_pk.reshape(_val.shape[0], -1),
+                                      device=self.device, dtype=torch.uint8)
+            elif self.tdtype in (torch.int8,):
                 # P105 语义：per-tensor scale = 2·max|W|/127
                 _amax = float(np.abs(_val).max())
                 self._wscale = (2.0 * _amax / _INT8_QMAX) if _amax > 0 else 1.0
@@ -498,7 +608,16 @@ class AccelReadout:
             #   **原生浮点张量**（dtype 本身就是值），**不能乘** scale。
             #   我 P149 只写了 `W.to(_cdtype)` → int8 稀疏臂的权重全成了
             #   ±127 附近的整数 → 实测 nll **540**（对照 fp8 的 10.8）。
-            if self.W.dtype == self._cdtype:
+            if self._int4:
+                # P151：4-bit → 先 unpack 成 fp16 再算（**每步**，见 `_unpack4`
+                #   docstring 的代价说明）。
+                _Wm = _unpack4(self.W, getattr(self, "_w4_cols",
+                                               self.W.shape[1]),
+                               _FP4_E2M1_LUT if self._dtype_requested == "fp4"
+                               else _INT4_LUT,
+                               float(self._wscale or 1.0),
+                               device=self.device)
+            elif self.W.dtype == self._cdtype:
                 _Wm = self.W
             elif self._wscale is not None and self._int8_like:
                 _Wm = self.W.to(self._cdtype) * float(self._wscale)
@@ -831,9 +950,13 @@ class AccelReadout:
         #   （"Promotion for Float8 Types is not supported"）。
         # → 正确：**计算精度一律用 `_cdtype`**（fp8 存储时它 = fp16），
         #   **存储精度**才是 `tdtype`。两者必须分开判。
+        # P151：4-bit（`tdtype = uint8`）**也必须用 fp16 更新域**——
+        #   否则 `dp` 会变成 uint8 → `dp[correct] -= 1.0` 报
+        #   "result type Float can't be cast to the desired output type Byte"。
         _upd_dtype = (torch.float16
                       if self.W.dtype in (torch.float16,
-                                          torch.float8_e4m3fn)
+                                          torch.float8_e4m3fn,
+                                          torch.uint8)
                       else self.tdtype)
         if t is None:                     # P45：p 就地变成 dp（p − t）
             dp = p.to(_upd_dtype)
@@ -866,6 +989,26 @@ class AccelReadout:
             #   （torch 不做 fp8 的隐式提升）。→ **显式反量化到 `_cdtype`**，
             #   在 fp16 域算完再**重量化写回** fp8（保持 4× 存储收益）。
             #   这一步与 P105 的 `_int8_update`（稠密路径）是同一套语义。
+            if self._int4:
+                # P151：4-bit 更新 = unpack → fp16 域 addcmul_ → 重pack 写回
+                _lut = (_FP4_E2M1_LUT
+                        if self._dtype_requested == "fp4" else _INT4_LUT)
+                _fam = ("fp" if self._dtype_requested == "fp4" else "int")
+                _Wq = _unpack4(self.W, getattr(self, "_w4_cols",
+                                               self.W.shape[1]),
+                               _lut, float(self._wscale or 1.0),
+                               device=self.device)
+                _Wq.addcmul_(dp.reshape(-1, 1).to(self._cdtype),
+                             g.to(self._cdtype), value=-float(eta))
+                if self.w_clip > 0.0:
+                    _Wq.clamp_(-self.w_clip, self.w_clip)
+                # 重pack（`_pack4` 是 numpy 路径 → 一次 D2H；见 P151 代价说明）
+                _npW = _Wq.detach().float().cpu().numpy()
+                _pk, self._wscale = _pack4(_npW, _lut, family=_fam)
+                self.W.copy_(torch.tensor(
+                    _pk.reshape(self.W.shape), device=self.device,
+                    dtype=torch.uint8))
+                return nll_dev
             if self.W.dtype == self._cdtype:
                 self.W.addcmul_(dp.reshape(-1, 1), g, value=-float(eta))
                 if self.w_clip > 0.0:
@@ -1180,10 +1323,12 @@ def _unsupported_reason(cfg) -> str | None:
     #   ⚠ 探测**不在这里**做（那是运行期的事，见 `AccelReadout.__init__`），
     #     能力表只负责「不能静态判定」的配置。
     _rd = str(getattr(cfg, "readout_dtype", "fp32"))
-    if _rd in ("int4", "fp4"):
-        # fp4/int4 维持 P86 的禁用（**未被本次指令解除**——指令只说 fp8）。
-        return ("readout_dtype=int4（910B 无 INT4 矩阵乘单元，只能反量化→FP16 "
-                "再算，省存储不省算力；int4 请用 --accel cpu 的 4-bit 打包核）")
+    # ⚠ P151（fhz 2026-10-03：「解禁 fp8, fp4, int4, int8」）：4-bit 的禁令**解除**。
+    #   P86 当初禁它是因为「910B 无 INT4 矩阵乘单元」—— 但那个理由对
+    #   **稀疏 gather-GEMV** 不成立：4-bit 在本实现里是**uint8 打包 + fp16 计算域**
+    #   （`_pack4`/`_unpack4`，见 P151），**不需要 int4 矩阵乘单元**。
+    #   存储省 8×（vs fp32）是真实的，算力与 fp16 相同。
+    #   ⚠ 代价：**每步要 unpack 出 fp16 副本** → 是否真省流量要看昇腾 msprof。
     # P105：int8 已实现（存储 int8 + fp16 计算，构造期探测失败时在 AccelReadout
     # 内部**永久回落 fp16**，不走 numba 回落）。旧名 fp8 是 int8 的别名（P100
     # 正名），同样放行。加新 dtype 时务必同步这张能力表（P92 就是漏了 int8 才

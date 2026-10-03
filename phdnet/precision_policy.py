@@ -138,3 +138,33 @@ def unsupported_message(res: dict, device: str = "") -> str:
                  "；② 检查算子库/CANN 版本是否支持低精度；"
                  "③ 若设备内存吃紧，可试 `int8`/`fp8`（1 字节）。")
     return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 进程级探测缓存（P151，fhz 2026-10-03：「训练启动时判断一次即可」）
+# ══════════════════════════════════════════════════════════════════════════
+#为什么需要：`AccelReadout` 每步都会被构造吗？不——但**每次 `pick_readout_backend`
+# 都会构造一个**，而真实训练里可能因为resume / 多臂 A/B 而反复构造。
+#   探测本身要真跑 matmul（8×8 小矩阵，单次 ~0.1~1 ms，fp8 首次还要 JIT），
+#   重复做纯属浪费，且**同一进程内设备能力不会变**。
+# ⚠ 缓存键必须含 `device`（CPU 与 NPU 能力不同）。
+_CACHE: dict = {}
+
+
+def resolve_precision_cached(requested: str, probe, device: str = "cpu",
+                             use_cache: bool = True) -> dict:
+    """`resolve_precision` + 进程级缓存（fhz：启动时判断一次即可）。"""
+    key = (str(requested or "").lower(), str(device))
+    if use_cache and key in _CACHE:
+        hit = _CACHE[key]
+        return dict(hit, cached=True)
+    res = resolve_precision(requested, probe, device)
+    res["cached"] = False
+    if use_cache:
+        _CACHE[key] = dict(res)
+    return res
+
+
+def clear_cache() -> None:
+    """清缓存（测试用；换设备/换驱动后必须调用）。"""
+    _CACHE.clear()
