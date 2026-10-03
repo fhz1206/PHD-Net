@@ -262,8 +262,9 @@ def main() -> None:
         print("  [SKIP] D 有加速器时 auto 上设备（本机无加速器）")
 
     # ── E：精度档 ──
-    print("[E] 精度档")
-    for dt in ("fp32", "fp16", "bf16", "int8"):
+    # ⚠ P163（fhz 2026-10-03）：**int 族已整体禁用** → 只测 fp 族
+    print("[E] 精度档（int 族已禁用，P163）")
+    for dt in ("fp32", "fp16", "bf16"):
         try:
             m = AccelReadout(n_h, n_out, None, device="cpu", dtype=dt, w0=W0)
             y = m.forward(h)
@@ -271,112 +272,35 @@ def main() -> None:
                   and np.isfinite(y).all(), f"max={np.abs(y).max():.4f}")
         except Exception as e:                                # noqa: BLE001
             check(f"E dtype={dt} 前向可用", False, f"{type(e).__name__}: {e}")
+    for dt in ("int8", "int16", "int32"):
+        try:
+            AccelReadout(n_h, n_out, None, device="cpu", dtype=dt, w0=W0)
+            check(f"E dtype={dt} 应被禁用（P163）", False, "竟然构造成功")
+        except Exception as e:                                # noqa: BLE001
+            check(f"E dtype={dt} 应被禁用（P163）", ("int 族" in str(e) or "不支持 dtype" in str(e)),
+                  f"{type(e).__name__}")
 
     # ── F：int8 读出（P105，fhz 2026-10-01 决策）──
     # 语义：存储 int8（per-tensor scale = 2*max|W|/127，2× 余量不重标定）；
     # forward 每步反量化到 fp16 再 matmul；learn 在 fp32 域算 dp⊗ht 后重量化
     # 写回。精度约束（知情取舍）：非目标行 |dp|≈1e-6 ≪ int8 步长 ≈ max|W|/127，
     # 其更新被量化吃掉（int8 存储降 4× 访存的代价）；目标行 |dp|≈1 必须保留。
-    print("[F] int8 存储 / 前向 / 目标行更新 / 多步稳定性")
-    _n8, _h8 = 100, 64
-    _rng8 = np.random.default_rng(20261001)
-    _W08 = (_rng8.normal(0.0, 0.05, (_n8, _h8)) * np.sqrt(_h8)).astype(np.float32)
-    _h8v = _rng8.normal(0.0, 1.0, _h8).astype(np.float32)
-    _tgt8 = np.zeros(_n8, dtype=np.float32)
-    _tgt8[7] = 1.0
-    try:
-        ro_i = AccelReadout(_h8, _n8, None, device="cpu", dtype="int8", w0=_W08)
-        check("F1 int8 构造且 W.dtype == torch.int8", ro_i.W.dtype == torch.int8,
-              f"dtype={ro_i.W.dtype}")
-        _amax = float(np.abs(_W08).max())
-        check("F1 scale = 2*max|W|/127（2× 余量纪律）",
-              abs(ro_i._wscale - 2.0 * _amax / 127.0) < 1e-9,         # noqa: SLF001
-              f"wscale={ro_i._wscale:.6g}（码余量 = {127 - _amax / ro_i._wscale:.1f}）")
-        check("F1 存储 1 B/权重",
-              ro_i.stats()["storage_MB"] * 1e6 == ro_i.n_synapses(),
-              f"{ro_i.stats()['storage_MB'] * 1e6:.0f} B / {ro_i.n_synapses():,} 权重")
-        _y8 = ro_i.forward_dev(_h8v)
-        check("F2 forward_dev 返回有限值", torch.is_tensor(_y8)
-              and bool(torch.isfinite(_y8).all()),
-              f"max|y|={float(_y8.abs().max()):.4f}")
-        # 目标行更新 vs fp16 参考对拍：同 W0、同 (h, target, η)。
-        ro_r16 = AccelReadout(_h8, _n8, None, device="cpu", dtype="fp16", w0=_W08)
-        _W0q = ro_i.W_cpu().copy()             # int8 反量化后的实值（共同起点）
-        ro_r16.load_W(_W0q)
-        _nll_i = ro_i.learn_softmax(_h8v, _tgt8, 0.05, target_idx=7)
-        _nll_r = ro_r16.learn_softmax(_h8v, _tgt8, 0.05, target_idx=7)
-        _d_i = ro_i.W_cpu()[7] - _W0q[7]
-        _d_r = ro_r16.W_cpu()[7] - _W0q[7]
-        _cos = float(np.dot(_d_i, _d_r)
-                     / (np.linalg.norm(_d_i) * np.linalg.norm(_d_r) + 1e-30))
-        _mag = float(np.abs(_d_i).max()) / max(1e-30, float(np.abs(_d_r).max()))
-        check("F3 目标行更新方向与 fp16 参考一致（cos ≥ 0.99）",
-              0.99 <= _cos <= 1.0 + 1e-9, f"cos={_cos:.4f}")
-        check("F3 目标行更新幅度合理（0.5 ≤ |Δ|int8/|Δ|fp16 ≤ 1.5）",
-              0.5 <= _mag <= 1.5, f"|Δ_i|={np.abs(_d_i).max():.4f} "
-              f"|Δ_r|={np.abs(_d_r).max():.4f} 比值={_mag:.3f}")
-        check("F3 NLL 与 fp16 参考容差一致（≤1e-4 相对）",
-              abs(_nll_i - _nll_r) <= 1e-4 * max(1e-12, abs(_nll_r)),
-              f"{_nll_i:.6f} vs {_nll_r:.6f}")
-        # 非目标行：更新被量化吃掉是**知情取舍**——绝大多数码应纹丝不动
-        # （个别元素恰跨半步长边界 ±1 码属 RNE 正常舍入，值变 ≤1 步长）。
-        _dn = np.abs(ro_i.W[3].cpu().numpy().astype(np.int64)
-                     - np.round(_W0q[3] / ro_i._wscale).astype(np.int64))  # noqa: SLF001
-        check("F3 非目标行更新被量化吸收（码变化 ≤1 步，知情取舍）",
-              int(_dn.max()) <= 1,
-              f"非目标行最大码变化 = {int(_dn.max())}"
-              f"（≤1 码 = {ro_i._wscale:.3g} 实值）")                      # noqa: SLF001
-        for _k in range(20):
-            _yk = ro_i.forward_dev(_h8v)
-            ro_i.learn_softmax(_h8v, _tgt8, 0.05, target_idx=_k % _n8)
-        _yk = ro_i.forward_dev(_h8v)
-        check("F4 20 步 learn+forward 无崩溃无 NaN",
-              bool(torch.isfinite(_yk).all())
-              and int(ro_i.W.min()) >= -127 and int(ro_i.W.max()) <= 127,
-              f"码范围 [{int(ro_i.W.min())}, {int(ro_i.W.max())}] ⊆ [-127, 127]")
-        # w_clip：int8 的 clamp_ 对码张量无意义 → 改为重量化前裁剪。
-        _ro_c = AccelReadout(_h8, _n8, None, device="cpu", dtype="int8",
-                             w0=_W08, w_clip=0.05)
-        _ro_c.learn_softmax(_h8v, _tgt8, 0.05, target_idx=7)
-        _lim = int(np.floor(0.05 / _ro_c._wscale + 1e-9))                    # noqa: SLF001
-        check("F5 w_clip 在重量化时裁剪（码 ≤ w_clip/scale）",
-              int(_ro_c.W.abs().max()) <= _lim,
-              f"max|码|={int(_ro_c.W.abs().max())} ≤ {_lim}（w_clip=0.05）")
-        # P148：`dtype="fp8"` 已**不再是 int8 的别名**（P147 起它是独立路径：
-        # 有原生 fp8 算子就用 fp8，否则转int8），且 fp8 会被**运行时探测**。
-        # → 断言改为「fp8 走的是 fp8 或 int8，且**探测被真正执行过**」
-        #    （审计 BUG-1：此前 fp8 被别名归一成 int8，探测是死代码）。
-        _ro_a = AccelReadout(_h8, _n8, None, device="cpu", dtype="fp8", w0=_W08)
-        _is8 = str(_ro_a.W.dtype) in ("torch.int8", "torch.float8_e4m3fn")
-        check("F6a dtype=fp8 构造出 8-bit 码本（fp8 或 int8）",
-              _is8, f"W.dtype={_ro_a.W.dtype}")
-        # P149：**存储 fp8 / 计算 fp16** 的分离契约。
-        #   我 P148 把 `_cdtype` 也设成 fp8 → 训练直接崩
-        #   （"Promotion for Float8 Types is not supported"），改了三处才对。
-        #   这里把它钉死，防止再次混淆「存储域」与「计算域」。
-        _csr8 = _random_csr_for(_n8, _h8, 8)          # noqa: F821
-        _f8 = AccelReadout(_h8, _n8, None, device="cpu", dtype="fp8",
-                           conn_k=8, csr=_csr8)
-        check("F6c fp8 存储时 `_cdtype`（计算域）**不是 fp8**",
-              getattr(_f8, "_cdtype", None) != torch.float8_e4m3fn,
-              f"存储={_f8.W.dtype} 计算={getattr(_f8, '_cdtype', None)}")
-        check("F6d fp8 完整一步**不抛异常**（存储/计算分离可跑通）",
-              _fp8_step_ok(_f8), "forward_dev + learn_softmax")
-        check("F6b fp8 **运行时探测被真正执行**"
-              + ("（原生 fp8）" if getattr(_ro_a, "_fp8_native", False)
-                 else "（回落 int8）" if getattr(
-                     _ro_a, "_fp8_fallback_to_int8", False) else "（未执行←回归!)"),
-              getattr(_ro_a, "_fp8_native", False)
-              or getattr(_ro_a, "_fp8_fallback_to_int8", False)
-              or getattr(_ro_a, "_fp8_cap", None) is not None)
-        # 检查点往返：W_cpu 给实值、load_W 重量化，一次往返后稳定（不再漂移）。
-        _v1 = ro_i.W_cpu()
-        ro_i.load_W(_v1)
-        _v2 = ro_i.W_cpu()
-        check("F7 W_cpu/load_W 实值往返稳定", np.array_equal(_v1, _v2),
-              f"max|Δ|={float(np.abs(_v1 - _v2).max()):.2e}")
-    except Exception as e:                                    # noqa: BLE001
-        check("F1 int8 构造", False, f"{type(e).__name__}: {e}")
+    # ⚠ P163（fhz2026-10-03）：**int 族已整体禁用** → 原来这整段 int8 存储/
+    #   前向/目标行更新/往返测试**不再适用**，改为断言「int 请求被拒绝」。
+    #依据：Ascend910B4 生产实测 fp8 与 int8 均不可用、实际落到 fp16；
+    #   P156 实测 int8 在稀疏 gather-GEMV 下比 fp16 慢 1.2×。
+    print("[F] int 族已禁用（P163）—— 请求必须被拒绝")
+    for _dt in ("int8", "int16", "int32"):
+        _rej = False
+        try:
+            AccelReadout(64, 100, None, device="cpu", dtype=_dt)
+        except (ValueError, RuntimeError) as _e:
+            _rej = ("int 族" in str(_e) or "不支持 dtype" in str(_e))
+        except Exception:                                    # noqa: BLE001
+            _rej = False
+        check(f"F1 {_dt} 构造被拒绝（P163 硬约束）", _rej,
+              "int 族已整体禁用")
+
 
     print("-" * 76)
     if _FAILURES:

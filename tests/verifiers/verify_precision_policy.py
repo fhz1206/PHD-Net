@@ -3,6 +3,12 @@
 覆盖 fhz 2026-10-03 指令的四点：
   1. 「fp 不支持转 int，int 不支持转 fp，两者都不行再报错」
   2. 「解禁 fp8 / fp4 / int4 / int8」
+
+  ⚠ **P163（fhz 2026-10-03）**：**int 族已整体禁用**、fp8/fp4 移出候选。
+    本门禁原本大量测 int 路径，现已改为断言「**int 请求应当被拒绝**」
+    且 fp 族链上**不含** int/fp8/fp4 —— 即禁用本身成了被测契约。
+    依据：Ascend910B4 生产实测 fp8/int8 均不可用、实际落到 fp16；
+    P156 实测 int8 在稀疏 gather-GEMV 下比 fp16 慢 1.2×。
   3. 「默认走 fp8 和 fp16」
   4. 「训练启动时判断一次即可」
 
@@ -52,43 +58,59 @@ def main() -> int:
 
     # ── A. 降级链的顺序契约 ──────────────────────────────────────────
     print("\n[A] 降级链顺序（fhz：fp→int→fp→报错）")
-    for req in ("fp8", "int8", "fp16"):
+    for req in ("fp8", "fp16"):          # P163: 不再测 int8（已禁用）
         ch = candidate_order(req)
-        # fp32 必须在 int 族**之后**（否则 fp8 永远轮不到 int8）
-        i_fp32 = ch.index("fp32")
-        i_int = min((ch.index(x) for x in ("int8", "int4", "int16", "int32")
-                     if x in ch), default=len(ch))
-        check(f"A1 {req} 的链里 fp32 排在 int 族之后",
-              i_fp32 > i_int,
-              f"fp32@{i_fp32} vs int@{i_int}：{' → '.join(ch)}")
+        # ⚠ P163：原断言「fp32 必须在 int 族之后」**已过时**（int 族被禁）。
+        #   改为：**链上不得出现任何 int / fp8 / fp4**（禁用本身即被测契约）。
+        leaked = [x for x in ch if x in ("int8", "int16", "int32",
+                                         "int4", "fp8", "fp4")]
+        if leaked:
+            print("  [FAIL] %s 的链里泄漏了禁用项：%s" % (ch, leaked))
+            check("P163 %s 链不含禁用项" % ch, False, str(leaked))
+        else:
+            check("P163 %s 链不含禁用项" % ch, True)
+        # ⚠ P163：int 族禁用 + fp8/fp4 移出候选后，**fp32 可能不在链上**
+        #   （例如 fp16 → bf16）。改为「不在链上就跳过」。
+        if "fp32" not in ch:
+            print("  [skip] %s 的链里无 fp32（P163），跳过该断言" % ch[0])
+            i_fp32 = -1
+        # ⚠ P163：int 族已禁用 → **fp32 不再是链尾**（链尾是 bf16/fp16），
+        #   原「fp32 排在 int 族之后」的契约已作废。
+        check(f"A1 {req} 的链尾在 fp 族内（无 int 兜底）",
+              ch[-1] in ("fp32", "fp16", "bf16"),
+              f"链={ch}")
     check("A2 链里无重复项",
           all(len(candidate_order(r)) == len(set(candidate_order(r)))
-              for r in ("fp8", "int8", "fp4", "fp16", "int4")),
+              for r in ("fp8", "fp16", "bf16", "fp32")),
           "")
-    check("A3 链尾是 fp32（公共终点兜底）",
-          candidate_order("fp8")[-1] == "fp32",
+    check("A3 链尾是 fp 族（P163：fp32 不再强制兜底）",
+          candidate_order("fp8")[-1] in ("fp32", "fp16", "bf16"),
           f"尾部={candidate_order('fp8')[-1]}")
 
     # ── B. 降级行为 ─────────────────────────────────────────────────
     print("\n[B] 降级行为")
-    r1 = resolve_precision("fp8", lambda dt: (dt == "fp16", "fp8 无算子"))
-    check("B1 fp8 不可用 → 降到 fp16（不是 fp32）",
-          r1["dtype"] == "fp16" and r1["downgraded"],
+    r1 = resolve_precision("fp16", lambda dt: (dt == "bf16", "fp16 无算子"))
+    check("B1 fp16 不可用 → 降到 bf16",
+          r1["dtype"] == "bf16" and r1["downgraded"],
           f"落地={r1['dtype']}")
 
-    r2 = resolve_precision("fp8",
-                           lambda dt: (dt == "int8", "")
-                           if dt not in ("fp8", "fp16", "bf16")
-                           else (False, "fp 族全挂"))
-    check("B2 fp 族全挂 → **先试 int**（符合指令）",
-          r2["dtype"] == "int8", f"落地={r2['dtype']}")
+    # ⚠ P163：原 B2「fp 全挂 → 先试 int」**已作废**（int 被禁）。
+    #   新契约：fp 全挂 → dtype=None（**不再回落到 int**）。
+    r2 = resolve_precision("fp16", lambda dt: (False, "fp 族全挂"))
+    check("B2 fp 族全挂 → **不回落到 int**（P163）",
+          r2["dtype"] is None or r2["dtype"] == "fp32",
+          f"落地={r2['dtype']}")
 
-    r3 = resolve_precision("int8",
-                           lambda dt: (dt == "fp16", "")
-                           if dt not in ("int8", "int16", "int32")
-                           else (False, "int 族全挂"))
-    check("B3 int 族全挂 → 回 fp（符合指令）",
-          r3["dtype"] == "fp16", f"落地={r3['dtype']}")
+    # ⚠ P163：原 B3「int 族全挂 → 回 fp」→ 现在 **int 请求直接被拒**。
+    _int_rejected = False
+    try:
+        candidate_order("int8")
+    except ValueError:
+        _int_rejected = True
+    except Exception:
+        pass
+    check("B3 int 请求被拒绝（P163 硬约束）", _int_rejected,
+          "candidate_order('int8') 应抛 ValueError")
 
     r4 = resolve_precision("fp4", lambda dt: (False, "全不支持"))
     check("B4 全链不支持 → dtype=None（调用方必须报错）",
@@ -118,7 +140,8 @@ def main() -> int:
     clear_cache()
 
     # ── D. 七种精度端到端（解禁 fp8/fp4/int4/int8）──────────────────
-    print("\n[D] 七种精度端到端（稀疏，真实规模）")
+    print("\n[D] fp 族端到端（稀疏，真实规模）+ int 禁用契约")
+    # ⚠ P163（fhz 2026-10-03）：**int 族已整体禁用** → D 段只测 fp 族
     from phdnet.sparse_pc import _random_csr
     n_out, n_h, k = 2048, 512, 64
     csr = _random_csr(np.random.default_rng(3), n_out, n_h, k,
@@ -127,7 +150,7 @@ def main() -> int:
     tgt = np.zeros(n_out, np.float32)
     tgt[0] = 1.0
     nlls = {}
-    for dt in ("fp32", "fp16", "bf16", "fp8", "int8"):
+    for dt in ("fp32", "fp16", "bf16"):
         clear_cache()
         try:
             ro = AccelReadout(n_h, n_out, np.random.default_rng(3),
@@ -142,12 +165,22 @@ def main() -> int:
         except Exception as e:                                # noqa: BLE001
             check(f"D  {dt} 完整一步", False,
                   f"{type(e).__name__}: {str(e)[:60]}")
-    # 访存阶梯必须单调不增
-    if len(nlls) == 5:
-        mems = [nlls[d][2] for d in ("fp32", "fp16", "fp8")]
-        check("D8 访存阶梯 fp32>fp16>fp8（真的省流量）",
-              all(a > b for a, b in zip(mems, mems[1:])),
-              " → ".join(f"{m:.2f}" for m in mems))
+    # P163 硬契约：int 请求**必须被拒绝**（而不是静默降级）
+    for dt in ("int8", "int16", "int32"):
+        _rej = False
+        try:
+            candidate_order(dt)
+        except ValueError:
+            _rej = True
+        except Exception:                                    # noqa: BLE001
+            pass
+        check(f"D  {dt} 已被禁用（请求即拒绝）", _rej, "P163")
+    # 访存阶梯必须单调不增（fp32 > fp16 > bf16 同字节，仅验非增）
+    if len(nlls) == 3:
+        mems = [nlls[d][2] for d in ("fp32", "fp16", "bf16")]
+        check("D8 访存阶梯 fp32 >= fp16 == bf16（同字节）",
+              mems[0] >= mems[1] >= mems[2],
+              " | ".join(f"{m:.2f} MiB" for m in mems))
 
     # ── E. 4-bit 打包契约 ────────────────────────────────────────────
     print("\n[E] 4-bit 打包（这是 P151 踩坑最多的地方）")
@@ -175,41 +208,25 @@ def main() -> int:
               abs(float((lut * sc)[c0 >> 4]) - up[0, 0]) < 1e-5,
               f"byte=0x{c0:02x} 偶={c0>>4}→{up[0,0]:.4f}")
 
-    # ── E2. P152：fp4/int4 已禁用 + fp8 优先降级到 int8 ───────────────
-    print("\n[E2] P152：4-bit 禁用 + fp8→int8 降级")
+    # ── E2. P163：4-bit + int 族禁用，fp8/fp4 移出候选链 ─────────────────
+    print("\n[E2] P163：int 族禁用 + fp8/fp4 移出候选链")
     for dt in ("fp4", "int4"):
-        check(f"E2.1 {dt} 已从 FAMILIES 移除（P152 禁用）",
-              dt not in FAMILIES, "")
+        check(f"E2.1 {dt} 已从 FAMILIES 移除", dt not in FAMILIES, "")
     ch8 = candidate_order("fp8")
-    check("E2.2 fp8 的链**第二个是 int8**（fhz 2026-10-03 指令）",
-          ch8[1] == "int8",
-          f"→ {' → '.join(ch8)}")
-    check("E2.3 fp8 之后先 int8 而非 fp16（访存：1 字节 vs 2 字节）",
-          ch8.index("int8") < ch8.index("fp16"), "")
-    # int8 计算域（fp8 存储 + int8 计算）
-    clear_cache()
-    nll_fp16 = None
-    try:
-        ro = AccelReadout(n_h, n_out, np.random.default_rng(3), device="cpu",
-                          dtype="fp8", conn_k=k, csr=csr, int8_compute=False)
-        nll_fp16 = float(ro.learn_softmax(h, tgt, 0.15, y_pre=ro.forward_dev(h),
-                                          target_idx=0))
-    except Exception:                                        # noqa: BLE001
-        pass
-    clear_cache()
-    nll_i8 = None
-    try:
-        ro = AccelReadout(n_h, n_out, np.random.default_rng(3), device="cpu",
-                          dtype="fp8", conn_k=k, csr=csr, int8_compute=True)
-        nll_i8 = float(ro.learn_softmax(h, tgt, 0.15, y_pre=ro.forward_dev(h),
-                                        target_idx=0))
-    except Exception:                                        # noqa: BLE001
-        pass
-    check("E2.4 fp8 存储 + int8 计算域**能跑且 nll 接近 fp16 计算域**"
-          + (f"（{nll_fp16:.4f} → {nll_i8:.4f}）" if nll_fp16 else ""),
-          nll_i8 is not None and abs(nll_i8 - (nll_fp16 or nll_i8))
-          <= 0.05 * max(1e-9, nll_fp16 or 1.0),
-          "（P152：社区是fp16 计算，int8 计算是双重量化，故允许 ~5% 差）")
+    check("E2.2 fp8 请求落到 fp 族（P163：int 已禁用）",
+          all(x not in ("int8", "int16", "int32", "int4", "fp4")
+              for x in ch8),
+          " -> ".join(ch8))
+    check("E2.3 fp8 链上无 int 族（P163 硬约束）",
+          not any(x.startswith("int") for x in ch8),
+          " -> ".join(ch8))
+    # P163：默认精度 = fp16（刚刚在910B 上验证通过的那一版）
+    from phdnet.precision_policy import (DEFAULT_MODEL_DTYPE,
+                                         INT_FAMILY_ENABLED)
+    check("E2.4 默认模型精度 = fp16（P163）",
+          DEFAULT_MODEL_DTYPE == "fp16", f"={DEFAULT_MODEL_DTYPE}")
+    check("E2.5 int 族开关 = False（P163）",
+          INT_FAMILY_ENABLED is False, f"={INT_FAMILY_ENABLED}")
 
     # ── F. 能力表：fp8/int8 放行 ─────────────────────────────────────
     print("\n[F] 能力表")
