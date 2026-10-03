@@ -1,0 +1,26 @@
+[package]
+name = "phdnet-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "PHD-Net 的 Rust 算子库：M1–M6 的无状态数值核 + CANN/ACL 后端（Python 是顶层）"
+license = "MIT"
+
+# ⚠ 零依赖是刻意的（见 docs/01-架构与设计.md 的「Rust 版设计决策」）：
+#   我们要的「零运行时开销」恰恰要求**不经过任何 Python 绑定层**。
+#   - 不依赖 ndarray：所有缓冲区用裸指针 + 显式 stride（本项目全部是 C 连续）
+#   - 不依赖 tch/libtorch：那会把 PyTorch 的 dispatch 开销带回来，而我们要消除它
+#   - 不依赖 cudarc/半成品 CANN crate：ACL 的正确绑定必须自己写（见 acl.rs）
+[dependencies]
+
+[lib]
+name = "phdnet_rs"
+# cdylib → Python 侧用 ctypes 加载（**Python 是顶层**）
+# rlib   → 便于 Rust 单元测试（cargo test）
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = 3        # 读出是带宽/延迟受限，不是算力受限
+lto = "fat"          # 跨模块内联，减少边界处的 load/store
+codegen-units = 1
+panic = "abort"      # 少一层 landing pad

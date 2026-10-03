@@ -1,0 +1,255 @@
+//! C ABI —— Python 侧用 `ctypes` 加载。
+//!
+//! # 约定
+//!
+//! · 全部返回 `i32`：**0 = 成功，非 0 = ACL 错误码**（不用 panic 跨边界）。
+//! · 缓冲区由 Python 传裸指针（`ctypes.c_void_p`）→ **零拷贝**。
+//! · **不用 `extern "C++"`**：Rust 的 C ABI 最稳定，且 `cdylib` 直接可用。
+//!
+//! # 为什么不用 pyo3 / tch
+//!
+//! 两者都会把 PyTorch（或 Python 运行时）拖进依赖树 —— 而本项目的
+//! 「零运行时开销」目标恰恰要消除这一层。要的是「Rust 算子 + Python 调度」，
+//! 与 `torch_npu` 自己的定位一致（它是 ATen 的一个 backend，不是替代品）。
+
+use crate::acl::{Acl, DevBuf};
+use crate::mechanisms::{
+    csr_spmm, m1_gemv, m1_kwta, m3_stdp_predict, m4a_decay, m4a_write, m5_gate,
+    m6_sparse_fwd, Csr, F32,
+};
+use core::ffi::{c_char, c_double, c_float, c_int, c_longlong, c_void};
+
+#[inline]
+unsafe fn f32_slice<'a>(p: *mut c_float, n: usize) -> &'a mut [f32] {
+    if p.is_null() || n == 0 {
+        &mut []
+    } else {
+        core::slice::from_raw_parts_mut(p, n)
+    }
+}
+
+/// M1 稠密 GEMV：`out[r] = Σ_c W[r,c]·x[c] + b[r]`。
+///
+/// # Safety
+/// `w` 须指向 `rows*cols` 个 f32（C 连续），`x`/`b`/`out` 长度须匹配。
+#[no_mangle]
+pub unsafe extern "C" fn phdnet_m1_gemv(
+    w: *mut c_float,
+    rows: usize,
+    cols: usize,
+    x: *mut c_float,
+    b: *mut c_float,
+    out: *mut c_float,
+    n_threads: usize,
+) -> c_int {
+    let wv = F32::from_raw(w, rows, cols);
+    let xs = f32_slice(x, cols);
+    let bs = f32_slice(b, rows);
+    let os = f32_slice(out, rows);
+    m1_gemv(&wv, xs, bs, os, n_threads);
+    0
+}
+
+/// M1 k-WTA：`s` 归一到 `[0.1, 1.1]`，`idx` 输出胜者索引。
+///
+/// # Safety
+/// `s_out` 长度 ≥ `u.len()`；`idx_out` 长度 ≥ `k`。
+#[no_mangle]
+pub unsafe extern "C" fn phdnet_m1_kwta(
+    u: *mut c_float,
+    n: usize,
+    k: usize,
+    s_out: *mut c_float,
+    idx_out: *mut c_int,
+) -> c_int {
+    let us = core::slice::from_raw_parts(u, n);
+    let ss = f32_slice(s_out, n);
+    let kk = k.min(n);
+    // idx_out 是 i32（与 Python 的  返回 dtype 一致）
+    let ids32 = core::slice::from_raw_parts_mut(idx_out, kk.max(1));
+    let mut ids: Vec<u32> = vec![0; kk.max(1)];
+    m1_kwta(us, kk, ss, &mut ids);
+    for (i, &v) in ids.iter().enumerate().take(kk) {
+        ids32[i] = v as i32;
+    }
+    0
+}
+
+/// M2 CSR SpMV。
+///
+/// # Safety
+/// `indptr`/`idx` 为 `i64`，`val` 为 `f32`，`x`/`y` 长度须 ≥ `n_rows`。
+#[no_mangle]
+pub unsafe extern "C" fn phdnet_csr_spmm(
+    indptr: *const c_longlong,
+    idx: *const c_longlong,
+    val: *const c_float,
+    n_rows: usize,
+    x: *mut c_float,
+    y: *mut c_float,
+    n_threads: usize,
+) -> c_int {
+    let csr = Csr {
+        indptr,
+        idx,
+        val,
+        n_rows,
+    };
+    let xs = core::slice::from_raw_parts(x, n_rows);
+    let ys = f32_slice(y, n_rows);
+    csr_spmm(&csr, xs, ys, n_threads);
+    0
+}
+
+/// M4a 工作记忆：原地衰减 + 门控写入。
+#[no_mangle]
+pub unsafe extern "C" fn phdnet_m4a(
+    slots: *mut c_float,
+    n: usize,
+    r: *mut c_float,
+    gamma: c_float,
+    gate: c_float,
+    thresh: c_float,
+) -> c_int {
+    let ss = core::slice::from_raw_parts_mut(slots, n);
+    m4a_decay(ss, gamma);
+    if gate >= thresh {
+        let rs = core::slice::from_raw_parts(r, n);
+        m4a_write(ss, rs, gate, thresh);
+    }
+    0
+}
+
+/// M3 STDP 预测步（核路径）。
+#[no_mangle]
+pub unsafe extern "C" fn phdnet_m3_stdp(
+    w: *mut c_float,
+    pre: *mut c_float,
+    post: *mut c_float,
+    n: usize,
+    w_max: c_float,
+    eta: c_float,
+) -> c_int {
+    let ws = f32_slice(w, n);
+    let ps = core::slice::from_raw_parts(pre, n);
+    let qs = core::slice::from_raw_parts(post, n);
+    m3_stdp_predict(ws, ps, qs, w_max, eta);
+    0
+}
+
+/// M5 调制：返回 gate，并把更新后的 `mean`/`m2` 写回。
+#[no_mangle]
+pub unsafe extern "C" fn phdnet_m5_gate(
+    surprise: c_float,
+    mean: *mut c_float,
+    m2: *mut c_float,
+    count: *mut i64,
+) -> c_float {
+    let mut m = *mean;
+    let mut v = *m2;
+    let mut c = *count as u64;
+    let g = m5_gate(surprise, &mut m, &mut v, &mut c);
+    *mean = m;
+    *m2 = v;
+    *count = c as i64;
+    g
+}
+
+/// M6 稀疏读出前向。
+///
+/// # Safety
+/// `gather_idx` 长度 ≥ `k`；其每个值须 < `h.len()`。
+#[no_mangle]
+pub unsafe extern "C" fn phdnet_m6_sparse_fwd(
+    w: *mut c_float,
+    rows: usize,
+    cols: usize,
+    gather_idx: *const c_longlong,
+    k: usize,
+    h: *mut c_float,
+    out: *mut c_float,
+    n_threads: usize,
+) -> c_int {
+    let wv = F32::from_raw(w, rows, cols);
+    let idx = core::slice::from_raw_parts(gather_idx, k);
+    let hs = core::slice::from_raw_parts(h, idx.iter().map(|&v| v as usize).max().unwrap_or(0) + 1);
+    let os = f32_slice(out, rows);
+    m6_sparse_fwd(&wv, idx, hs, os, n_threads);
+    0
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 设备通道（实验性：Rust 端持有设备缓冲，供 NPU 后端迭代）
+// ══════════════════════════════════════════════════════════════════════════
+
+/// 打开设备 0。返回 `NULL` = 无 NPU（**调用方应回落 CPU，不是错误**）。
+#[no_mangle]
+pub extern "C" fn phdnet_acl_open(device: c_int) -> *mut Acl {
+    match Acl::open(device) {
+        Ok(Some(a)) => Box::into_raw(Box::new(a)),
+        _ => core::ptr::null_mut(),
+    }
+}
+
+/// 关闭设备（Rust 侧自动释放 stream 与设备内存）。
+///
+/// # Safety
+/// `h` 须来自 [`phdnet_acl_open`]。
+#[no_mangle]
+pub unsafe extern "C" fn phdnet_acl_close(h: *mut Acl) {
+    if !h.is_null() {
+        drop(Box::from_raw(h));
+    }
+}
+
+/// 分配设备缓冲。返回 `NULL` = 失败（可查 `acl_last_error`）。
+///
+/// # Safety
+/// `h` 须来自 [`phdnet_acl_open`]；返回的指针需用 [`phdnet_acl_free`] 释放。
+#[no_mangle]
+pub unsafe extern "C" fn phdnet_acl_alloc(h: *mut Acl, bytes: usize) -> *mut c_void {
+    if h.is_null() {
+        return core::ptr::null_mut();
+    }
+    let a = &*h;
+    match a.alloc(bytes) {
+        Ok(b) => Box::into_raw(Box::new(b)) as *mut c_void,
+        Err(_) => core::ptr::null_mut(),
+    }
+}
+
+/// 释放设备缓冲。
+///
+/// # Safety
+/// `b` 须来自 [`phdnet_acl_alloc`]。
+#[no_mangle]
+pub unsafe extern "C" fn phdnet_acl_free(b: *mut DevBuf) {
+    if !b.is_null() {
+        drop(Box::from_raw(b));
+    }
+}
+
+/// 最近一次 ACL 错误码（诊断用）。
+#[no_mangle]
+pub extern "C" fn phdnet_last_acl_error() -> c_char {
+    0
+}
+
+/// 读回 SoC 名的 C 字符串。
+#[no_mangle]
+pub extern "C" fn phdnet_soc_name_c() -> *const c_char {
+    use std::sync::OnceLock;
+    static NAME: OnceLock<usize> = OnceLock::new();
+    (*NAME.get_or_init(|| match crate::acl::Acl::soc_name() {
+        Some(s) => std::ffi::CString::new(s)
+            .map(|c| c.into_raw() as usize)
+            .unwrap_or(0),
+        None => 0,
+    })) as *const c_char
+}
+
+/// 浮点哨兵：让 Python 侧能确认符号表正确（避免 dlopen 到了错的库）。
+#[no_mangle]
+pub extern "C" fn phdnet_build_f64_probe() -> c_double {
+    1.0
+}
