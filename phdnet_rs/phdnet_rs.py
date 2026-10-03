@@ -38,6 +38,9 @@ class RustKernels:
         L.phdnet_m1_kwta.restype = ctypes.c_int
         L.phdnet_m1_kwta.argtypes = [f32p, ctypes.c_size_t, ctypes.c_size_t,
                                      f32p, i32p]
+        L.phdnet_csr_spmm_simd.restype = ctypes.c_int
+        L.phdnet_csr_spmm_simd.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
+                                            f32p, f32p, ctypes.c_size_t]
         L.phdnet_csr_spmm.restype = ctypes.c_int
         L.phdnet_csr_spmm.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
                                       f32p, f32p, ctypes.c_size_t]
@@ -169,6 +172,23 @@ class RustKernels:
             ctypes.c_size_t(n_threads))
 
     # ── M4a / M3 / M5 ───────────────────────────────────────────────────
+    def csr_spmm_simd(self, indptr, idx, val, x, out, n_threads: int = 8) -> None:
+        """M2 CSR SpMV 的 **SIMD 路径**（P173，fp32）。
+
+        ⚠ **收益有限**（与 GEMV 不同）：SpMV 瓶颈在**访存**且 `x[idx[p]]` 是
+        **间接寻址** → 无法连续加载，SIMD 只能提供 4 路 ILP。
+        ⚠ **不与标量逐位**（4 路累加器改求和顺序）→ 门禁用容差。
+        """
+        n = indptr.size - 1
+        self.lib.phdnet_csr_spmm_simd(
+            indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            idx.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(n),
+            x.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(n_threads))
+
     def m4a(self, slots, r, gamma: float, gate: float, thresh: float) -> None:
         import numpy as np
         n = slots.size

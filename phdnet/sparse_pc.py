@@ -172,7 +172,17 @@ def _random_csr(rng: np.random.Generator, n_rows: int, n_cols: int, k: int,
     k = max(1, min(k, n_cols))
     indptr = np.arange(0, (n_rows + 1) * k, k, dtype=np.int64)
     idx = np.empty(n_rows * k, dtype=np.int64)
-    val = np.empty(n_rows * k, dtype=np.float64)
+    # ⚠⚠ **P173（fhz 2026-10-03 指令「M2/M3/M4a 改为 fp32」）**
+    # 精度从 fp64 降到 **fp32**。理由与代价：
+    #   · 理由①：fp64 使 CSR 流**翻倍**（val 8→4 B/边）→ 访存受限下直接慢 2×；
+    #     而 P110 实测 fp32 的非目标行更新保留率 **99.95%**（fp64≈100%），
+    #     差 0.05% —— **这个代价远小于访存收益**。
+    #   · 理由②：fp32 才能用**手写 SIMD**（AVX2 是 f32 指令，f64 无 FMA）→ P171 实测
+    #     Rust SIMD 8 线程 241 µs vs BLAS 214 µs。
+    #   · 代价：累加次序变化 → **不再与旧 fp64 版逐位相同**（需重新 rebaseline）。
+    #   · ⚠ **门禁不做「改前vs 改后」的对比**（那是跨精度的比较，无意义）；
+    #     只验「同一精度下 Rust 与 Python 一致」。
+    val = np.empty(n_rows * k, dtype=np.float32)
     if lognormal:
         from .inits import cortical_init
         for r in range(n_rows):
@@ -199,7 +209,7 @@ def _from_dense_csr(W: np.ndarray, k: int):
     k = max(1, min(k, n_cols))
     indptr = np.arange(0, (n_rows + 1) * k, k, dtype=np.int64)
     idx = np.empty(n_rows * k, dtype=np.int64)
-    val = np.empty(n_rows * k, dtype=np.float64)
+    val = np.empty(n_rows * k, dtype=np.float32)
     for r in range(n_rows):
         cols = np.argsort(-np.abs(W[r]))[:k]
         cols.sort()

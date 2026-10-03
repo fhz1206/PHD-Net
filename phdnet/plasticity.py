@@ -41,7 +41,10 @@ class STDPCore:
         self.post_idx = np.empty((n, m_edges), dtype=np.int64)
         for i in range(n):
             self.post_idx[i] = rng.choice(n, size=m_edges, replace=False)
-        self.W = np.zeros((n, m_edges), dtype=np.float64)   # 只存拓扑内权重
+        # ⚠⚠ **P173（fhz 指令）：fp64 → fp32**。理由见 `sparse_pc.py` 同处注释：
+        #   fp64 让权重流翻倍（8→4 B）且**无法用 SIMD**（AVX2 是 f32 指令）；
+        #   P110 实测 fp32 保留率 99.95%，代价远小于访存收益。
+        self.W = np.zeros((n, m_edges), dtype=np.float32)   # 只存拓扑内权重
         self.t_pre = np.zeros(n)                             # 突触前迹（短窗）
         self.t_post = np.zeros(n)                            # 突触后迹（短窗）
         self.t_pre_slow = np.zeros(n)                        # T4.2 长窗前迹
