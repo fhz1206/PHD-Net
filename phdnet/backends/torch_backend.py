@@ -85,9 +85,14 @@ def _resolve_device(device: str) -> str:
 def probe_devices() -> dict:
     """统一加速器探针：返回 {平台: 可用信息}。
 
-    - CUDA：torch.cuda.is_available()（NVIDIA，sm ≥ 7.0 建议）；
+    - CUDA：torch.cuda.is_available()（NVIDIA，**compute capability ≥ 7.0**
+      建议；用 `torch.cuda.get_device_capability()` 查询）；
     - ROCm：torch.cuda.is_available() 且 torch.version.hip 非空（AMD，走 HIP 化的
-      cuda 接口，算子代码与 CUDA 完全相同）；
+      cuda 接口，算子代码与 CUDA 完全相同）。
+      ⚠ P167 修正文档：AMD 用 **gfx 架构号**而非 NVIDIA 的 sm/capability：
+      fp16 matmul 需 **gfx90a+**（MI210/MI250/MI300），bf16 需 gfx90a+，
+      **fp8 需 gfx942**（MI300X/MI325X）。用 `torch.cuda.get_device_properties(0).gcnArchName`
+      取架构串。
     - CANN/昇腾 NPU：torch_npu 插件注册的 `npu` 设备（需按 CANN 版本安装
       torch_npu，如 torch 2.1 ↔ torch_npu 2.1）；
     - DirectML：torch_directml 插件（Windows AMD/Intel GPU，设备串
@@ -103,12 +108,27 @@ def probe_devices() -> dict:
         return out
     is_hip = bool(getattr(torch.version, "hip", None))
     cuda_ok = torch.cuda.is_available()
-    out["cuda" if not is_hip else "rocm"] = {
+    _gpu = {
         "ok": cuda_ok,
         "count": torch.cuda.device_count() if cuda_ok else 0,
         "name": (torch.cuda.get_device_name(0) if cuda_ok else None),
         "version": (torch.version.hip if is_hip else torch.version.cuda),
     }
+    # ⚠ P167：**ROCm 下同时写 "cuda" 与 "rocm" 两个键**（内容相同）。
+    #   原来只写 `cuda if not is_hip else rocm`（**互斥**），而
+    #   `torch_lm.resolve_device._ok("cuda")` 靠 `or` 去捞另一个方向的键 ——
+    #   能跑但**脆弱**：任何只查 `probes["cuda"]` 的新代码在 ROCm 上会静默
+    #   拿到 None。两个键都写 → 两种查法都对。
+    out["rocm" if is_hip else "cuda"] = _gpu
+    if is_hip:
+        out["cuda"] = _gpu            # 同一份 dict（内容相同，键都可用）
+        # 记录AMD 架构串，便于「gfx90a+/gfx942」级别的能力判断
+        if cuda_ok:
+            try:
+                out["rocm"]["gcn_arch"] = (
+                    torch.cuda.get_device_properties(0).gcnArchName)
+            except Exception:                     # noqa: BLE001
+                out["rocm"]["gcn_arch"] = None
     try:
         import torch_npu  # noqa: F401  （CANN 插件：import 即注册 npu 设备）
         npu_ok = torch.npu.is_available()
