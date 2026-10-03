@@ -157,6 +157,16 @@ def _unpack4(packed, n_cols: int, lut: np.ndarray, scale: float,
 
 
 
+def _ensure_npu_registered():
+    """确保 torch_npu 已把 npu 注册进 torch 设备表，返回错误原因或 None。
+
+    P160：实现收敛到 `torch_lm.ensure_npu_registered`（**单一来源**），
+    这里只包一层，让 `_probe` 的调用点自解释。
+    """
+    from .torch_lm import ensure_npu_registered as _f
+    return _f()
+
+
 def resolve_accel_device(spec: str = "auto") -> str:
     """解析加速器设备（auto = 昇腾 → ROCm → CUDA → DirectML → CPU）。
 
@@ -249,12 +259,16 @@ class AccelReadout:
 
         def _probe(dt: str):
             """真跑一次，判断 `dt` 在该设备上是否可用（构造 + 前向 + 更新）。"""
-            try:
-                import torch_npu  # noqa: F401   # 设备栈必须先就位
-            except Exception:                                   # noqa: BLE001
-                pass
+            # ⚠ P160：必须**先**让 torch_npu 注册 npu（否则 torch 设备表里
+            #   没有 npu，任何张量都建不出来 → 全线fail）。
+            #   失败原因**不再静默**，会进入降级链说明。
+            _npu_err = _ensure_npu_registered()
             try:
                 import torch as _t
+                if _npu_err is not None and str(_dev).startswith("npu"):
+                    raise RuntimeError(
+                        f"torch_npu 未注册 npu 设备（{_npu_err}）；"
+                        f"torch 设备表里没有 npu，无法建张量")
                 if dt in ("fp8",):
                     # 原生 fp8：**必须让 fp8 张量真正进 matmul**（不预 cast）
                     a = _t.ones(8, 8, dtype=_t.float8_e4m3fn, device=_dev)
