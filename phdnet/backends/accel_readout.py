@@ -259,17 +259,21 @@ class AccelReadout:
                     f"是否还在学习**。",
                     RuntimeWarning)
             else:
-                # fp8 不可用而int8 可用 → 稀疏臂的 W 也走 int8 码本
+                # fp8 不可用而 int8 可用 → 稀疏臂的 W 走 int8 码本
                 # （P105 语义：存储 int8、per-tensor scale=2·max|W|/127）
                 if self._fp8_fallback_to_int8:
                     self.tdtype = torch.int8
                     self._cdtype = torch.float16
                     self._int8 = True
-                    self._wscale = None      # 由下方 int8 量化块按_init_t 计算
+                    self._wscale = None      # 由下方 int8 量化块按 _val 计算
+                # ⚠⚠ **P150 修正**：`else` 分支原来**无条件压成 fp32**，
+                #   于是 `--readout-dtype fp16` / `bf16` 在**稀疏臂被静默吞掉**
+                #   （实测：请求 fp16 → `W.dtype` 竟是 float32）。
+                #   → 改为**尊重 `__init__` 开头已经按 `_DT[dtype]` 定好的
+                #     `tdtype`**（那里 P149 之前就正确处理了 fp16/bf16/fp32）。
+                #     稀疏分支只负责「int8/fp8 需要码本化」，其余保持原样。
                 else:
-                    self.tdtype = torch.float32
-                    self._cdtype = torch.float32
-                    self._int8 = False
+                    self._int8 = (self.tdtype == torch.int8)
                     self._wscale = None
             # P148：dtype 已定，按它建 W（稀疏臂的存储 = tdtype）
             if self.tdtype in (torch.int8,):
