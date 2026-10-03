@@ -208,6 +208,10 @@ class AccelReadout:
         #   少了后者 → y 量级差 1/scale → nll 爆掉（实测 10.84 → 1071）。
         self._int8_compute_scale = None
         self._int8_out_scale = 1.0
+        # P154：fp8 → int8 的**位数转换在 CPU 上做**（fhz 指令），走哪条路径：
+        #   "torch"（**默认**，实测快 5.1×：27 vs 137 ms @1b 档），多 76 MiB 中间张量
+        #   "nogil"（0 中间张量 + 释放 GIL，慢 5.1×）
+        self._fp8_conv = "torch"
         dtype = _DTYPE_ALIASES.get(str(dtype), str(dtype))
         if dtype not in _DT:
             raise ValueError(f"不支持 dtype={dtype!r}；可用 {sorted(_DT)}")
@@ -311,11 +315,15 @@ class AccelReadout:
         #on：强制开，**包括存储仍是 fp8 的情形**（fp8 → int8 网格也算 int8 计算）。
         # ⚠ P153：**只在「存储也是 int8」时启用 int8 计算**。
         #   不做「fp8 存储 + int8 计算」—— 那是**双重量化**（fp8 再量化到int8），
-        #   社区没有这个组合（torchao float8_weight_only 直接反量化到 fp16），
-        #   实测该路径的更新还会撞形状 bug。fhz 若要强制可用 `on`，
-        #   但默认只覆盖「int8 存储 + int8 计算」这一条**语义清晰**的路。
-        self._int8_compute = ((_forced_on or _auto)
-                             and (_res["dtype"] == "int8"))
+        # ⚠ P154（fhz 2026-10-03 明确指令）：
+        #   「fp8不行就**默认降级到 int8 计算，fp8 存储**」
+        #   → 所以 **auto 模式下只要落到 fp8**（即设备**有** fp8 算子，
+        #     但我们要用 int8 算子算），也启用 int8 计算。
+        #   ⚠ 与「fp8 不可用 → 落 int8」的区别：后者是**存储也变int8**，
+        #     而这里是**存储仍 fp8、计算走 int8**（位数转换在 CPU 上做，
+        #     见 `phdnet/backends/fp8_int8_convert.py`）。
+        #   两条路的int8 计算都启用，因为**int8 算子只有这两条路能用到**。
+        self._int8_compute = (_forced_on or _auto)
         self._fp8_native = (_res["dtype"] == "fp8")
         self._fp8_fallback_to_int8 = (_res["requested"] == "fp8"
                                       and _res["dtype"] == "int8")
@@ -684,21 +692,30 @@ class AccelReadout:
                 #   → 必须用探针 PPL 判定（--probe-every）。
                 # ⚠ 也正因如此，**默认关闭**；仅在 fp8 不可用且 int8 可用时
                 #   由降级链自动开启（--readout-int8-compute auto）。
-                _wmax = float(_wf.abs().max())
-                _ws = (_wmax / 127.0) if _wmax > 0 else 1.0
-                _Wq = torch.clamp(torch.round(_wf / _ws),
-                                  -_INT8_QMAX, _INT8_QMAX).to(torch.int8)
+                # ⚠ P154（fhz 指令「位数转化要在 cpu 上」）：
+                #   W 的 fp8 → int8 **位数转换走 CPU 核**
+                #   （`phdnet/backends/fp8_int8_convert.py`），默认 torch
+                #   向量化路径（实测比 nogil 标量核**快 5.1 倍**：27 vs 137 ms，
+                #   1b 档 51962×128；两者**逐位一致**）。
+                #   → 注意 fp8 张量在**设备**上，要先 D2H 回CPU 再转换。
+                _Wq = self._fp8_to_int8_cpu(self.W)
+                _ws = float(self._last_int8_scales[0])
                 _gf = g.to(torch.float32) if g.dtype != torch.float32 else g
                 _gmax = float(_gf.abs().max())
                 _gs = (_gmax / 127.0) if _gmax > 0 else 1.0
                 _Gq = torch.clamp(torch.round(_gf / _gs),
                                   -_INT8_QMAX, _INT8_QMAX).to(torch.int8)
                 # int8 × int8 → int32 累加 → fp32 → 脱两个 scale
-                #⚠ 形状：einsum("ij,ij->i") 是**逐行内积**（不是矩阵乘），
-                #   故必须  → (n_out, k)@(k, n_out)。
-                #   直接 matmul(W, G) 会因 (n,k)@(n,k) 维度不匹配而报错（实测）。
-                _y32 = torch.matmul(_Wq.to(torch.int32),
-                                    _Gq.to(torch.int32).transpose(0, 1))
+                # ⚠⚠ **P154 修正形状**：`matmul((n,k), (k,n))` 返回 **(n, n)**
+                #   （矩阵乘的定义），而 `einsum("ij,ij->i")` 返回的是 **(n,)**
+                #   （逐行内积）。二者语义不同！前者算的是 `W @ Gᵀ` 的**交叉**
+                #   组合，不是同一行的内积。
+                #   → int8 GEMM **无法直接表达逐行内积**：必须用
+                #     `sum(W_i32 * G_i32, dim=1)`（仍是 int32 累加），或
+                #     接受 (n,n) 的交叉语义（**错的**）。
+                #   实测症状：y 形状 (256,256) 而非 (256,) → 下游 dp 广播全错。
+                _y32 = (_Wq.to(torch.int32)
+                        * _Gq.to(torch.int32)).sum(dim=1)   # **int32 累加**
                 self._int8_out_scale = 1.0        # 已在此脱掉
                 self._last_int8_scales = (_ws, _gs)
                 return _y32.to(torch.float32) * (_ws * _gs)
@@ -731,6 +748,27 @@ class AccelReadout:
             Wq = (self.W.to(torch.float32) * self._wscale).to(ht.dtype)
             return Wq @ ht
         return self.W @ ht
+
+    def _fp8_to_int8_cpu(self, w_fp8):
+        """fp8 存储的 W → int8 码本，**位数转换在 CPU 上**（P154）。
+
+        为什么不在设备上转：fp8 的位布局要在 CPU 上按bit 拆解，
+        而 torch 的设备算子会物化 fp32 中间张量（1b 档 3×25.4 MiB）。
+        本实现  → D2H → CPU 核量化 → 回设备 int8。
+
+        ⚠ **D2H/H2D 是同步点**（每步 2 次，6.34 MiB）。msprof 里应能看到
+        这两笔；昇腾上它们可能比转换本身还贵 → **待实测**。
+        """
+        from .fp8_int8_convert import fp8_to_int8_codes
+        _bits = (w_fp8.view(torch.uint8) if w_fp8.dtype
+                 == torch.float8_e4m3fn else w_fp8.to(torch.uint8))
+        _host = _bits.cpu().numpy().reshape(-1)
+        # conv 路径：torch（默认，快 5.1x）| nogil（0 中间张量 + 释放 GIL）
+        _conv = str(getattr(self, "_fp8_conv", "torch"))
+        _codes, _sc = fp8_to_int8_codes(_host, conv=_conv)
+        self._last_int8_scales = (_sc, 1.0)
+        return torch.from_numpy(_codes).to(self.device).reshape(
+            w_fp8.shape)
 
     def _sp_gather(self, ht):
         """稀疏行内 gather：取每行 k 个 h 分量（(n_out,k)），供前向与更新共用。
@@ -1107,6 +1145,27 @@ class AccelReadout:
                 self.W.copy_(torch.tensor(
                     _pk.reshape(self.W.shape), device=self.device,
                     dtype=torch.uint8))
+                return nll_dev
+            if self._int8_compute and self.W.dtype == torch.float8_e4m3fn:
+                #⚠ P154：**fp8 存储 + int8 计算**的更新路径。
+                #   必须与前向同源（都用 `_fp8_to_int8_cpu` 的转换结果），
+                #   否则前向走 int8、更新走另一套 → 形状/精度都不一致。
+                # ⚠⚠ **torch 不支持 `fp8_tensor.to(torch.float32)`**（P149 在
+                #   `_matmul` 踩过：报 "Promotion for Float8 Types is not
+                #   supported"），所以**必须经 uint8 位模式**走 CPU 核反量化。
+                _gi = self._sp_gather(ht.to(self._cdtype))
+                # 真实值域 = int8 码 × scale（_fp8_to_int8_cpu 已算出 scale）
+                self._fp8_to_int8_cpu(self.W)              # 更新 _last_int8_scales
+                _ws2 = float(self._last_int8_scales[0]) or 1.0
+                _Wreal = (self.W.view(torch.uint8).cpu().numpy()
+                          .astype(np.float32).reshape(self.W.shape) * _ws2)
+                _Wt = torch.from_numpy(_Wreal).to(self.device)
+                _Wt.addcmul_(dp.reshape(-1, 1).to(torch.float32),
+                             _gi.to(torch.float32), value=-float(eta))
+                if self.w_clip > 0.0:
+                    _Wt.clamp_(-self.w_clip, self.w_clip)
+                # 重量化回 fp8（**除以 scale**，fp8 的 dtype 本身就是值域）
+                self.W.copy_((_Wt / _ws2).to(torch.float8_e4m3fn))
                 return nll_dev
             if self.W.dtype == self._cdtype:
                 self.W.addcmul_(dp.reshape(-1, 1), g, value=-float(eta))
