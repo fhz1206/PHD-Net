@@ -58,6 +58,15 @@ class RustKernels:
         L.phdnet_has_npu.argtypes = []
         L.phdnet_has_avx2.restype = ctypes.c_int
         L.phdnet_has_avx2.argtypes = []
+        L.phdnet_dtype_code.restype = ctypes.c_int
+        L.phdnet_dtype_code.argtypes = [ctypes.c_char_p]
+        L.phdnet_dtype_has_simd.restype = ctypes.c_int
+        L.phdnet_dtype_has_simd.argtypes = [ctypes.c_int]
+        L.phdnet_m1_gemv_dt.restype = ctypes.c_int
+        L.phdnet_m1_gemv_dt.argtypes = [ctypes.c_void_p, ctypes.c_size_t,
+                                         ctypes.c_size_t, ctypes.c_void_p,
+                                         ctypes.c_void_p, ctypes.c_void_p,
+                                         ctypes.c_size_t, ctypes.c_int]
         L.phdnet_m1_gemv_simd.restype = ctypes.c_int
         L.phdnet_m1_gemv_simd.argtypes = [f32p, ctypes.c_size_t, ctypes.c_size_t,
                                            f32p, f32p, f32p, ctypes.c_size_t]
@@ -74,6 +83,47 @@ class RustKernels:
             b.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             ctypes.c_size_t(n_threads))
+
+    # -- dtype 分派（P172：Rust 跟着生产精度走）------------------------
+    def dtype_code(self, dtype) -> int:
+        """Python dtype 名 -> 内部码（0=fp32 / 1=fp64 / 2=fp16）。
+
+        ⚠ **不认识就抛异常**，不静默回落（P161 纪律）。
+        """
+        import numpy as _np
+        try:
+            #np.dtype(...) 能把「类 / 实例 / 名字」统一成dtype 对象
+            name = _np.dtype(dtype).name
+        except TypeError:
+            name = str(dtype)
+        code = int(self.lib.phdnet_dtype_code(name.encode()))
+        if code < 0:
+            raise ValueError(
+                "Rust 算子库不支持 dtype=%s；可用：fp32 / fp16 / fp64" % name)
+        return code
+
+    def dtype_has_simd(self, dtype) -> bool:
+        """该 dtype 是否有手写 SIMD（**只有 fp32 有**，见 simd.rs）。"""
+        return bool(self.lib.phdnet_dtype_has_simd(self.dtype_code(dtype)))
+
+    def m1_gemv_dt(self, W, x, b, out, dtype, n_threads: int = 8) -> None:
+        """dtype 感知的 GEMV：**按 Python 的 dtype 分派**（P172）。
+
+        - fp32 -> **走手写 AVX2 SIMD**（若本机可用）
+        - fp64 -> 标量（无 f64 SIMD）
+        - fp16 -> 标量+ **f32 累加器**（社区标准：低精度存储 + 高精度累加），
+          最后舍入到 fp16 -> **不与 Python 的逐步 fp16 逐位相同**
+        """
+        code = self.dtype_code(dtype)
+        r, c = W.shape
+        self.lib.phdnet_m1_gemv_dt(
+            ctypes.c_void_p(W.ctypes.data),
+            ctypes.c_size_t(r), ctypes.c_size_t(c),
+            ctypes.c_void_p(x.ctypes.data),
+            ctypes.c_void_p(b.ctypes.data),
+            ctypes.c_void_p(out.ctypes.data),
+            ctypes.c_size_t(n_threads),
+            ctypes.c_int(code))
 
     def has_avx2(self) -> bool:
         """本机是否支持 AVX2+FMA（**真跑一次**探测）。"""

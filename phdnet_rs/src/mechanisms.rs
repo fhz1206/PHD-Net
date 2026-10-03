@@ -456,6 +456,27 @@ pub fn dev_to_host(
     acl.sync()
 }
 
+
+// ══════════════════════════════════════════════════════════════════════════
+// P172：裸指针入口（供 FFI 的 dtype 分派用；SIMD 不可用时的回退）
+// ══════════════════════════════════════════════════════════════════════════
+
+/// f32 GEMV，裸指针版（**不用 SIMD** —— SIMD 在 `simd::gemv_avx2`）。
+///
+/// # Safety
+/// `w` 须 C 连续 `rows*cols` 个 f32；`x`/`b`/`out` 长度匹配。
+#[doc(hidden)]
+pub unsafe fn m1_gemv_f32_raw(
+    w: *mut f32, rows: usize, cols: usize,
+    x: *mut f32, b: *mut f32, out: *mut f32, n_threads: usize,
+) {
+    let wv = unsafe { F32::from_raw(w, rows, cols) };
+    let xs = unsafe { core::slice::from_raw_parts(x, cols) };
+    let bs = unsafe { core::slice::from_raw_parts(b, rows) };
+    let os = unsafe { core::slice::from_raw_parts_mut(out, rows) };
+    m1_gemv(&wv, xs, bs, os, n_threads);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

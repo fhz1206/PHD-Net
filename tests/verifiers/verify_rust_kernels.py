@@ -218,6 +218,51 @@ if K.has_avx2():
     check("F3 标量路径 1 vs 8 线程：**逐位**（未受 SIMD 影响）",
           np.array_equal(ysc, ysc8))
 
+# ── G. dtype 分派（P172：Rust 跟着 Python 生产精度走）─────────────────
+print("[G] dtype 分派（fp32/fp64/fp16）")
+_DT_CODES = {}
+for _d, _want in (("fp32", 0), ("fp64", 1), ("fp16", 2)):
+    try:
+        _c = K.dtype_code(_d)
+        _DT_CODES[_d] = _c
+        check("G1 %s -> code=%d" % (_d, _want), _c == _want,
+              "实得 %d" % _c)
+    except Exception as e:                                # noqa: BLE001
+        check("G1 %s 可解析" % _d, False, str(e)[:50])
+# 不认识的 dtype 必须**报错**，不静默回落
+try:
+    K.dtype_code("bf16")
+    check("G2 未知 dtype 抛异常（P161：不静默回落）", False, "竟然成功了")
+except ValueError:
+    check("G2 未知 dtype 抛异常（P161：不静默回落）", True, "bf16 被拒")
+
+# SIMD 可用性：只有 fp32 有
+check("G3 只有 fp32 有手写 SIMD（fp64/fp16 无）",
+      K.dtype_has_simd("fp32") and not K.dtype_has_simd("fp64")
+      and not K.dtype_has_simd("fp16"),
+      "fp32=%s fp64=%s fp16=%s" % (K.dtype_has_simd("fp32"),
+                                K.dtype_has_simd("fp64"),
+                                K.dtype_has_simd("fp16")))
+
+# 三档精度都能算（用各档的 numpy 做参照，注意容差按 dtype eps 定）
+for _npdt, _name, _tolmul in ((np.float32, "fp32", 1e-5),
+                              (np.float64, "fp64", 1e-12),
+                              (np.float16, "fp16", 1e-2)):
+    try:
+        _W = np.ascontiguousarray(rng.normal(0, 0.05, (512, 256)).astype(_npdt))
+        _x = rng.normal(0, 1, 256).astype(_npdt)
+        _b = rng.normal(0, 0.01, 512).astype(_npdt)
+        _o = np.zeros(512, dtype=_npdt)
+        K.m1_gemv_dt(_W, _x, _b, _o, _npdt, 4)
+        _ref = (_W.astype(np.float64) @ _x.astype(np.float64)
+                + _b.astype(np.float64))
+        _rel = float(np.abs(_o.astype(np.float64) - _ref).max()
+                     / max(1e-30, np.abs(_ref).max()))
+        check("G4 %s dtype 路径可算且在容差内" % _name, _rel <= _tolmul,
+              "max_relerr=%.3e（容差 %.0e）" % (_rel, _tolmul))
+    except Exception as e:                                # noqa: BLE001
+        check("G4 %s dtype 路径可算" % _name, False, str(e)[:50])
+
 n_fail = sum(1 for ok, _, _ in _RESULTS if not ok)
 print()
 print("=" * 72)
