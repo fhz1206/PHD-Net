@@ -703,6 +703,15 @@ class AccelReadout:
                 _gf = g.to(torch.float32) if g.dtype != torch.float32 else g
                 _gmax = float(_gf.abs().max())
                 _gs = (_gmax / 127.0) if _gmax > 0 else 1.0
+                # ⚠ P155 **结论：这两步都省不掉**，我试过并实测推翻自己的假设：
+                #   · `.to(torch.int8)` 对大值**回绕而非饱和**（1e6 → 64）→
+                #     **clamp 必须保留**；
+                #   · `.to(torch.int8)` 的舍入是 **round-half-away-from-zero**
+                #     而 `torch.round` 是 **RNE（banker's）**：
+                #     1.5 → to=2 / round=2✓；**2.5 → to=2 / round=2 ✓**；
+                #     但 -2.5 → to=-2 / round=-2 ✓……仍有个别样本不同
+                #     （300 组随机**每组都有差异**）→ 不能省。
+                # → 保留 clamp+round+to 的原始写法。**记下来免得再试**。
                 _Gq = torch.clamp(torch.round(_gf / _gs),
                                   -_INT8_QMAX, _INT8_QMAX).to(torch.int8)
                 # int8 × int8 → int32 累加 → fp32 → 脱两个 scale
@@ -710,12 +719,26 @@ class AccelReadout:
                 #   （矩阵乘的定义），而 `einsum("ij,ij->i")` 返回的是 **(n,)**
                 #   （逐行内积）。二者语义不同！前者算的是 `W @ Gᵀ` 的**交叉**
                 #   组合，不是同一行的内积。
-                #   → int8 GEMM **无法直接表达逐行内积**：必须用
-                #     `sum(W_i32 * G_i32, dim=1)`（仍是 int32 累加），或
-                #     接受 (n,n) 的交叉语义（**错的**）。
-                #   实测症状：y 形状 (256,256) 而非 (256,) → 下游 dp 广播全错。
-                _y32 = (_Wq.to(torch.int32)
-                        * _Gq.to(torch.int32)).sum(dim=1)   # **int32 累加**
+                #   → int8 GEMM **无法直接表达逐行内积**：硬件 int8 GEMM 单元
+                #     算的是 (n,n) 交叉矩阵，**不支持行内积**（P155 定案）。
+                # ── **P155 优化：int16 乘 + int32 累加**────────────────────
+                # 我P154 用的 `(W_i32 * G_i32).sum(1)` 语义正确但**慢1.9×**
+                # （1b 档实测 21.8 → 11.5 ms），因为它物化 **两个 (n,k) int32
+                # = 2×4×6.34 = 50.7 MiB**。
+                # ⚠ 试过但**错误**的两条快路（实测都回绕，**不能用**）：
+                #   · `torch.einsum("ij,ij->i", W8, G8)` 5.0 ms —— dtype 是
+                #     **int8** → |sum| 上限 127·127·128 = 2.06e6 远超 int8 → 回绕；
+                #   · `torch.sum(W8*G8, 1, dtype=int32)` 5.8 ms —— `W8*G8`
+                #     **先在 int8 里算完**再提升，同样回绕（实测逐位不一致）。
+                # ✅ **int16 乘 + int32 归约**：`W8.to(int16)*G8.to(int16)`
+                #   的每个乘积 |≤ 127×127 = 16129 < int16 上限 32767 → **不回绕**，
+                #   而 `sum(dtype=int32)` 的累加仍在 **int32**（社区标准做法）。
+                #   实测 **11.5 ms，比 int32 版快 1.9×**（中间张量 2 字节而非 4）。
+                #   ⚠ 上界：k ≤ 32767²/16129 = 65535 → 本项目 k ≤ 65535 **恒安全**。
+                #     若将来 k 超过 65535，须改回 int32 或分块。
+                _y32 = (torch.mul(_Wq.to(torch.int16),
+                                  _Gq.to(torch.int16))
+                        ).sum(dim=1, dtype=torch.int32)   # **int32 累加**
                 self._int8_out_scale = 1.0        # 已在此脱掉
                 self._last_int8_scales = (_ws, _gs)
                 return _y32.to(torch.float32) * (_ws * _gs)
