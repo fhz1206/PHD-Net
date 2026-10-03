@@ -366,9 +366,11 @@ class PHDNetConfig:
     # （算完即弃、不累积），故精度代价远小于 W。本机实测 fp16 的 g 带来
     # 更新量相对误差 ~2e-4（≈1800× fp32 eps）。
     readout_gather_dtype: str = "fp16"
-    # P152：fp8 存储 + **int8 计算域**（默认 False = 社区做法，反量化到 fp16）。
-    # ⚠ 双重量化，代价见 `train/train.py --readout-int8-compute` 的 help。
-    readout_int8_compute: bool = False
+    # P153：fp8/int8 存储下的 **int8 计算域**（真 int8 GEMM：W8 × A8 → int32）。
+    # "auto" = **探测到 fp8 不可用而 int8 可用时自动开启**（910B 的情形，
+    # P86 ERR01007）—— 这是 int8 算子唯一能被用上的时机。
+    # "on" / "off" = 强制。⚠ 动态量化激活有精度代价，见 CLI 的 help。
+    readout_int8_compute: str = "auto"
     # P116 曾加 M4b imprint 配对学习摊销 → **P122 审计后移除**。
     # 现仅保留 1（旧行为，逐位不变）；传 >1 由 `SparseLTM.imprint` fail-fast。
     # 移除理由（实测）：① 收益为 0——`encode` 在摊销分支之前无条件执行，
