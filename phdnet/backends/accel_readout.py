@@ -30,8 +30,17 @@ try:
 except Exception:                                            # pragma: no cover
     torch = None
 
+# P151（fhz 2026-10-03：「解禁 fp8, fp4, int4, int8」）：
+#   `fp4`/`int4` 在 **numba 侧已实现**（`_ro_q_matvec_fp4` / 4-bit 两元素一字节
+#   打包，`RO_DTYPES` 里int4 可跑，实测 1b 档完整一步 OK），
+#   但加速臂的 `_DT` 一直没有它们的键 → 直接 ValueError「不支持 dtype」。
+#   → 这里补上键；加速臂用**两个 uint8 张量**模拟 4-bit（高/低半字节），
+#     与 numba 的打包语义一致（`fp4` 是 e2m1 浮点、`int4` 是定点，
+#     P100 已正名：fp4↔int4 是「浮点 vs 定点」之别，不是新旧之别）。
 _DT = {"fp32": "float32", "fp16": "float16", "bf16": "bfloat16",
        "int8": "int8",
+       # 4-bit：底层都是 uint8 打包（两元素/字节），float4 用 e2m1 格点
+       "fp4": "uint8_packed4", "int4": "uint8_packed4",
        # P147：fp8 不再是 int8 的别名 → 能力表必须有它，
        # 否则 §「别名归一化」之后会在 `dtype not in _DT` 处 ValueError。
        "fp8": "float8_e4m3fn"}
@@ -85,6 +94,11 @@ class AccelReadout:
         self._fp8_native = False
         self._fp8_fallback_to_int8 = False
         self._fp8_cap = None
+        self._int4 = False                   # P151：4-bit 打包标记
+        # P151：**「码本+scale」型存储**的标记（int8 / int4 / fp4）。
+        #   它们反量化时必须乘 `_wscale`；原生浮点张量（fp8/fp16/bf16/fp32）
+        #   不能乘。这个标志是 P149 那个「一律 `W.to(cdtype)`」的补丁。
+        self._int8_like = False
         dtype = _DTYPE_ALIASES.get(str(dtype), str(dtype))
         if dtype not in _DT:
             raise ValueError(f"不支持 dtype={dtype!r}；可用 {sorted(_DT)}")
@@ -103,9 +117,93 @@ class AccelReadout:
         #         但目标行 |dp|≈1 远大于步长，必须完整保留。
         # tdtype 是**存储** dtype（int8）；ht/y 等 matmul 参与者的 dtype 跟随
         # _cdtype（int8 模式 = fp16）——所有原来用 self.tdtype 的地方都要检查。
+        # ══════════════════════════════════════════════════════════════
+        # P151（fhz 2026-10-03）：**统一精度降级链**，取代 P147 的 fp8 专用三级
+        # 指令原文：「fp 该多少是多少，如果 fp 的不支持就自动转为 int，int 如果
+        #   不支持自动转为 fp，如果两者都不行再报错；解禁 fp8/fp4/int4/int8」
+        # 链的顺序由 `phdnet/precision_policy.candidate_order` 决定：
+        #   fp8 → fp16 → bf16 → **int8** → int16 → int32 → fp32
+        # ⚠ fp32 放**链尾**（不在同族兄弟里）—— 否则 fp8 在 fp16 不可用时会先
+        #   撞上 fp32、**永远轮不到 int8**，违背「先试 int」的指令。
+        # 判据=**真跑一次**（不是查表）：P86 的硬编码禁令会被驱动升级推翻，
+        #   而 P148 我写的`a.to(fp16) @ b` 探测**全程没跑 fp8 kernel**，
+        #   在任何设备上都成功 → 等于没有探测。
+        # ══════════════════════════════════════════════════════════════
+        from ..precision_policy import (candidate_order, resolve_precision,
+                                       unsupported_message)
+        _req = str(dtype or "fp32").lower()
+        _dev = str(device)
+
+        def _probe(dt: str):
+            """真跑一次，判断 `dt` 在该设备上是否可用（构造 + 前向 + 更新）。"""
+            try:
+                import torch_npu  # noqa: F401   # 设备栈必须先就位
+            except Exception:                                   # noqa: BLE001
+                pass
+            try:
+                import torch as _t
+                if dt in ("fp8",):
+                    # 原生 fp8：**必须让 fp8 张量真正进 matmul**（不预 cast）
+                    a = _t.ones(8, 8, dtype=_t.float8_e4m3fn, device=_dev)
+                    b = _t.ones(8, 8, dtype=_t.float16, device=_dev)
+                    try:
+                        _ = (a @ b).float().sum().item()
+                    except (RuntimeError, TypeError):
+                        a2 = _t.ones(8, 8, dtype=_t.float8_e4m3fn, device=_dev)
+                        _ = (a2 @ a2).float().sum().item()
+                    return True, "原生 fp8 kernel"
+                if dt in ("fp4", "int4"):
+                    # 4-bit：加速臂用 uint8 打包，**计算域 fp16**
+                    #   → 只需验证 fp16 路径可用（打包是纯 CPU 侧，无算子依赖）
+                    _t.ones(8, 8, dtype=_t.uint8, device=_dev)
+                    _t.ones(8, 8, dtype=_t.float16, device=_dev)
+                    _ = (_t.ones(8, 8, dtype=_t.float16, device=_dev)
+                         @ _t.ones(8, 8, dtype=_t.float16,
+                                   device=_dev)).sum().item()
+                    return True, "uint8 打包 + fp16 计算"
+                # 常规：真跑一次目标 dtype 的 matmul（不预 cast）
+                _dt_map = {"fp32": _t.float32, "fp16": _t.float16,
+                           "bf16": _t.bfloat16, "int8": _t.int8}
+                tdt = _dt_map[dt]
+                _ = (_t.ones(8, 8, dtype=tdt, device=_dev)
+                     @ _t.ones(8, 8, dtype=tdt, device=_dev)
+                     ).float().sum().item()
+                return True, f"{dt} matmul"
+            except Exception as e:                              # noqa: BLE001
+                return False, f"{type(e).__name__}: {str(e)[:70]}"
+
+        _res = resolve_precision(_req, _probe, _dev)
+        if _res["dtype"] is None:
+            # 指令：「如果两者都不行再报错」
+            raise RuntimeError(unsupported_message(_res, _dev))
+        if _res["downgraded"]:
+            import warnings as _w
+            _w.warn(f"[precision] 设备 {_dev} 不支持 {_req}（或链上更高精度），"
+                    f"**已自动降级为 {_res['dtype']}**。降级链：{_res['chain']}。"
+                    f"（原请求的存储收益可能达不到）",
+                    RuntimeWarning)
+        dtype = _res["dtype"]                     # 用**实际可用**的那个
+        self._precision_resolved = _res
+        self._dtype_requested = _req
+        # P151：降级链选中了 fp8 → 稀疏/稠密两臂都要「fp8 存储 + fp16 计算」。
+        #   （原先由 P147 的 `resolve_fp8_request` 单独设置，P151 统一到链里，
+        #     那段已被链取代，但稀疏分支仍在读这个标志。）
+        self._fp8_native = (_res["dtype"] == "fp8")
+        self._fp8_fallback_to_int8 = (_res["requested"] == "fp8"
+                                      and _res["dtype"] == "int8")
         if dtype == "int8":
             self.tdtype = torch.int8
             self._cdtype = _INT8_CDTYPE
+            self._int8_like = True      # P151：码本+scale 型（反量化要 ×scale）
+        elif dtype in ("fp4", "int4"):
+            # P151：4-bit 在加速臂用**uint8 打包**（两元素一字节），与 numba
+            #   的 `_ro_q_matvec_fp4` 语义一致。**计算域仍是 fp16**（P149 口径：
+            #   低精度只管存储，算子要吃 fp16）。
+            self.tdtype = torch.uint8
+            self._cdtype = torch.float16
+            self._int4 = True                # 4-bit 需要 pack/unpack 辅助
+            self._int8_like = True           # P151：码本+scale 型
+            self._wscale = None
         else:
             self.tdtype = getattr(torch, _DT[dtype])
             self._cdtype = self.tdtype
@@ -118,41 +216,7 @@ class AccelReadout:
         # （tdtype/_cdtype 跟随）+ 告警。⚠ P90 的 forward 级兜底（try/except
         # around matmul）仍然保留在 forward_dev：探测通过不代表运行期所有 shape
         # 都不炸，int8 matmul 在某些平台可能跑着跑着才失败。
-        # ⚠⚠ **P147（fhz 2026-10-02 指令）：fp8 的三级自适应**——
-        #   原生 fp8 → 直接用（**不告警**）；只有 int8 → **告警 + 自动转 int8**
-        #   （**转换在 CPU**，效率已实测记录）；两者都无 → **报错**。
-        #   取代原先「只试int8、失败就静默回落 fp16」的做法——后者把
-        #   「设备没有 8-bit 算子」与「用户要 fp8」两件事混在一起，
-        #   用户永远不知道自己被降级了。
-        # ⚠ 用构造参数 `dtype`（**不是 cfg** —— `AccelReadout.__init__` 没有
-        # cfg 形参，门禁与工具都直接构造它）。
-        _fp8_req = str(dtype or "fp32").lower() == "fp8"
-        if _fp8_req:
-            from .fp8_capability import resolve_fp8_request
 
-            class _CfgView:                # 最小只读视图（模块只读 cfg.readout_dtype）
-                readout_dtype = "fp8"
-            _dec = resolve_fp8_request(_CfgView(), str(self.device))
-            if _dec["action"] == "error":
-                raise RuntimeError(_dec["msg"])
-            if _dec["action"] == "int8":
-                import warnings as _w
-                _w.warn(_dec["msg"], RuntimeWarning)
-                # 转int8：走 P105 已有的 int8 语义（存储 int8 码本 +
-                # per-tensor scale=2·max|W|/127，计算在 fp16 域）
-                self.tdtype = torch.int8
-                self._cdtype = torch.float16
-                self._fp8_fallback_to_int8 = True
-                self._fp8_cap = _dec["cap"]
-            elif _dec["action"] == "fp8":
-                self._fp8_native = True
-                self._fp8_cap = _dec["cap"]
-                print(_dec["msg"], flush=True)
-            # P148：稀疏臂在 fp8 分支**之前**就已决定好tdtype，
-            #   故原生 fp8 时**就地改写 tdtype**（稠密臂的分支在后面，
-            #   不会重复应用 —— 那里只处理非 fp8 的回落）。
-            if self._fp8_native and self.tdtype == "fp32":
-                self.tdtype = torch.float8_e4m3fn
         self._int8 = (self.tdtype == torch.int8)
         self._wscale = None
         if self._int8:
@@ -265,6 +329,7 @@ class AccelReadout:
                     self.tdtype = torch.int8
                     self._cdtype = torch.float16
                     self._int8 = True
+                    self._int8_like = True   # P151：码本+scale 型
                     self._wscale = None      # 由下方 int8 量化块按 _val 计算
                 # ⚠⚠ **P150 修正**：`else` 分支原来**无条件压成 fp32**，
                 #   于是 `--readout-dtype fp16` / `bf16` 在**稀疏臂被静默吞掉**
@@ -428,8 +493,17 @@ class AccelReadout:
             #   反量化成 fp16** ——torch **不做 fp8↔fp16 的隐式提升**
             #   （实测报 "Promotion for Float8 Types is not supported"）。
             #   → 存储/计算分离，与 P105 的 int8 完全同构。
-            _Wm = (self.W.to(self._cdtype) if self.W.dtype != self._cdtype
-                   else self.W)
+            # ⚠⚠ **P151 修正**：int8/4-bit 是**码本 + per-tensor scale**
+            #   （P105），反量化必须 **× `_wscale`**；而 fp8/fp16/bf16 是
+            #   **原生浮点张量**（dtype 本身就是值），**不能乘** scale。
+            #   我 P149 只写了 `W.to(_cdtype)` → int8 稀疏臂的权重全成了
+            #   ±127 附近的整数 → 实测 nll **540**（对照 fp8 的 10.8）。
+            if self.W.dtype == self._cdtype:
+                _Wm = self.W
+            elif self._wscale is not None and self._int8_like:
+                _Wm = self.W.to(self._cdtype) * float(self._wscale)
+            else:
+                _Wm = self.W.to(self._cdtype)
             if self._sp_fwd == "einsum":
                 # P116：不物化 (n_out,k) 中间张量（mulsum 每步两处各25.37 MiB）。
                 # ⚠ 归约顺序与 mulsum 不同 → **非逐位**（本机 max|Δ|≈3e-05）。
@@ -507,6 +581,7 @@ class AccelReadout:
         return g
 
     def _int8_update(self, dp32, ht32, alpha: float) -> None:
+        """（稠密 + 稀疏皆支持；P151 修了稀疏臂的形状错误。）"""
         """int8 权重的 rank-1 更新：**fp32 域**计算 dp⊗ht，再重量化写回。
 
         P105（fhz 2026-10-01 决策）：直接在 int8 码上原地加更新毫无意义——
@@ -723,7 +798,30 @@ class AccelReadout:
             dp32 = p.clone() if t is None else (p - t)
             if t is None:
                 dp32[correct] -= 1.0
-            self._int8_update(dp32, ht.float(), -eta)
+            # P151：稀疏臂**不能**调 `_int8_update` —— 它用
+            #   `ht.reshape(1, -1)` 假设 `ht` 是 (1, n_h)，而稀疏臂的 `ht`
+            #   是 **(n_h,)** →  `Bad in-place call: input [8192,128] vs
+            #   output [8192, 1024]`（实测真实规模必崩）。
+            #   → 稀疏臂复用 P149 为 fp8 写的那条路：gather → fp16 域
+            #     addcmul_ → 重量化写回。语义与稠密一致。
+            if self._sparse:
+                _g = self._sp_gather(ht.to(self._cdtype))
+                # ⚠⚠ **P151 修正**：`self.W.to(_cdtype)` 只把**码值**转成
+                #   浮点，**没有乘 `_wscale`** → 权重全成了 ±127 附近的整数
+                #   → 实测 nll **540**（对照 fp8 的 10.8，彻底坏掉）。
+                #   正确：先乘 scale 反量化到真实值域，再更新、再重量化。
+                _Wq = self.W.to(self._cdtype) * float(self._wscale)
+                _Wq.addcmul_(dp32.reshape(-1, 1).to(self._cdtype), _g,
+                             value=float(eta))
+                if self.w_clip > 0.0:
+                    _Wq.clamp_(-self.w_clip, self.w_clip)
+                _sc = float(self._wscale) or 1.0
+                _codes = torch.clamp(
+                    torch.round(_Wq.to(torch.float32) / _sc),
+                    -_INT8_QMAX, _INT8_QMAX)
+                self.W.copy_(_codes.to(torch.int8))
+            else:
+                self._int8_update(dp32, ht.float(), -eta)
             return nll_dev
         # P84：更新主副本是 fp16（低精度回落场景）→ dp/ht 必须同 dtype，否则
         # addmm_ 退回慢路径或直接报错。int8 模式已在上面提前返回，不会到这里。
