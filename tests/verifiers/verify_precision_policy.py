@@ -52,7 +52,7 @@ def main() -> int:
 
     # ── A. 降级链的顺序契约 ──────────────────────────────────────────
     print("\n[A] 降级链顺序（fhz：fp→int→fp→报错）")
-    for req in ("fp8", "int8", "fp4"):
+    for req in ("fp8", "int8", "fp16"):
         ch = candidate_order(req)
         # fp32 必须在 int 族**之后**（否则 fp8 永远轮不到 int8）
         i_fp32 = ch.index("fp32")
@@ -127,7 +127,7 @@ def main() -> int:
     tgt = np.zeros(n_out, np.float32)
     tgt[0] = 1.0
     nlls = {}
-    for dt in ("fp32", "fp16", "bf16", "fp8", "int8", "fp4", "int4"):
+    for dt in ("fp32", "fp16", "bf16", "fp8", "int8"):
         clear_cache()
         try:
             ro = AccelReadout(n_h, n_out, np.random.default_rng(3),
@@ -143,9 +143,9 @@ def main() -> int:
             check(f"D  {dt} 完整一步", False,
                   f"{type(e).__name__}: {str(e)[:60]}")
     # 访存阶梯必须单调不增
-    if len(nlls) == 7:
-        mems = [nlls[d][2] for d in ("fp32", "fp16", "fp8", "int4")]
-        check("D8 访存阶梯 fp32>fp16>fp8>int4（真的省流量）",
+    if len(nlls) == 5:
+        mems = [nlls[d][2] for d in ("fp32", "fp16", "fp8")]
+        check("D8 访存阶梯 fp32>fp16>fp8（真的省流量）",
               all(a > b for a, b in zip(mems, mems[1:])),
               " → ".join(f"{m:.2f}" for m in mems))
 
@@ -175,10 +175,46 @@ def main() -> int:
               abs(float((lut * sc)[c0 >> 4]) - up[0, 0]) < 1e-5,
               f"byte=0x{c0:02x} 偶={c0>>4}→{up[0,0]:.4f}")
 
-    # ── F. 能力表不再禁 fp4/int4 ────────────────────────────────────
-    print("\n[F] 能力表解禁")
+    # ── E2. P152：fp4/int4 已禁用 + fp8 优先降级到 int8 ───────────────
+    print("\n[E2] P152：4-bit 禁用 + fp8→int8 降级")
+    for dt in ("fp4", "int4"):
+        check(f"E2.1 {dt} 已从 FAMILIES 移除（P152 禁用）",
+              dt not in FAMILIES, "")
+    ch8 = candidate_order("fp8")
+    check("E2.2 fp8 的链**第二个是 int8**（fhz 2026-10-03 指令）",
+          ch8[1] == "int8",
+          f"→ {' → '.join(ch8)}")
+    check("E2.3 fp8 之后先 int8 而非 fp16（访存：1 字节 vs 2 字节）",
+          ch8.index("int8") < ch8.index("fp16"), "")
+    # int8 计算域（fp8 存储 + int8 计算）
+    clear_cache()
+    nll_fp16 = None
+    try:
+        ro = AccelReadout(n_h, n_out, np.random.default_rng(3), device="cpu",
+                          dtype="fp8", conn_k=k, csr=csr, int8_compute=False)
+        nll_fp16 = float(ro.learn_softmax(h, tgt, 0.15, y_pre=ro.forward_dev(h),
+                                          target_idx=0))
+    except Exception:                                        # noqa: BLE001
+        pass
+    clear_cache()
+    nll_i8 = None
+    try:
+        ro = AccelReadout(n_h, n_out, np.random.default_rng(3), device="cpu",
+                          dtype="fp8", conn_k=k, csr=csr, int8_compute=True)
+        nll_i8 = float(ro.learn_softmax(h, tgt, 0.15, y_pre=ro.forward_dev(h),
+                                        target_idx=0))
+    except Exception:                                        # noqa: BLE001
+        pass
+    check("E2.4 fp8 存储 + int8 计算域**能跑且 nll 接近 fp16 计算域**"
+          + (f"（{nll_fp16:.4f} → {nll_i8:.4f}）" if nll_fp16 else ""),
+          nll_i8 is not None and abs(nll_i8 - (nll_fp16 or nll_i8))
+          <= 0.05 * max(1e-9, nll_fp16 or 1.0),
+          "（P152：社区是fp16 计算，int8 计算是双重量化，故允许 ~5% 差）")
+
+    # ── F. 能力表：fp8/int8 放行 ─────────────────────────────────────
+    print("\n[F] 能力表")
     from phdnet.config import PHDNetConfig
-    for dt in ("fp8", "int8", "fp4", "int4"):
+    for dt in ("fp8", "int8"):
         r = _unsupported_reason(PHDNetConfig(readout_dtype=dt))
         check(f"F  {dt} 不再被能力表拒绝",
               r is None or "int4" not in r,

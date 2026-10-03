@@ -255,6 +255,21 @@ def main() -> None:
                          "→ **只能用差值**")
     ap.add_argument("--probe-tokens", type=int, default=2048,
                     help="P146：探针集 token 数（越大越稳，代价是每次多跑一遍前向）")
+    ap.add_argument("--readout-int8-compute", action="store_true",
+                    help="P152（fhz 2026-10-03）：**fp8 存储 + int8 计算域**。"
+                         "910B 无 fp8 算子（P86ERR01007）但有 int8 算子，而"
+                         "msprof 证明访存是瓶颈 → int8 计算走硬件快路径且"
+                         "**访存与 fp8 完全相同**（都 1 字节/元素）。"
+                         "做法：fp8 →(fp32)→ int8 网格 → int8 计算，"
+                         "**累加回 fp32、最后脱 scale**（社区标准）。"
+                         "⚠⚠ **代价：双重量化**（fp8 + int8 误差叠加），"
+                         "社区没有这个组合（torchao 的 float8_weight_only 是"
+                         "直接反量化到 fp16 再算）—— 因为 fp8 的对数间距"
+                         "在±448 处很粗，压到 int8 的±127 均匀网格会**丢掉"
+                         "fp8 的动态范围优势**（社区正是因此说 INT8 在"
+                         "Transformer 里易溢出）。"
+                         "⚠ 本机实测 nll 10.8376 → 10.8701（**差 0.3%%**），"
+                         "是否可用**必须用 `--probe-every` 的探针 PPL 判定**。")
     ap.add_argument("--readout-gather-dtype", default="fp16",
                     choices=["fp32", "fp16", "bf16"],
                     help="P145：稀疏读出**中间量 g**（gather 输出）的精度，"

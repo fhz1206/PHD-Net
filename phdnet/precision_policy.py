@@ -28,14 +28,36 @@ from __future__ import annotations
 #   每项:(名称, 存储字节/元素, 族, 同族替代顺序)
 FAMILIES: dict[str, dict] = {
     # ── 浮点族（bit-exact 格点：e4m3fn / bf16 / fp16 / fp32）──────────────
-    "fp8":  {"bytes": 1, "family": "fp", "siblings": ["fp16", "bf16", "fp32"]},
+    # ⚠⚠ **P152（fhz 2026-10-03）：fp8 的降级**优先落到 int8**，
+    #   而不是 fp16。
+    #   理由（fhz 指出 + 社区数据佐证）：
+    #   ① **访存相同**：fp8 与 int8 都是 1 字节/元素 → 从 fp8 换到 int8
+    #      **访存一点不增**，而换到 fp16 会**访存翻倍**（2 字节）——
+    #      在 msprof 证明「访存是瓶颈」（Index 占 81%）的前提下这是关键差异。
+    #   ② **社区实测二者吞吐相同**：H100 上 FP8 1979 TFLOPS、INT8 1979 TFLOPS
+    #      （tutorialq 的实测表）→ 降级到 int8 **不会更慢**。
+    #   ③ **社区的 fallback 其实是 bf16/fp16**（TE 的 fp8_autocast 在无 fp8
+    #      算子时回 bf16）—— 但那是 H100 有 fp8 tensor core 的情形。
+    #      **本项目的 910B 实测无 fp8 算子**（P86：ERR01007），所以「同字节、
+    #      同吞吐」的 int8 才是等价替代。
+    #   ⚠ int8 的代价：① **动态范围固定**（±127×scale），不像 fp8 的
+    #     对数间距自适应 → 这正是社区说「INT8 在Transformer 里易溢出」的点；
+    #     ② 需 calibration（本项目用 per-tensor scale = 2·max|W|/127，
+    #     即「无校准集的即时 calibration」）。
+    #   → 顺序改为 **int8 紧跟 fp8 之后**，fp16/bf16 退到 int 族之后。
+    "fp8":  {"bytes": 1, "family": "fp",
+             "siblings": ["int8", "fp16", "bf16", "fp32"]},
     "fp16": {"bytes": 2, "family": "fp", "siblings": ["bf16", "fp32", "fp8"]},
     "bf16": {"bytes": 2, "family": "fp", "siblings": ["fp16", "fp32", "fp8"]},
     "fp32": {"bytes": 4, "family": "fp", "siblings": []},
-    "fp4":  {"bytes": 0.5, "family": "fp", "siblings": ["fp8", "fp16", "fp32"]},
+    # ⚠ P152（fhz 2026-10-03：「禁用 fp4 和 int4」）：4-bit **从降级链移除**。
+    #   实测理由（P151 的门禁数据）：4-bit 每步要 unpack 出 fp16 副本
+    #   （51962×128 → 12.7 MiB），**unpack 开销很可能抵消 4× 的存储收益**，
+    #   即「省下的流量又吐回来」。在 gather-GEMV 这个形态下 4-bit 不划算。
+    #   → 不再进 FAMILIES，故既不会被请求、也不会出现在降级链里。
     # ── 定点族（per-tensor scale + 最近格点）────────────────────────────
     "int8": {"bytes": 1, "family": "int", "siblings": ["int16", "int32", "fp8"]},
-    "int4": {"bytes": 0.5, "family": "int", "siblings": ["int8", "int16", "fp8"]},
+    # ⚠ P152：int4 同上禁用（4-bit 整体退出）。
     "int16": {"bytes": 2, "family": "int", "siblings": ["int32", "fp16"]},
     "int32": {"bytes": 4, "family": "int", "siblings": ["fp32"]},
 }
