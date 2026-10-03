@@ -184,6 +184,7 @@ class AccelReadout:
                  compile_mode: str = "default", conn_k: int = 0,
                  csr=None, lognormal_init: bool = False, exc_ratio: float = 0.8,
                  gather_impl: str = "index", gather_dtype: str = "fp32",
+                 int8_compute: bool = False,
                  sparse_fwd_kernel: str = "mulsum"):
         if torch is None:
             raise RuntimeError("未安装 torch，加速读出不可用")
@@ -197,6 +198,16 @@ class AccelReadout:
         #   它们反量化时必须乘 `_wscale`；原生浮点张量（fp8/fp16/bf16/fp32）
         #   不能乘。这个标志是 P149 那个「一律 `W.to(cdtype)`」的补丁。
         self._int8_like = False
+        # P152：`int8_compute` —— fp8/int8 **存储** + int8 **计算域**。
+        # 默认 False（社区做法是反量化到 fp16 计算；int8 计算是双重量化，见
+        # `_matmul` 里的代价说明）。开启须经探针 PPL 验证。
+        self._int8_compute = bool(int8_compute)
+        self._fp8_wscale = None      # fp8 存储的 per-tensor scale（若有）
+        # P152：int8 计算域的 scale。`_int8_compute_scale` 是量化用的分母，
+        #   `_int8_out_scale` 是**脱 scale 系数**（= 分母，结果要乘回）。
+        #   少了后者 → y 量级差 1/scale → nll 爆掉（实测 10.84 → 1071）。
+        self._int8_compute_scale = None
+        self._int8_out_scale = 1.0
         dtype = _DTYPE_ALIASES.get(str(dtype), str(dtype))
         if dtype not in _DT:
             raise ValueError(f"不支持 dtype={dtype!r}；可用 {sorted(_DT)}")
@@ -411,6 +422,9 @@ class AccelReadout:
                 #     每次用 W 算之前**显式反量化**（见 `_matmul` / `_eager_step`）。
                 self.tdtype = torch.float8_e4m3fn
                 self._cdtype = torch.float16        # ← 不是 fp8！
+                # P152：记下 fp8 的 per-tensor scale，供 int8 计算域用
+                #（fp8 张量本身的值域由 dtype 决定，但若将来加 scale 需在此挂）。
+                self._fp8_wscale = None
                 self._int8 = False
                 self._wscale = None
                 import warnings as _w8
@@ -621,13 +635,45 @@ class AccelReadout:
                 _Wm = self.W
             elif self._wscale is not None and self._int8_like:
                 _Wm = self.W.to(self._cdtype) * float(self._wscale)
+            elif self._int8_compute:
+                # ⚠⚠ **P152（fhz 2026-10-03）：fp8 存储 + int8 计算域**。
+                #   动机：910B **无 fp8 算子**（P86ERR01007）但**有 int8 算子**，
+                #   而 msprof 证明访存是瓶颈（Index 81%）→ int8 计算既走硬件快路径
+                #   又与 fp8 **访存完全相同**（都1 字节/元素）。
+                #   做法：fp8 →（反量化到 fp32）→ 再量化到 **int8 网格** →
+                #   int8 计算。累加仍回 fp32（社区标准：低精度乘 + 高精度累加）。
+                #   ⚠⚠ **代价：这是「双重量化」**，误差 = fp8 量化 + int8 量化
+                #   **叠加**（社区没有这个组合，torchao 的 float8_weight_only 是
+                #   直接反量化到 fp16 再算）。因为 fp8 的对数间距在±448 处很粗，
+                #   再压到 int8 的±127 均匀网格会**丢掉 fp8 的动态范围优势**
+                #   ——社区正是因此说「INT8 在 Transformer 里易溢出」。
+                #   → 故**默认关闭**（`_int8_compute=False`），需显式开启，
+                #     且必须用探针 PPL 验证（见 --readout-int8-compute）。
+                _wf = self.W.to(torch.float32)
+                if self._fp8_wscale is not None:
+                    _wf = _wf * float(self._fp8_wscale)
+                _sc = float(_wf.abs().max()) / 127.0 if float(
+                    _wf.abs().max()) > 0 else 1.0
+                self._int8_compute_scale = _sc
+                _Wm = torch.clamp(torch.round(_wf / _sc),
+                                  -_INT8_QMAX, _INT8_QMAX).to(
+                                      self._cdtype)
+                # ⚠⚠ **P152 修正**：算出 scale 之后**必须把 scale 乘回结果**，
+                #   否则 y 的量级差 1/_sc（实测 542×）→ nll 从 10.84 爆到 **1071**。
+                #   社区的标准做法正是「**低精度乘 + 高精度累加 + 最后脱 scale**」。
+                self._int8_out_scale = float(_sc)
             else:
                 _Wm = self.W.to(self._cdtype)
             if self._sp_fwd == "einsum":
                 # P116：不物化 (n_out,k) 中间张量（mulsum 每步两处各25.37 MiB）。
                 # ⚠ 归约顺序与 mulsum 不同 → **非逐位**（本机 max|Δ|≈3e-05）。
-                return torch.einsum("ij,ij->i", _Wm, g)
-            return (_Wm * g).sum(dim=1)
+                _y = torch.einsum("ij,ij->i", _Wm, g)
+            else:
+                _y = (_Wm * g).sum(dim=1)
+            # P152：int8 计算域要**脱 scale**
+            if self._int8_out_scale != 1.0:
+                _y = _y * self._int8_out_scale
+            return _y
         if self._int8:
             Wq = (self.W.to(torch.float32) * self._wscale).to(ht.dtype)
             return Wq @ ht
@@ -1428,6 +1474,8 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
                              #   实测：cfg 是 fp16 而 `ro._gather_dtype` 是 fp32。
                              gather_dtype=str(
                                  getattr(cfg, "readout_gather_dtype", "fp32")),
+                             int8_compute=bool(
+                                 getattr(cfg, "readout_int8_compute", False)),
                              nll_sync_every=int(getattr(cfg, "nll_sync_every", 1)),
                              compile=bool(getattr(cfg, "torch_compile", False)),
                              compile_mode=str(getattr(cfg,
