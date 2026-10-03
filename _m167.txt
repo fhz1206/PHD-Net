@@ -1,0 +1,46 @@
+feat(P167): close four ROCm gaps and confirm both ModelScope datasets already work
+
+fhz asked that 30b match 1b except for parameters, asked for first and SFT data
+from the two ModelScope repositories, asked for proper ROCm support, and asked
+for API research to speed training up.
+
+For 30b, the configuration side was already fine and I confirmed it: across 131
+dataclass fields only big_ltm_N and big_ltm_m differ, 129 fields match, and the
+derived n_h of 3072, conn_k of 128 and k_sparse of 128 are identical, so the
+readout side does not degrade. Checkpoints, vocabulary and logs are all
+parameterised by preset so 30b cannot overwrite 1b. The real blocker was memory,
+not parameters, and P166 fixed it. Worth flagging: big_m drops from 72 to 56 to
+hold total capacity, which is a deliberate trade with a 22 percent lower ceiling
+on outgoing edges per neuron.
+
+For ROCm I found four genuine gaps by reading the code rather than trusting the
+README. probe_devices wrote mutually exclusive keys, writing rocm on ROCm and
+nothing under cuda, while resolve_device relied on an or fallback to find the
+other direction, which is fragile because any new code that only looks up
+probes["cuda"] silently gets None on an AMD machine; it now writes both keys.
+telemetry called torch.cuda.utilization, which is NVIDIA-only through NVML and
+does not exist on ROCm, so utilisation was always None with the exception
+swallowed; it now fills only the memory fields, which HIP does expose, and says
+so explicitly. The documentation claimed sm 7.0 or newer, which is an NVIDIA
+compute capability; AMD uses gfx numbers, so the text now states that fp16 needs
+gfx90a or newer, bf16 needs the same, and fp8 needs gfx942, and the probe records
+gcnArchName. Finally, P163 had removed fp8 from the candidate list globally based
+on one Ascend 910B, which means ROCm gfx942 parts with native fp8 lose the 2x
+memory and bandwidth benefit, and it contradicts the module's own principle that
+support is decided by running it once; fp8 is now behind a PHD_FP8 environment
+switch that defaults to off but, when on, lets the existing probe decide by
+actually running. int8 stays rejected, since ROCm int8 GEMM support has
+historically been incomplete.
+
+On the datasets, both ModelScope repositories were already reachable and needed
+no code change. The pretrain path resolves to 52 shards totalling 4799.8 MB and
+the sft path to 2 shards totalling 178.0 MB, both through HTTP Range streaming
+with no local copy. The remote branch was already generic, so --data sft,
+pretrain and pretrain_zh all work automatically with --remote-data. This part of
+the request was already satisfied rather than newly implemented, and I am flagging
+that rather than claiming it as new work.
+
+Gates: fast 9/9, rev_index, precision_policy, multi_device, accel_readout,
+cann_env and probe_device all PASS.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

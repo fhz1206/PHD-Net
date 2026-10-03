@@ -168,10 +168,25 @@ class Telemetry:
             else:
                 try:
                     if dev.startswith("cuda") and hasattr(torch, "cuda"):
-                        out["acc_util"] = float(torch.cuda.utilization())
+                        # ⚠ P167：**ROCm 没有 `torch.cuda.utilization()`**
+                        #   （NVIDIA 专属，走 NVML；AMD 对应的是 rocm_smi）。
+                        #   原代码直接调 → ROCm 上抛异常 → 被下面的 except
+                        #   吞掉 → **GPU 利用率恒为 `--`**，且只在首次打一次
+                        #   警告，看起来像「没采到」而非「不支持」。
+                        # → 显式区分：ROCm 只填**显存**（torch 的
+                        #   memory_allocated 在 ROCm 上**可用**，属 HIP 化接口），
+                        #   利用率留None 并标注原因。
+                        _is_hip = bool(getattr(torch.version, "hip", None))
                         out["hbm_alloc_gb"] = torch.cuda.memory_allocated() / 2 ** 30
                         out["hbm_total_gb"] = (torch.cuda.get_device_properties(
                             torch.cuda.current_device()).total_memory) / 2 ** 30
+                        if _is_hip:
+                            out["acc_util"] = None
+                            out["acc_util_note"] = (
+                                "ROCm 无 torch.cuda.utilization()（NVML 专属）；"
+                                "需 rocm-smi 或按 msprof 口径采。显存字段不受影响。")
+                        else:
+                            out["acc_util"] = float(torch.cuda.utilization())
                 except Exception as e:                   # noqa: BLE001
                     self._note_acc_err(e)
             # torch 层空缺时用 npu-smi 补（HBM 带宽利用率任何软件层都读不到，
