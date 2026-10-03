@@ -104,6 +104,16 @@ try:
     # 改为**先静默应用、再把报告文本存起来**，由 main() 在 TeeLogger 建立后重放。
     _CANN_ENV_REPORT = _cann_env.apply_cann_env(verbose=False)
     _CANN_ENV_LINES = [_cann_env.describe()]
+    # P168：**ROCm/AMD** 环境（hipBLASLt 等）。与 CANN 同机制、同样必须在
+    #   import torch 前设置 → 放在这里（不是 main 里）。
+    #   ⚠ 本项目无 AMD 卡的实测数据 → 各项默认无害，且可用 PHD_ROCM_ENV=0 /
+    #   PHD_ROCM_<KEY>=0 逐项关闭做A/B。
+    try:
+        _ROCM_ENV_REPORT = _cann_env.apply_rocm_env(verbose=False)
+        _CANN_ENV_LINES.append(_cann_env.describe_rocm())
+    except Exception as _e:                       # noqa: BLE001
+        print(f"[rocm-env] 设置失败（不致命）：{type(_e).__name__}: {_e}",
+              flush=True)
 except Exception as _e:                       # noqa: BLE001
     print(f"[cann-env] 设置失败（不致命）：{type(_e).__name__}: {_e}",
           flush=True)

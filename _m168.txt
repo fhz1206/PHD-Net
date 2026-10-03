@@ -1,0 +1,44 @@
+feat(P168): add ROCm runtime environment with hipBLASLt preference and A/B switches
+
+This continues P167 and answers the request to research APIs for speeding up
+training, which I read as research the acceleration options rather than guess at
+them, so I searched the official ROCm documentation.
+
+Four environment variables came back. TORCH_BLAS_PREFER_HIPBLASLT is documented
+as explicitly preferring hipBLASLt for GEMM operations because it can improve
+linear layer performance, and it lands directly on this project since the M1
+encoder, where P165 measured BLAS at5.4 times the hand-written kernel, and the M6
+readout are both GEMM-shaped; it is on by default. NCCL_MIN_NCHANNELS at 112 is
+MI300X tuning for multi-card RCCL, and it is deliberately off because this
+project reads out on a single card with no all-reduce, so setting it would only
+waste memory; it is written down specifically so it does not get copied from a
+community checklist later. HSA_OVERRIDE_GFX_VERSION is off because it is a
+compatibility override that forces an architecture on unsupported cards and would
+bypass real detection, contradicting the P167 principle that support is decided
+by running. torch.compile with the rocdynamo backend has community numbers
+around twenty-five percent fusion gain but is not set by default, since P155
+already found torch.compile unusable here for lack of a C++ compiler and nothing
+has been measured on ROCm or Ascend.
+
+The code adds _ROCM_VARS, apply_rocm_env and describe_rocm to
+phdnet/backends/cann_env.py, and train.py calls it before torch is imported using
+the same mechanism as the CANN environment. Two escape hatches exist for A/B
+work: PHD_ROCM_ENV=0 disables everything and PHD_ROCM_<KEY>=0 disables one item.
+
+An honest limit worth stating plainly: this machine has no AMD card, so none of
+these settings has measured data behind it. They are official recommendations that
+are harmless by default, not claimed gains. To actually evaluate one, change a
+single variable and compare the segments(win) line from step profiling, never the
+cumulative line which includes numba's first-call compilation.
+
+The search also confirmed the architecture requirements that justify the P167
+switch: fp16 and bf16 matmul need gfx90a or newer, while fp8 needs gfx942 for
+MI300X and MI325X, so PHD_FP8=1 is aimed squarely at those parts, and ROCm 7.0 from
+late 2025 added FP8, FP6 and FP4. Two migration gotchas are recorded for future
+kernel work: AMD uses 64-thread wavefronts against CUDA's 32-thread warps, and
+the cache line is 128 bytes so data layouts should be aligned to that.
+
+Gates: fast 9/9, cann_env, multi_device, precision_policy, rev_index,
+probe_device, help_percent and accel_readout all PASS, --help exit 0.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
