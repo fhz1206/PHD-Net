@@ -1,0 +1,35 @@
+fix(P162): report the precision that was actually reached, not the one requested
+
+The production run at 13:29 is good news and bad news. Good news first: the
+readout backend line reads accel:auto on device npu, so the P161 fix worked and the
+readout no longer falls back. The run finished 40,000 tokens in 6.8 minutes at
+10.15 ms per token with the readout taking 4.853 ms per token on npu, 48.1 percent
+of the step, down from the roughly 89 percent seen before, with zero OOV skipped.
+
+The bad news is that this was neither the fp8 arm nor the int8 arm. A warning at
+line 30 says the device does not support fp8 or anything more precise on the chain
+and that it was automatically demoted to fp16, with the chain running fp8, int8,
+fp16, bf16, int16, int32, fp32. So fp8 really is unavailable on the 910B, matching
+the earlier probe, and int8 did not catch it either, meaning the run actually used
+fp16 storage with fp16 compute. The instruction to keep fp8 storage with int8
+compute cannot be realised on this device.
+
+That exposed a genuine bug. The warning says demoted to fp16 while the summary line
+still says compute precision = fp8, because train.py printed cfg.readout_dtype, the
+requested value, rather than what the degradation chain landed on. Every later A/B
+judgement would have believed it was running the fp8 arm. It now reads the resolved
+dtype from the readout instance and prints the effective precision alongside the
+requested one with an explicit note when they differ.
+
+Why int8 did not catch it is still untested rather than concluded. The npu_quant
+probes have never actually executed because the arguments were wrong in that
+probe, and the int8 matmul probe likely fails for the same reason before falling
+through to fp16. The next step is to probe npu_quant_matmul and
+npu_weight_quant_batchmatmul on the device with correct signatures and see whether
+they can build and multiply; if they can, --readout-dtype int8 becomes usable.
+Otherwise the int8 line closes.
+
+Gates: fast 9/9, probe_device, accel_readout, precision_policy and help_percent all
+PASS, --help exit 0.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

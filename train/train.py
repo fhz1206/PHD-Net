@@ -877,14 +877,36 @@ def main() -> None:
           f" | vocab workers={vw} | data prefetch=multiproc×{dl_w}{'+zh filter' if args.data == 'pretrain_zh' else ''}"
           f" | build time {time.perf_counter() - t0:.1f}s")
     _rb = getattr(lm.net, "_readout_backend", "numba-cpu")
-    if cfg.readout_dtype in ("bf16", "fp16", "fp8", "fp4", "int8", "int4"):
+    # ⚠⚠ **P162（fhz 2026-10-03 13:29 生产日志暴露）**：
+    #   这一行原来打的是 **`cfg.readout_dtype`（请求值）**，而**实际落地的精度
+    #   可能已被降级链改掉**。生产日志里两条行**自相矛盾**：
+    #     [precision] 设备 npu 不支持 fp8 ... 已自动降级为 fp16   ← 警告说降了
+    #     [readout] compute precision = fp8 ...                    ← 摘要说 fp8
+    #   → 所有后续 A/B 判定都会**误以为跑的是 fp8 臂**，而实际是 fp16。
+    # ✅ 修法：优先取读出实例**真实落地**的 dtype（降级链的结果），
+    #   拿不到才回落到请求值（并明确标注「requested」）。
+    _eff_dtype = cfg.readout_dtype
+    _eff_note = ""
+    try:
+        _rd = getattr(lm.net, "readout", None)
+        _res = getattr(_rd, "_precision_resolved", None) or {}
+        if isinstance(_res, dict) and _res.get("dtype"):
+            _eff_dtype = str(_res["dtype"])
+            if _eff_dtype != str(cfg.readout_dtype):
+                _eff_note = (f"；⚠ 请求 {cfg.readout_dtype} → **实际落地 "
+                             f"{_eff_dtype}**（降级链）")
+    except Exception:                                        # noqa: BLE001
+        pass
+
+    if _eff_dtype in ("bf16", "fp16", "fp8", "fp4", "int8", "int4"):
         # P147：fp8 已是 **fhz 明确指定的默认**（模型本体 fp8 / 其余 fp16），
         # 所以这里**不再叫它「生产别用」**，而是如实陈述代价 + 给出复核手段。
-        _isdef = (cfg.readout_dtype == "fp8")
+        _isdef = (_eff_dtype == "fp8")
         _tail = ("这是 fhz 2026-10-02 指定的默认（模型本体 fp8）。"
                  if _isdef else
                  "如需精确 p − t 规则请显式 --readout-dtype fp32。")
-        print(f"[readout] compute precision = {cfg.readout_dtype}"
+        print(f"[readout] compute precision = {_eff_dtype} (requested "
+              f"{cfg.readout_dtype}{_eff_note})"
               f" (checkpoint storage = {args.ckpt_dtype or 'fp32'}); "
               f"代价：低精度会舍入丢弃感知器 p − t 的**非目标行**更新"
               f"（P110 实测保留率 fp32 99.95% / fp16 26.67% / bf16 5.79%"
@@ -895,7 +917,8 @@ def main() -> None:
               f"（训练流 PPL 波动正负 20%，不可用作判据，见 P146）。",
               flush=True)
     else:
-        print(f"[readout] compute precision = {cfg.readout_dtype}"
+        print(f"[readout] compute precision = {_eff_dtype} (requested "
+              f"{cfg.readout_dtype}{_eff_note})"
               f" (checkpoint storage = {args.ckpt_dtype or 'fp32'})"
               f" — 精确 p − t 规则", flush=True)
     print(f"[readout] backend={_rb}"
