@@ -1,0 +1,39 @@
+test(P158): check P154 against the Ascend probe results and add two verifiers
+
+fhz's Ascend 910B4 probe with torch 2.9.0+cpu and torch_npu 2.9.0 changes one
+instruction materially. Both float8_e4m3fn and float8_e5m2 fail to even be
+created on the NPU with "has not been supported", for create, roundtrip and
+matmul alike, while on the CPU they can be created and round-tripped but cannot be
+matmul-ed. Since fp8 tensors cannot exist on the device, the second half of the
+instruction, fp8 storage, is physically impossible there. The real 910B path is
+int8 storage with int8 compute, which costs exactly the same traffic since both
+are one byte per element. Whether to accept that form needs fhz's decision.
+
+That result also makes the P154 CPU bit conversion dead code on Ascend, because
+its guard requires the weight dtype to be float8. So fp8_to_int8_cpu is never
+called, which is good news since the D2H and H2D synchronisation I was worried
+about cannot happen. What actually needs measuring on Ascend is the P155 int16
+intermediate with int32 accumulation. I verified that path locally with the new
+tools/verify_int8_fallback.py, covering the forward shape, the update, and the
+auto switch; int8 storage with int8 compute gives nll 10.7530.
+
+One caveat about the probe itself: every npu_quant_* entry failed on argument
+signatures rather than on support, for instance "missing value for argument
+'scale'" and "takes 1 positional argument(s) but 2 was/were given". Those results
+do not show that Ascend lacks int8 operators, so they must be retested with full
+signatures before drawing that conclusion. npu_quant_matmul_reduce_sum is the
+most promising candidate since it reports only that x2 must be in nz format, and
+npu_format_cast works, so the layout may be reachable; its semantics of computing
+quantised group matmuls and summing all groups could match our int32 accumulation
+directly.
+
+That means the test order I gave earlier was wrong. Step T3 assumed int8
+operators were already running and asked for msprof cube_time, but on this device
+nothing int8 executes, so that measurement would be meaningless. The new first step
+is to probe the npu_quant family with correct signatures and only run msprof if a
+real int8 operator turns up.
+
+Gates: fast 9/9, precision_policy, accel_sparse, accel_readout, help_percent and
+cann_env all PASS.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
