@@ -23,6 +23,26 @@ try:
 except ImportError:  # pragma: no cover
     torch = None
 
+# ⚠ P160（fhz 2026-10-03 生产日志）：`import torch_npu` **必须在本模块之后立即
+#   执行**才生效 —— torch_npu 靠 import 副作用把 `npu` 注册进 torch 的设备表。
+#   生产日志里读出全线回落（fp8/fp16/int8 全部「Expected one of cpu, cuda, …」
+#   且列表里**没有 npu**）→ 就是这里缺了 import。
+#   ⚠ 那个局部探测函数里曾有 import，但写在探测内部 + `except: pass`
+#   静默吞异常 → 失败时日志里看不到任何线索。统一收敛到下面这个函数。
+_NPU_IMPORT_ERROR: str | None = None
+
+
+def ensure_npu_registered() -> str | None:
+    """import torch_npu 以把 `npu` 注册进 torch 设备表。返回错误原因或 None。"""
+    global _NPU_IMPORT_ERROR
+    if _NPU_IMPORT_ERROR is None:
+        try:
+            import torch_npu  # noqa: F401   # 副作用式注册
+        except Exception as exc:                            # noqa: BLE001
+            _NPU_IMPORT_ERROR = f"{type(exc).__name__}: {str(exc)[:120]}"
+    return _NPU_IMPORT_ERROR
+
+
 from .torch_backend import probe_devices
 
 
@@ -38,10 +58,17 @@ def resolve_device(device: str = "auto", allow_fallback: bool = False) -> str:
     if torch is None:
         raise RuntimeError("未安装 torch，无法使用 torch LM 栈")
     dev = str(device).strip().lower()
+    # ⚠ P160：`probe_devices()` 报 npu ok **不代表 torch 真能用 npu** ——
+    #   torch_npu 的 import 副作用才把 npu 写进 torch 的设备表。
+    #   → auto 分支在相信 npu 之前**先确保已注册**（成本：一次 import 缓存）。
+    _npu_err = ensure_npu_registered()
     if dev in ("", "auto"):
         probes = probe_devices()
         for key in ("npu", "rocm", "cuda"):
             if probes.get(key, {}).get("ok"):
+                if key == "npu" and _npu_err is not None:
+                    # 注册失败 → 不能声称可用（否则下游建张量必失败）
+                    continue
                 return "npu" if key == "npu" else "cuda"
         if probes.get("dml", {}).get("ok"):
             return probes["dml"]["device"] or "privateuseone:0"
