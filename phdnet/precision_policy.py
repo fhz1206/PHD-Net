@@ -1,0 +1,140 @@
+"""统一精度策略：**自动降级链**（P151，fhz 2026-10-03 指令）。
+
+指令原文
+================================================================================
+「精度逻辑改写成 fp 该多少是多少，如果 fp 的不支持就自动转为 int，int 如果不支持
+自动转为 fp，如果两者都不行再报错；解禁 fp8, fp4, int4, int8，默认走 fp8 和 fp16」
+
+降级链
+================================================================================
+    fpX  ──不支持──►  intY（同位宽或更宽）
+    intY ──不支持──►  fpX
+    两者都不支持 ──►  **报错**（带可选方案）
+
+「支持」的判据= **真跑一次**（不是查表）。这是本项目反复踩过的坑：
+- P86 曾把昇腾 fp8 硬编码禁用，而驱动会升级 → 探测比禁令可靠；
+- P148 我写的探测是 `a.to(fp16) @ b` → **全程没跑 fp8 kernel**，
+  在任何设备上都成功 → `has_fp8` 恒真，等于没有探测。
+所以这里的每个候选都要**实际构造并跑一步**才算「支持」。
+
+同族替代（same-family sibling）
+================================================================================
+降级时优先在**同一族内**换（fp8 → fp16 → fp32），因为它们能复用同一条算子
+路径；跨族（fp → int）要换 scale 语义，代价更大但仍在自动完成之列。
+"""
+from __future__ import annotations
+
+# ── 精度族定义（位宽从窄到宽）────────────────────────────────────────────────
+#   每项:(名称, 存储字节/元素, 族, 同族替代顺序)
+FAMILIES: dict[str, dict] = {
+    # ── 浮点族（bit-exact 格点：e4m3fn / bf16 / fp16 / fp32）──────────────
+    "fp8":  {"bytes": 1, "family": "fp", "siblings": ["fp16", "bf16", "fp32"]},
+    "fp16": {"bytes": 2, "family": "fp", "siblings": ["bf16", "fp32", "fp8"]},
+    "bf16": {"bytes": 2, "family": "fp", "siblings": ["fp16", "fp32", "fp8"]},
+    "fp32": {"bytes": 4, "family": "fp", "siblings": []},
+    "fp4":  {"bytes": 0.5, "family": "fp", "siblings": ["fp8", "fp16", "fp32"]},
+    # ── 定点族（per-tensor scale + 最近格点）────────────────────────────
+    "int8": {"bytes": 1, "family": "int", "siblings": ["int16", "int32", "fp8"]},
+    "int4": {"bytes": 0.5, "family": "int", "siblings": ["int8", "int16", "fp8"]},
+    "int16": {"bytes": 2, "family": "int", "siblings": ["int32", "fp16"]},
+    "int32": {"bytes": 4, "family": "int", "siblings": ["fp32"]},
+}
+
+# 「默认走 fp8 和 fp16」——模型本体 fp8、迭代 fp16（P149口径）
+DEFAULT_MODEL_DTYPE = "fp8"
+DEFAULT_ITER_DTYPE = "fp16"
+
+
+def candidate_order(requested: str) -> list[str]:
+    """给出 `requested` 的**降级尝试顺序**。
+
+    顺序：同族替代（窄→宽）→ 跨族（先同位宽的，再逐级放宽）→ fp32 兜底。
+    例：`fp8` → fp8, fp16, bf16, fp32, int8, int16, int32
+        `int8` → int8, int16, int32, fp8, fp16, bf16, fp32
+        `fp4` → fp4, fp8, fp16, bf16, fp32, int4, int8, int16, int32
+    ⚠ `fp32` **始终在链上**（它是所有族的公共终点，且一定能跑），
+      但**只有当前面全部不可用时才会被选中** —— 否则 fp8 就退化成 fp32 了。
+    """
+    req = str(requested or "").lower()
+    info = FAMILIES.get(req)
+    if info is None:
+        # 未知名字：直接交给调用方按 fp32 处理
+        return ["fp32"]
+    fam = info["family"]
+    sibs = [s for s in info.get("siblings", []) if s != req]
+    other = "int" if fam == "fp" else "fp"
+    # 跨族：先挑位宽相同的，再按位宽排
+    other_fam = sorted((k for k, v in FAMILIES.items()
+                        if v["family"] == other),
+                       key=lambda k: FAMILIES[k]["bytes"])
+    same_w = [k for k in other_fam if FAMILIES[k]["bytes"] >= info["bytes"]]
+    # ⚠ **顺序很重要**（fhz 指令「fp 不支持→int，int 不支持→fp」）：
+    #   1) 请求本身
+    #   2) **同族**替代（fp8 → fp16 → bf16）—— 复用同一条算子路径，代价最小
+    #   3) **跨族**（fp → int），位宽相同或更宽的优先
+    #   4) 跨族再回 fp 族（int → fp）：**fp32 放这里**，而不是第 2 步
+    #⚠ 否则 fp8 在 fp16 不可用时会**先撞上 fp32**（它是 fp 族最宽的），
+    #   永远轮不到 int8 —— 违背「先试 int」的指令。
+    #⚠ 同族兄弟里**跳过 fp32**（它是 fp 族最宽的）：若 fp8→fp16/bf16 都不行，
+    #   直接跳到 fp32 会**绕过 int族** —— 违背「先试 int」的指令。
+    sibs_mid = [x for x in sibs if x != "fp32"]
+    seq = [req] + sibs_mid + same_w
+    if fam == "int":
+        # 从 int 出发：回 fp 族（同位宽→更宽），fp32 在最后
+        back_fp = [k for k in other_fam
+                   if FAMILIES[k]["bytes"] >= info["bytes"]]
+        seq += back_fp + ["fp32"]
+    else:
+        # 从 fp 出发：跨族 int 全试完，再回到 fp32 兜底
+        seq += ["fp32"]
+    # 去重且保序
+    seen: set[str] = set()
+    return [x for x in seq if not (x in seen or seen.add(x))]
+
+
+def describe_chain(requested: str) -> str:
+    """人读的一行摘要（用于告警/报错文案）。"""
+    return " → ".join(candidate_order(requested))
+
+
+def resolve_precision(requested: str, probe, device: str = "cpu",
+                       allow_reorder: bool = True) -> dict:
+    """按降级链探测，返回第一个「真跑得通」的精度。
+
+    `probe(dt) -> (ok: bool, note: str)`：**必须真跑一次**并返回成败。
+    本函数**不做**任何静态猜测。
+
+    返回 `{"dtype": str|None, "requested": str, "attempts": [...],
+           "downgraded": bool, "chain": str, "reason": str}`
+    - `dtype is None` → 链上全部不可用 → **调用方必须报错**（指令要求）。
+    """
+    req = str(requested or "").lower()
+    order = candidate_order(req)
+    attempts: list[tuple[str, bool, str]] = []
+    for dt in order:
+        try:
+            ok, note = probe(dt)
+        except Exception as e:                              # noqa: BLE001
+            ok, note = False, f"{type(e).__name__}: {str(e)[:70]}"
+        attempts.append((dt, bool(ok), note))
+        if ok:
+            return {"dtype": dt, "requested": req, "attempts": attempts,
+                    "downgraded": dt != req, "chain": describe_chain(req),
+                    "reason": ""}
+    return {"dtype": None, "requested": req, "attempts": attempts,
+            "downgraded": False, "chain": describe_chain(req),
+            "reason": "; ".join(f"{d}: {n}" for d, _, n in attempts[:4])}
+
+
+def unsupported_message(res: dict, device: str = "") -> str:
+    """链上全不支持时的**报错文案**（指令：两者都不行再报错）。"""
+    lines = [f"[precision] ❌ 设备 {device or '?'} **无任何可用精度**"
+             f"（请求 {res['requested']}）。"]
+    lines.append(f"  降级链：{res['chain']}")
+    lines.append("  试过的结果：")
+    for dt, ok, note in res["attempts"][:8]:
+        lines.append(f"    {'✓' if ok else '✗'} {dt:<6} {note}")
+    lines.append("  可选方案：① 显式 `--readout-dtype fp32`（所有设备必然支持）"
+                 "；② 检查算子库/CANN 版本是否支持低精度；"
+                 "③ 若设备内存吃紧，可试 `int8`/`fp8`（1 字节）。")
+    return "\n".join(lines)
