@@ -62,8 +62,24 @@ FAMILIES: dict[str, dict] = {
     "int32": {"bytes": 4, "family": "int", "siblings": ["fp32"]},
 }
 
-# 「默认走 fp8 和 fp16」——模型本体 fp8、迭代 fp16（P149口径）
-DEFAULT_MODEL_DTYPE = "fp8"
+# ⚠⚠⚠ **P163（fhz 2026-10-03 决定）：int 族整体禁用**──────────────────────
+# 「就按照刚刚测试的版本吧，别的多余的脚本不要了，**所有 int 全部禁用**」
+#
+# 依据（Ascend910B4 生产实测，outputs/_t2_int8.log）：
+#   · fp8 不可用（ERR01007，P86/P158 复核）
+#   · **int8 也没顶上** —— 降级链 fp8 → int8 → fp16 里，int8 探测失败，
+#     最终落到 **fp16**；即本轮实际跑的是 **fp16 存储 + fp16 计算**。
+#   · int 族在本项目的稀疏 gather-GEMV 形态下**从未显示收益**：
+#     P156 实测 int8 路径在 CPU 上比 fp16 慢 1.2×（连 int16 中间都不如 fp16），
+#     而「真int8 累加」数学上不可能（127×127 > 127）。
+#   → 结论：**int 族退出**。默认 fp16（= 刚刚测试通过的那一版）。
+#
+# ⚠ **这里只做「禁用」判定，不删 FAMILIES 条目**—— 保留它们是为了
+#   历史日志/文档可追溯，且日后若换平台要恢复只需翻这一个开关。
+INT_FAMILY_ENABLED = False
+
+# 「默认走 fp16」——**P163**：模型本体与迭代统一 fp16（刚刚验证通过的那一版）
+DEFAULT_MODEL_DTYPE = "fp16"
 DEFAULT_ITER_DTYPE = "fp16"
 
 
@@ -95,9 +111,9 @@ def candidate_order(requested: str) -> list[str]:
     #   2) **同族**替代（fp8 → fp16 → bf16）—— 复用同一条算子路径，代价最小
     #   3) **跨族**（fp → int），位宽相同或更宽的优先
     #   4) 跨族再回 fp 族（int → fp）：**fp32 放这里**，而不是第 2 步
-    #⚠ 否则 fp8 在 fp16 不可用时会**先撞上 fp32**（它是 fp 族最宽的），
+    # ⚠ 否则 fp8 在 fp16 不可用时会**先撞上 fp32**（它是 fp 族最宽的），
     #   永远轮不到 int8 —— 违背「先试 int」的指令。
-    #⚠ 同族兄弟里**跳过 fp32**（它是 fp 族最宽的）：若 fp8→fp16/bf16 都不行，
+    # ⚠ 同族兄弟里**跳过 fp32**（它是 fp 族最宽的）：若 fp8→fp16/bf16 都不行，
     #   直接跳到 fp32 会**绕过 int族** —— 违背「先试 int」的指令。
     sibs_mid = [x for x in sibs if x != "fp32"]
     seq = [req] + sibs_mid + same_w
@@ -111,7 +127,29 @@ def candidate_order(requested: str) -> list[str]:
         seq += ["fp32"]
     # 去重且保序
     seen: set[str] = set()
-    return [x for x in seq if not (x in seen or seen.add(x))]
+    out = [x for x in seq if not (x in seen or seen.add(x))]
+
+    # ══════════════════════════════════════════════════════════════════════
+    # **P163：int 族整体禁用**（fhz 2026-10-03「所有 int 全部禁用」）
+    # ══════════════════════════════════════════════════════════════════════
+    if not INT_FAMILY_ENABLED:
+        # 请求 int 时**不静默换人**：报错，因为「禁 int」是硬约束，
+        # 悄悄 fp16 会让调用方以为跑的是 int。
+        if fam == "int":
+            raise ValueError(
+                f"int 族已禁用（P163，fhz 2026-10-03）：请求 {req!r} 无效。"
+                f"可用：fp32 / fp16 / bf16。"
+                f"依据：Ascend910B4 实测 fp8 与 int8 均不可用，实际落到 fp16；"
+                f"且 P156 实测 int8 路径在 gather-GEMV 下比 fp16 慢 1.2×。")
+        out = [x for x in out if FAMILIES.get(x, {}).get("family") != "int"]
+    # ⚠ **fp8/fp4 也不进候选**（P163）：910B 实测 ERR01007 建不出张量，
+    #   留在链上只会让降级说明多一行必然失败的记录、并稀释真正的失败原因
+    #   （P161 的教训：降级链里全是"必然失败"会掩盖真因）。
+    out = [x for x in out if x not in ("fp8", "fp4", "int4")]
+    # 去掉裸 fp32 中间项（若已被排除则只剩 fp16/bf16）
+    if out and out[0] != "fp32" and "fp32" in out[1:]:
+        out = [out[0]] + [x for x in out[1:] if x != "fp32"]
+    return out
 
 
 def describe_chain(requested: str) -> str:

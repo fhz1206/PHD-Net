@@ -298,14 +298,17 @@ def main() -> None:
     ap.add_argument("--readout-powlaw-kmax", type=int, default=0,
                     help="P124：幂律分配的每行最多入边（0 = 不设上限 = n_h）")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
-    ap.add_argument("--readout-dtype", default="fp8",
-                    choices=["fp32", "fp16", "bf16", "fp8", "fp4", "int8", "int4",
-                             "int16", "int32"],
-                    help="读出计算精度。**默认 fp32**（P110, 2026-10-01：实测 "
-                         "低精度会丢弃感知器 p − t 的非目标行更新 → 学习退化为"
-                         "纯 Hebbian，见 tools/probe_readout_precision.py）。"
-                         "fp16/bf16 保留率仅 26.7%%/5.8%%（|dp|~1e-6 档），"
-                         "提速有限而语义有损；int8 更差。需低精度请显式指定")
+    ap.add_argument("--readout-dtype", default="fp16",
+                    choices=["fp32", "fp16", "bf16"],
+                    help="读出计算精度。**默认 fp16**（P163，fhz 2026-10-03）。"
+                         "**int 族（int8/int16/int32/int4）已整体禁用**，"
+                         "fp8/fp4 亦不再可选（910B 实测 ERR01007；4-bit unpack"
+                         "开销抵消存储收益）。可用：fp32 / fp16 / bf16。"
+                         "依据：Ascend910B4 生产实测 fp8 与 int8 均不可用、"
+                         "降级链最终落到 **fp16**（即当前默认 = 唯一验证通过的"
+                         "那一条）；且 P156 实测 int8 路径在稀疏 gather-GEMV 下"
+                         "比 fp16 **慢 1.2×**。保留率代价见 "
+                         "tools/probe_readout_precision.py（P110）")
     ap.add_argument("--torch-compile", dest="torch_compile",
                     action="store_true", default=False,
                     help="P58（fhz 2026-09-29「图优化关了吧」）：默认 OFF——"
@@ -898,7 +901,7 @@ def main() -> None:
     except Exception:                                        # noqa: BLE001
         pass
 
-    if _eff_dtype in ("bf16", "fp16", "fp8", "fp4", "int8", "int4"):
+    if _eff_dtype in ("bf16", "fp16"):
         # P147：fp8 已是 **fhz 明确指定的默认**（模型本体 fp8 / 其余 fp16），
         # 所以这里**不再叫它「生产别用」**，而是如实陈述代价 + 给出复核手段。
         _isdef = (_eff_dtype == "fp8")

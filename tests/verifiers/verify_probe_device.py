@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """verify_probe_device：读出精度探测**必须用已解析的设备**（P161 门禁）。
 
+P163：dtype 列表改为 fp16/bf16/fp32 —— **int 族已整体禁用**，
+原来的 int8 用例现在应当**报错**（见 P163 的 int 门禁）。
+
 fhz 2026-10-03 13:19 的生产日志（Ascend910B4）：
 
     [readout] backend=numba-cpu(回落) | fallback reason:
@@ -108,7 +111,7 @@ try:
     h = np.random.default_rng(0).normal(0, 1, n_h)
     t = np.zeros(n_out)
     t[0] = 1.0
-    for dt in ("fp16", "int8", "fp8"):
+    for dt in ("fp16", "bf16", "fp32"):
         try:
             clear_cache()
             ro = AccelReadout(n_h, n_out, np.random.default_rng(3),
