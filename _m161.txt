@@ -1,0 +1,36 @@
+fix(P161): the probe used the unresolved device string "auto", so every dtype failed
+
+The run after P160 still fell back to numba-cpu and the fallback reason was
+character-for-character the same as before. The real cause is in
+accel_readout.__init__. Line 228 already resolves the device, turning "auto" into
+"npu" and storing it on self.device, but the probe closure nineteen lines later
+set the device name from the original argument instead, so the probe ran
+torch.ones(8, 8, device="auto"). Torch treats "auto" as an unknown device name and
+searches its own device table, which is why the error lists cpu, cuda, ipu, xpu and
+the rest with no npu among them. That made every dtype fail for one single reason,
+ran the degradation chain to its end, and produced the fallback. The fix reads the
+device from self.device.
+
+My P160 diagnosis was wrong. fhz's log had already shown that importing
+torch_npu succeeds, that device_count is one, and that a tensor builds fine on npu
+through the project's own resolver, so the environment was always healthy and I
+mislabelled it as an unregistered torch_npu. That change turned out to be
+harmless and still necessary, since torch_lm never imports torch_npu, but it was
+not what caused this fallback. The lesson is that a device table without npu in
+the error has two possible explanations: torch_npu did not register, or the name
+handed to torch was never npu in the first place, so the first thing to check is
+what was actually passed.
+
+This bug cannot be reproduced locally because on a CPU machine resolve("auto")
+also yields a name that fails to allocate, so both the working and broken paths
+look identical. The new tests/verifiers/verify_probe_device.py closes that gap: it
+asserts statically that the probe reads self.device, confirms dynamically that
+device="auto" fails with the expected message, and runs a regression across three
+dtypes through device=auto. I checked the gate actually catches the bug by
+temporarily reverting the fix, which produced five failures and reproduced the
+production message verbatim.
+
+Gates: fast 9/9, probe_device, accel_readout, precision_policy, accel_sparse,
+cann_env, help_percent, ms_stream and powlaw_readout all PASS, --help exit 0.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>

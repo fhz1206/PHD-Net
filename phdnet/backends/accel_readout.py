@@ -255,20 +255,39 @@ class AccelReadout:
         from ..precision_policy import (candidate_order, resolve_precision_cached,
                                        unsupported_message)
         _req = str(dtype or "fp32").lower()
-        _dev = str(device)
+        #⚠⚠⚠ **P161 根因修复（fhz 2026-10-03 13:19 生产日志）**
+        # 之前这里写的是 `_dev = str(device)` —— 即**未解析的原始入参**。
+        # 而上一行 `self.device = resolve_accel_device(device)` **已经把
+        # "auto" 解析成具体设备**（昇腾上 = "npu"）。
+        #   → `_probe` 拿到 "auto" 后执行 `torch.ones(8, 8, device="auto")`
+        #     → torch 把 "auto" 当**未知设备名**去查表 → 报
+        #       「Expected one of cpu, cuda, ipu, xpu, mkldnn, ...」
+        #     → **列表里没有 npu**（那是 torch 核心的设备表，与 torch_npu 无关）
+        #     → **fp8 / fp16 / int8 / bf16 / fp32 全部失败**（全是这一个原因）
+        #     → 降级链走到尽头 → `[readout] backend=numba-cpu(回落)`。
+        # ⚠ 所以之前我误判成「torch_npu 未注册」（P160），那是**错的诊断**：
+        #   fhz 的日志 STEP3 显示 `import torch_npu` 本来就成功、device_count=1、
+        #   且 STEP5 在 npu 上建张量**成功** —— 环境一直是好的。
+        #   错的只有这一行变量取值。
+        # ✅ 正确做法：用**已解析**的 `self.device`。
+        _dev = str(self.device)
 
         def _probe(dt: str):
             """真跑一次，判断 `dt` 在该设备上是否可用（构造 + 前向 + 更新）。"""
-            # ⚠ P160：必须**先**让 torch_npu 注册 npu（否则 torch 设备表里
-            #   没有 npu，任何张量都建不出来 → 全线fail）。
-            #   失败原因**不再静默**，会进入降级链说明。
+            # ⚠ 先让 torch_npu 注册 npu（副作用式 import）。
+            #   注P160：当时我以为这是读出回落的**根因**，**那是误判** ——
+            #   真因是 `_dev` 用了未解析的 `"auto"`（P161 已修）。
+            #   这行 import 本身**仍然必要**（`torch_lm` 从不import torch_npu，
+            #   不注册则 torch 设备表里确实没有 npu），但它不是那次回落的原因。
+            #   保留它顺带让失败原因**可见**（此前被 `except: pass` 吞掉）。
             _npu_err = _ensure_npu_registered()
             try:
                 import torch as _t
                 if _npu_err is not None and str(_dev).startswith("npu"):
                     raise RuntimeError(
                         f"torch_npu 未注册 npu 设备（{_npu_err}）；"
-                        f"torch 设备表里没有 npu，无法建张量")
+                        f"torch 设备表里没有 npu，无法建张量"
+                        f"（当前 device={_dev!r}）")
                 if dt in ("fp8",):
                     # 原生 fp8：**必须让 fp8 张量真正进 matmul**（不预 cast）
                     a = _t.ones(8, 8, dtype=_t.float8_e4m3fn, device=_dev)
