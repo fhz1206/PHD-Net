@@ -55,6 +55,8 @@
 pub mod acl;
 pub mod ffi;
 pub mod mechanisms;
+pub mod pool;
+pub mod simd;
 
 pub use acl::{Acl, AclError, DevBuf};
 pub use mechanisms::*;

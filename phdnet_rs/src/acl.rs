@@ -513,7 +513,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 无_canm_时_open_返回_none_而非报错() {
+    fn acl_open_returns_none_not_error() {
         // 本机（无 CANN）必须是 Ok(None)，**不能是 Err** ——
         // 否则 Python 侧会把「回落」当成「崩溃」。
         match Acl::open(0) {
@@ -524,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn available_不panic() {
+    fn available_does_not_panic() {
         let _ = available();
     }
 }
