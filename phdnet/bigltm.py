@@ -5,7 +5,9 @@
 
 import numpy as np
 
-from .ltm_kernel import NUMBA_LTM, _recall_project
+from .ltm_kernel import (NUMBA_LTM, _recall_project,
+                         _recall_project_sparse,
+                         _recall_project_hashed)
 from .sparse_table import OnlineCSRTable, SparseSynapseTable
 from .tokenizer import U64, _mix64
 
@@ -54,7 +56,50 @@ class SparseLTM:
         # P68：rev 是**静态**的（上面一次性构建完就不再变），所以零维护成本地
         # 预 CSR 化，供 numba 核 `_recall_project` 使用。维度序保持与 dict 的
         # list 序一致（j 升序）→ 与 Python 版逐位相同。
+            # P166：**30b 档（n_neurons=2^29）的稠密 indptr 是 4.0 GB**，
+        # 而 rev 的真实键数只有 n_dim×k_hash（30b 档 12288 个，占 0.0023%）。
+        #   → 改用「稀疏键 + 二分」（`rev_keys`/`rev_off`，共 ~98 KB），
+        #     核用 `_recall_project_sparse`。**语义与稠密版逐位相同**。
+        #   → 保留稠密版供小规模（`_rev_dense`，见 `_rev_to_csr` 注释里的阈值），
+        #     这样 1b 档的**既有行为逐位不变**。
         self._rev_indptr, self._rev_indices = self._rev_to_csr()
+        self._rev_keys = np.array(sorted(self.rev), dtype=np.int64) \
+            if self.rev else np.empty(0, dtype=np.int64)
+        cnts = np.fromiter((len(self.rev[int(i)]) for i in self._rev_keys),
+                           dtype=np.int64, count=len(self._rev_keys))
+        self._rev_off = np.concatenate(
+            [np.zeros(1, dtype=np.int64), np.cumsum(cnts)])
+        self._rev_indices_sparse = (
+            np.concatenate([np.asarray(self.rev[int(i)], dtype=np.int64)
+                            for i in self._rev_keys])
+            if self._rev_keys.size else np.empty(0, dtype=np.int64))
+        # 阈值：稠密 indptr 超过 32 MB（4×10^6 个键）就切稀疏。
+        #   1b 档 16.8M 键 = 134 MB → **走稀疏**（省 134 MB）；
+        #   smoke 档（2^20）= 8.4 MB → 保留稠密（切换零成本）。
+        # ⚠ P166 未做「稀疏版更快」的实测断言，故阈值只按**内存**定，不按速度定。
+        self._use_sparse_rev = self._rev_indptr.nbytes > (32 << 20)
+        # P166b：开放寻址表（**槽存键 +1，0= 空**）。表长取 2 的幂且
+        # ≥ 4×键数（负载因子 ≤ 0.25）→ 平均探测 ≤ 1.33 次。
+        # 30b 档：4096 键 → 表长 16384 → **128 KB**（仍远小于稠密 4 GB）。
+        _nk = int(self._rev_keys.size)
+        if _nk:
+            _tsz = 1
+            while _tsz < 4 * _nk:
+                _tsz <<= 1
+            # ⚠ P166c：槽里**同时**存键与下标 → 命中零次二分。
+            #   P166b（只存键）实测**慢 0.9×**（命中后还要二分找区间），
+            #   那次二分白做了。
+            self._rev_table = np.zeros(_tsz, dtype=np.int64)
+            self._rev_tpos = np.zeros(_tsz, dtype=np.int64)
+            for _i, _k in enumerate(self._rev_keys.tolist()):
+                _slot = ((int(_k) + 1) * 2654435761) & (_tsz - 1)
+                while self._rev_table[_slot] != 0:
+                    _slot = (_slot + 1) & (_tsz - 1)
+                self._rev_table[_slot] = int(_k) + 1
+                self._rev_tpos[_slot] = _i
+        else:
+            self._rev_table = np.zeros(1, dtype=np.int64)
+            self._rev_tpos = np.zeros(1, dtype=np.int64)
         # P95：预构造 `idx` 的 python 列表形式。`encode` 每步对每个活跃维度做
         # `self.idx[j].tolist()`（numpy 花式索引 + 列表转换）——实测 256 活跃维
         # 时 183.7 µs/次，而 encode 在 imprint 与 recall 里**每步**都调（审计 M4）。
@@ -224,7 +269,14 @@ class SparseLTM:
             ks, ws = self.table.predict_arr(active)
             if ks.size == 0:
                 return np.zeros(self.n_dim)
-            _recall_project(ks, ws, out, self._rev_indptr, self._rev_indices)
+            if getattr(self, "_use_sparse_rev", False):
+                # P166b：哈希表O(1)（P166 的二分版在 30b 档 93.7 µs 太慢）
+                _recall_project_hashed(ks, ws, out, self._rev_table,
+                                       self._rev_tpos, self._rev_off,
+                                       self._rev_indices_sparse)
+            else:
+                _recall_project(ks, ws, out, self._rev_indptr,
+                                self._rev_indices)
             n_scores = int(ks.size)
         else:
             scores = self.table.predict(active)

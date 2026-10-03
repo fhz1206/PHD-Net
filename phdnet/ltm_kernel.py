@@ -81,6 +81,92 @@ def _recall_project(big_ids, weights, out, rev_indptr, rev_indices):
             out[rev_indices[p]] += w
 
 
+@njit(cache=True, nogil=True, fastmath=False)
+def _recall_project_sparse(big_ids, weights, out, rev_keys, rev_off,
+                            rev_indices):
+    """**P166**：反投影累加（**稀疏键 + 二分**版，替代稠密 `rev_indptr`）。
+
+    语义与 `_recall_project`（稠密版）**完全相同**，包括：
+      · 累加次序 = `big_ids` 的给定次序（重复键逐次累加）；
+      · 键不存在 → 跳过（等价 `dict.get(big_i, ())` 返回空元组）；
+      · 维度序 = 原 dict list 序（j 升序）→ 逐位与Python 版相同。
+
+    改动只在**怎么找 b 落在哪个区间**：
+      稠密版：`rev_indptr[b]` 直接下标 → 数组长 n_keys（30b 档 4.0 GB，
+              随机访问必然 cache miss）；
+      稀疏版：在 rev_keys（长 = 实际键数 12288，**98 KB**）里二分，
+              区间从 rev_off 取 → **全在 L1/L2**。
+
+    ⚠ 二分的比较次数是 log2(12288) ≈ 14，但每次都在**几 KB 的热区**，
+      而稠密版一次访问就要穿透 4 GB 的地址空间。
+    """
+    n_keys = rev_keys.shape[0]
+    for t in range(big_ids.shape[0]):
+        b = big_ids[t]
+        if b < 0:
+            continue
+        # 二分：找 rev_keys 中等于 b 的位置（升序）。
+        lo = 0
+        hi = n_keys - 1
+        pos = -1
+        while lo <= hi:
+            mid = (lo + hi) >> 1
+            v = rev_keys[mid]
+            if v == b:
+                pos = mid
+                break
+            if v < b:
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        if pos < 0:
+            continue                      # 该 big_i 没绑定任何维度
+        w = weights[t]
+        for p in range(rev_off[pos], rev_off[pos + 1]):
+            out[rev_indices[p]] += w
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _recall_project_hashed(big_ids, weights, out, slot_keys, slot_pos,
+                            rev_off, rev_indices):
+    """**P166c**：开放寻址哈希，**命中后零次二分**（真O(1)）。
+
+    ### 为什么改（P166b 的设计失误）
+    P166b 哈希表只存**键**，命中后还要**再二分一次** `rev_keys` 才能拿到区间
+    起点 → 实测比纯二分版**还慢 0.9×**（30b 档活跃 1024：二分 341.7 µs、
+    哈希 389.9 µs）。二分白做了。
+
+    P166c：**两个平行数组**（`slot_keys` / `slot_pos`），槽里同时放
+    「键+1」与「该键在 rev_off 里的下标」→ 命中即得区间，**不再二分**。
+    代价：两张表各128 KB（30b 档），共 256 KB —— 仍远小于稠密 4094 MB。
+
+    语义与 `_recall_project`（稠密）/ `_recall_project_sparse`（二分）
+      **完全相同**：键不存在 → 跳过；累加次序 = `big_ids` 给定次序；
+      维度序 = 原 dict list 序（j 升序）。
+
+    ⚠ 「键 + 1」：0 表示空槽。键 = 大空间索引< 2^32，int64 下无溢出。
+    ⚠ 槽位哈希用**乘法混合**（MEMORY 的 numba 铁律：`key & mask` 在低位
+      有结构时会退化）。
+    """
+    mask = slot_keys.shape[0] - 1
+    for t in range(big_ids.shape[0]):
+        b = big_ids[t] + 1                # +1 使「空槽 0」可区分
+        if b == 0:                # 原 big_i == -1 → 跳过
+            continue
+        slot = (b * 2654435761) & mask
+        while True:
+            v = slot_keys[slot]
+            if v == 0 or v == b:
+                break
+            slot = (slot + 1) & mask
+        if slot_keys[slot] == 0:
+            continue                      # 该键不存在（空槽）
+        pos = slot_pos[slot]              # 命中即得，**无二次查找**
+        w = weights[t]
+        for q in range(rev_off[pos], rev_off[pos + 1]):
+            out[rev_indices[q]] += w
+
+
 @njit(cache=True, nogil=True, parallel=True, fastmath=False)
 def _ltm_learn_rows(K, V, S, tpi, tpi_post, ks, g_tpost, g_tpre,
                     eta, w_max, q, int8, m_out):
