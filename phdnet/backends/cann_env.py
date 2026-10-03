@@ -69,6 +69,91 @@ _CANN_VARS: dict[str, tuple[bool, str, str]] = {
 }
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# **P168：ROCm（AMD）运行时环境** —— 与 CANN 同机制，同样须在 import torch 前
+# ══════════════════════════════════════════════════════════════════════════
+# 依据 **ROCm 官方文档**（2026-10-03 检索）：
+#   · `TORCH_BLAS_PREFER_HIPBLASLT=1`
+#     「Explicitly prefers hipBLASLt for GEMM operations in PyTorch, which can
+#       improve linear layer performance」—— 官方 env 参考页。
+#     → **直接命中本项目**：M1 编码器（P165 实测 BLAS 比自写核快 **5.4×**）
+#       与 M6 读出都走 GEMV/GEMM → 显式让 torch 选 hipBLASLt 而非 hipBLAS。
+#   · `NCCL_MIN_NCHANNELS=112`（MI300X 专用）
+#     → **本项目单卡读出，不设**：那是**多卡 RCCL** 的互联调优，单卡无收益
+#       且占内存。**明确写下来是为了防止以后照抄。**
+#   · `HSA_OVERRIDE_GFX_VERSION` —— 是**兼容性覆盖**（在不支持的卡上强开），
+#     本项目**不设**：它会绕过真实的架构判定，与 P167 的「按真跑探测」相悖。
+#   · `torch.compile(backend='rocdynamo')`：社区数据称有 ~25% 融合收益，
+#     但本机 P155 已实测 `torch.compile` **不可用**（无 C++ 编译器
+#     `cl is not found`），且未在 ROCm/昇腾上实测 → **默认不设**。
+#
+# ⚠ **铁律**：任何一项都**没有本项目的实测数据**（本机无 AMD 卡）。
+#   这里只做「官方文档推荐 + 默认无害」，**不宣称收益**。
+#   真要开→ 一次改一个 + `--step-profiling` 对比 `segments(win)`。
+_ROCM_VARS: dict[str, tuple[bool, str, str]] = {
+    "TORCH_BLAS_PREFER_HIPBLASLT": (
+        True, "1",
+        "官方推荐：让 PyTorch 的 GEMM 优先走 hipBLASLt（ROCm 官方 env 参考页）。"
+        "⚠ 本项目 M1 编码器与 M6 读出都是 GEMV/GEMM 形态 → 直接命中。"
+        "⚠ **本机无 AMD 卡，本项无实测数据**；若变慢请 `PHD_ROCM_BLASLT=0` 关掉。"),
+    "NCCL_MIN_NCHANNELS": (
+        False, "112",
+        "MI300X 多卡 RCCL 互联调优。⚠ **本项目单卡读出，不该设** —— "
+        "单卡无 all-reduce，设了只占内存。（写下来是防以后照抄社区清单。）"),
+    "HSA_OVERRIDE_GFX_VERSION": (
+        False, "-",
+        "⚠ **不要设**：它是「在不支持的卡上强行覆盖架构」的兼容性手段，"
+        "会绕过真实判定 —— 与 P167「支持与否由真跑探测决定」相悖。"),
+    "TORCHINDUCTOR_COMPILE_THREADS": (
+        False, "-",
+        "torch.compile 的编译线程数。本项目**默认不 compile**"
+        "（P155 实测本机无 C++ 编译器）；用 rocdynamo 后端时才需调。"),
+}
+
+
+def apply_rocm_env(verbose: bool = True) -> dict:
+    """设置 ROCm/hipBLASLt 环境变量（幂等）。返回实际生效值。
+
+    ⚠ 必须在 `import torch` / `import numpy` 之前调用。
+    ⚠ **本项目无 AMD 卡的实测数据** —— 这里只落官方推荐项且默认无害；
+    真要判断收益必须在 ROCm 机器上跑 `--step-profiling` 对比。
+    """
+    applied: dict = {}
+    lines = []
+    # 全局逃生阀：PHD_ROCM_ENV=0 一次关掉全部（便于 A/B 与排障）
+    if str(os.environ.get("PHD_ROCM_ENV", "1")).strip().lower() in (
+            "0", "false", "no", "off"):
+        if verbose:
+            print("[rocm-env] 已由 PHD_ROCM_ENV=0 关闭（全部不设置）",
+                  flush=True)
+        return {k: None for k in _ROCM_VARS}
+    for k, (on, val, why) in _ROCM_VARS.items():
+        cur = os.environ.get(k)
+        if cur is not None:
+            applied[k] = cur
+            lines.append(f"  {k} = {cur}   (显式设置，保留)")
+            continue
+        #单项逃生阀：PHD_ROCM_<KEY>=0 可单独关掉某项
+        if str(os.environ.get("PHD_ROCM_" + k, "1")).strip().lower() in (
+                "0", "false", "no", "off"):
+            applied[k] = None
+            lines.append(f"  {k} = (unset)  ← 已由 PHD_ROCM_{k}=0 关闭")
+            continue
+        if on:
+            os.environ[k] = val
+            applied[k] = val
+            lines.append(f"  {k} = {val}   ← 默认开启")
+        else:
+            applied[k] = None
+            lines.append(f"  {k} = (unset)  ← 默认关闭：{why.split('：')[0]}")
+    if verbose:
+        print("[rocm-env] ROCm/AMD 运行环境（须在 import torch 前设置; "
+              "⚠ 无本机实测数据，见 docs）:", flush=True)
+        for ln in lines:
+            print(ln, flush=True)
+    return applied
+
+
 def apply_cann_env(verbose: bool = True) -> dict:
     """设置 CANN/torch_npu 环境变量（幂等）。返回实际生效值。
 
@@ -104,6 +189,12 @@ def describe() -> str:
     for k in _CANN_VARS:
         out.append(f"{k}={os.environ.get(k, '(unset)')}")
     return " ".join(out)
+
+
+def describe_rocm() -> str:
+    """返回 ROCm 变量的实际状态（P168 诊断用，不修改）。"""
+    return " ".join(f"{k}={os.environ.get(k, '(unset)')}"
+                    for k in _ROCM_VARS)
 
 
 if __name__ == "__main__":  # pragma: no cover
