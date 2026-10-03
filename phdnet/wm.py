@@ -10,8 +10,11 @@ class WorkingMemory:
 
     def __init__(self, n: int, n_slots: int, gamma: float,
                  content_address: bool = False, sim_thresh: float = 0.6):
-        self.slots = np.zeros((n_slots, n))     # 槽位内容
-        self.strength = np.zeros(n_slots)       # 槽位强度（持续放电幅值）
+        # ⚠⚠ **P173（fhz 指令）：fp64 → fp32**（理由同 sparse_pc.py）。
+        #   ⚠ M4a 是**逐元素**运算（衰减/门控），本来就访存受限；
+        #     fp32 让每步的 slots 流量**减半**。
+        self.slots = np.zeros((n_slots, n), dtype=np.float32)     # 槽位内容
+        self.strength = np.zeros(n_slots, dtype=np.float32)       # 槽位强度（持续放电幅值）
         self.gamma = gamma
         self.summary_slot: int | None = None    # P5：摘要槽（不参与漏衰减）
         # T3.4 内容寻址写入（默认关闭 = 最弱槽位旧行为）

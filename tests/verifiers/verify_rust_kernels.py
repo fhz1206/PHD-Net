@@ -263,6 +263,55 @@ for _npdt, _name, _tolmul in ((np.float32, "fp32", 1e-5),
     except Exception as e:                                # noqa: BLE001
         check("G4 %s dtype 路径可算" % _name, False, str(e)[:50])
 
+# ── H. M2 CSR SpMV SIMD（P173）─────────────────────────────────────
+print("[H] M2 CSR SpMV SIMD（fp32 改造后）")
+_n_rows, _kk = 512, 128
+_indptr = np.arange(0, _n_rows * _kk + 1, _kk, dtype=np.int64)
+_idx = rng.integers(0, _n_rows, _n_rows * _kk).astype(np.int64)
+_val32 = rng.normal(0, 0.05, _n_rows * _kk).astype(np.float32)
+_x32 = rng.normal(0, 1, _n_rows).astype(np.float32)
+_y_sd = np.zeros(_n_rows, dtype=np.float32)
+_y_sc = np.zeros(_n_rows, dtype=np.float32)
+K.csr_spmm_simd(_indptr, _idx, _val32, _x32, _y_sd, 4)
+K.csr_spmm(_indptr, _idx, _val32, _x32, _y_sc, 4)
+# Python 标量参照（fp32 升序累加）
+_y_ref = np.zeros(_n_rows, dtype=np.float32)
+for _i in range(_n_rows):
+    _a, _b = int(_indptr[_i]), int(_indptr[_i + 1])
+    _acc = np.float32(0.0)
+    for _pp in range(_a, _b):
+        _acc = np.float32(_acc + _val32[_pp] * _x32[int(_idx[_pp])])
+    _y_ref[_i] = _acc
+_d_sd = float(np.abs(_y_sd - _y_ref).max() / max(1e-30, np.abs(_y_ref).max()))
+_d_sc = float(np.abs(_y_sc - _y_ref).max() / max(1e-30, np.abs(_y_ref).max()))
+check("H1 SpMV SIMD vs Python 标量（**容差 1e-5**）", _d_sd < 1e-5,
+      "relerr=%.3e（8 lane 并行改求和顺序）" % _d_sd)
+check("H2 SpMV 标量 vs Python 标量：**逐位**（同序累加）", _d_sc == 0.0,
+      "relerr=%.3e" % _d_sc)
+
+# ── I. Python 侧 fp32 改造（P173）──────────────────────────────────
+print("[I] Python 侧 M2/M3/M4a 已是 fp32（P173）")
+import inspect as _insp
+from phdnet import sparse_pc as _spc, plasticity as _pl, wm as _wm
+_src_sparse = _insp.getsource(_spc)
+check("I1 M2 CSR val 用 fp32",
+      "np.empty(n_rows * k, dtype=np.float32)" in _src_sparse,
+      "P173：fp64 -> fp32（val 8->4 B/边，访存减半）")
+check("I2 M2 已无 fp64 的 val 分配",
+      "np.empty(n_rows * k, dtype=np.float64)" not in _src_sparse, "")
+_src_pl = _insp.getsource(_pl)
+check("I3 M3 STDP W 用 fp32",
+      "np.zeros((n, m_edges), dtype=np.float32)" in _src_pl, "")
+_src_wm = _insp.getsource(_wm)
+check("I4 M4a slots/strength 用 fp32",
+      "np.zeros((n_slots, n), dtype=np.float32)" in _src_wm
+      and "np.zeros(n_slots, dtype=np.float32)" in _src_wm, "")
+# M6 应保持 fp16（P163）
+from phdnet.backends.accel_readout import AccelReadout as _AR
+_ro = _AR(64, 64, None, device="cpu", dtype="fp16")
+check("I5 M6 读出计算域是 fp16（P163）",
+      str(_ro._cdtype) == "torch.float16", "_cdtype=%s" % _ro._cdtype)
+
 n_fail = sum(1 for ok, _, _ in _RESULTS if not ok)
 print()
 print("=" * 72)
