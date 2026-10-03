@@ -1,0 +1,31 @@
+docs(P164): answer what --nll-sync-every does and add a workspace cleanup script
+
+fhz asked two things: what the nll-sync-every flag with value 8 actually does,
+and whether the pile of logs, build artefacts and repair scripts can be deleted.
+
+The flag is the device to CPU synchronisation period for the readout loss,
+added in P34. At 1 every step calls item and the value is immediate, which is the
+old behaviour. Above 1 the loss accumulates on the device and is read back once
+every N steps, which overlaps the CPU with the NPU and was measured to cut
+end to end time by roughly thirty to forty percent on NPU. The cost is that the
+reported perplexity lags by N steps, which is negligible under a sliding average.
+The default of eight was set in P62 after measuring 12.9 ms per token for the
+readout with the CPU using only 1.3 to 3.2 of 191 cores and over 2.5 million
+context switches per second, which showed the main thread spinning while waiting
+on item. It is a performance switch and does not change the model semantics: the
+loss values are the same, only the moment they are read differs. Consistent with
+P146, the training-stream perplexity swings by twenty percent and cannot decide an
+A/B comparison; the fixed probe perplexity from probe-every is the judge.
+
+For cleanup, tools/cleanup_workspace.sh only removes rebuildable intermediates.
+Python bytecode goes entirely, numba cache is kept by default because clearing it
+turns a short startup into a full recompile and only aggressive mode removes it,
+single-underscore logs in outputs go while the logs under outputs/experiments stay
+because they are the original evidence behind the P-series conclusions, and the
+one-off repair scripts and temporary directories go too. Never touched are
+outputs/models with the checkpoints, datasets at 7.6 GB, outputs/experiments and
+the evaluation corpus. Running it without arguments is a dry run, --yes applies,
+and --aggressive also clears the numba cache and outputs/test. After cleaning the
+local tree the fast gate still passes 9 out of 9.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
