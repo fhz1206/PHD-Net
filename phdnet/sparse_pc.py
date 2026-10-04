@@ -103,12 +103,15 @@ if NUMBA_OK:                                        # pragma: no cover
     @njit(cache=True, fastmath=True, parallel=True, nogil=True)
     def _csr_row_norms(indptr, val):
         n = indptr.shape[0] - 1
-        out = np.zeros(n)
+        # ⚠ P175：`np.zeros(n)` 曾是 **fp64**（`s = 0.0` 让 numba 提升），
+        #   而 `val` 自 P173 起是 fp32 → **同一份数据两种精度**。
+        #   现统一为 fp32（与 val、Rust 版一致）。
+        out = np.zeros(n, dtype=np.float32)
         for i in prange(n):
-            s = 0.0
+            s = np.float32(0.0)
             for p in range(indptr[i], indptr[i + 1]):
                 s += val[p] * val[p]
-            out[i] = s ** 0.5
+            out[i] = s ** np.float32(0.5)
         return out
 
     @njit(cache=True, fastmath=True, parallel=True, nogil=True)
@@ -149,10 +152,12 @@ else:                                               # pandas 回退（纯 numpy�
         np.clip(val, -w_max, w_max, out=val)
 
     def _csr_row_norms(indptr, val):
-        out = np.zeros(indptr.shape[0] - 1)
+        # ⚠ P175：同numba 版，统一 fp32（见上方注释）。
+        out = np.zeros(indptr.shape[0] - 1, dtype=np.float32)
         for i in range(len(out)):
             p0, p1 = indptr[i], indptr[i + 1]
-            out[i] = float(np.linalg.norm(val[p0:p1])) if p1 > p0 else 0.0
+            out[i] = (np.float32(np.linalg.norm(val[p0:p1]))
+                      if p1 > p0 else np.float32(0.0))
         return out
 
     def _csr_scale_rows(indptr, val, target):
@@ -403,8 +408,43 @@ class SparsePCStack:
     def __init__(self, n0: int, n1: int, n2: int, eta_pc: float, eta_oja: float,
                  rng: np.random.Generator, w_max: float = 2.0,
                  conn_k: int = 0, lognormal_init: bool = False,
-                 exc_ratio: float = 0.8, fused: bool = True):
+                 exc_ratio: float = 0.8, fused: bool = True,
+                 m2_backend: str = "numpy"):
         self.eta_pc, self.eta_oja, self.w_max = eta_pc, eta_oja, w_max
+        # P175：`m2_backend` —— "numpy"（**默认**，走 numba 参照）/ "rust"。
+        # ⚠ **默认关**（项目铁律：新增行为以配置开关承载且默认关闭、默认路径逐位不变）。
+        # ⚠ "rust" 需先通过 `tests/verifiers/verify_m2_rust_kernels.py`。
+        # ⚠ "rust" 只换**算子实现**，**不改编排**（融合核仍是 numba）——
+        #   编排属 Python 职责（见 `phdnet_rs/README.md` 架构边界）。
+        if m2_backend not in ("numpy", "rust"):
+            raise ValueError(
+                "m2_backend 只能是 'numpy'（默认，numba 参照）或 'rust'；"
+                "实得 %r" % (m2_backend,))
+        self.m2_backend = m2_backend
+        if m2_backend == "rust":
+            # 延迟导入 + **启动即校验**（fail-fast，不留到第一次调用）
+            # ⚠ `phdnet_rs/` 是**目录**，模块是其中的 `phdnet_rs.py`
+            #→ 必须先把该目录放进 sys.path，否则 import 会命中「命名空间包」
+            #   （`cannot import name 'load' from 'phdnet_rs' (unknown location)`）。
+            import os as _os
+            import sys as _sys
+            _rs_dir = _os.path.join(
+                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                "phdnet_rs")
+            if _rs_dir not in _sys.path:
+                _sys.path.insert(0, _rs_dir)
+            from phdnet_rs import load as _rs_load
+            _kernels, _why = _rs_load()
+            if _kernels is None:
+                raise RuntimeError(
+                    "m2_backend='rust' 但 Rust 库加载失败：%s\n"
+                    "→ 先运行 bash phdnet_rs/build.sh；或改回 m2_backend='numpy'"
+                    % _why)
+            self._rs = _kernels
+        else:
+            self._rs = None
+        # Rust 侧线程数（P175）：0 =让Rust 按 CPU 核自动取 min(8, 核-1)
+        self.rs_threads = 0
         # P103：**不能 bool()**——那会把 "serial" 变成 True，让 P99 的单核核
         # 永不可达（审查实测：`--m2-kernel serial` 实际走的是 parallel 核，
         # 整条 P99 链净效果为零）。三态原样保留：True / "fused" / "serial" / False。
@@ -427,10 +467,10 @@ class SparsePCStack:
         self.dn0 = _transpose_csr(*self.up0, n_new_rows=n0, scale=0.5)
         self.dn1 = _transpose_csr(*self.up1, n_new_rows=n1, scale=0.5)
         # 稳态目标：各行权重初始 L2 范数（突触缩放拉回此值）
-        self._hn_up0 = _csr_row_norms(self.up0[0], self.up0[2])
-        self._hn_up1 = _csr_row_norms(self.up1[0], self.up1[2])
-        self._hn_dn0 = _csr_row_norms(self.dn0[0], self.dn0[2])
-        self._hn_dn1 = _csr_row_norms(self.dn1[0], self.dn1[2])
+        self._hn_up0 = self._row_norms(self.up0)
+        self._hn_up1 = self._row_norms(self.up1)
+        self._hn_dn0 = self._row_norms(self.dn0)
+        self._hn_dn1 = self._row_norms(self.dn1)
         self.act_ema = None
 
     # ---------- 兼容接口：暴露稀疏矩阵形式的"权重"（只读快照） ----------
@@ -452,14 +492,67 @@ class SparsePCStack:
         self.up1 = _from_dense_csr(W_up1, self.k1)
         self.dn0 = _from_dense_csr(W_dn0, W_dn0.shape[1])
         self.dn1 = _from_dense_csr(W_dn1, W_dn1.shape[1])
-        self._hn_up0 = _csr_row_norms(self.up0[0], self.up0[2])
-        self._hn_up1 = _csr_row_norms(self.up1[0], self.up1[2])
-        self._hn_dn0 = _csr_row_norms(self.dn0[0], self.dn0[2])
-        self._hn_dn1 = _csr_row_norms(self.dn1[0], self.dn1[2])
+        self._hn_up0 = self._row_norms(self.up0)
+        self._hn_up1 = self._row_norms(self.up1)
+        self._hn_dn0 = self._row_norms(self.dn0)
+        self._hn_dn1 = self._row_norms(self.dn1)
         self.act_ema = None
         return self
 
-    @staticmethod
+    # ── M2 算子分派（P175）───────────────────────────────────────
+    #⚠ **能力边界（诚实说明）**：Rust 版只接**非融合路径**。
+    #   融合核（`_pc_infer_fused` / `_pc_learn_fused`）是 **numba njit**，
+    #   njit 函数内部**不能调用 ctypes/ Python 对象** → 结构性无法分派。
+    #   → `fused=True`（**生产默认**）时 M2 仍**全部走 numba**；
+    #     `fused=False` 才走 Rust。要Rust 生效必须 `fused=False`。
+    #   ⚠ 融合核比非融合快1.15-2.16×（x86），所以「Rust 更快」与
+    #     「融合核更快」是**两个互斥的收益**，不能同时要。
+
+    def _mv(self, csr, x):
+        """CSR SpMV（分派）。`csr` 是 `(indptr, idx, val)` 元组。"""
+        ip, ix, vl = csr
+        if self._rs is None:
+            return _csr_matvec(ip, ix, vl, x)
+        out = np.zeros(ip.size - 1, dtype=np.float32)
+        self._rs.m2_matvec(ip, ix, vl, x, out, self.rs_threads)
+        return out
+
+    def _add_outer(self, csr, a, b, eta):
+        """稀疏外积累加（原地，分派）。"""
+        ip, ix, vl = csr
+        if self._rs is None:
+            return _csr_add_outer(ip, ix, vl, a, b, eta)
+        return self._rs.m2_add_outer(ip, ix, vl, a, b, eta, self.rs_threads)
+
+    def _oja(self, csr, post, pre, eta):
+        """稀疏 Oja（原地，分派）。"""
+        ip, ix, vl = csr
+        if self._rs is None:
+            return _csr_oja_up(ip, ix, vl, post, pre, eta)
+        return self._rs.m2_oja_up(ip, ix, vl, post, pre, eta, self.rs_threads)
+
+    def _clip(self, val, w_max):
+        """权重裁剪（原地，分派）。"""
+        if self._rs is None:
+            return _csr_clip(val, w_max)
+        return self._rs.m2_clip(val, w_max, self.rs_threads)
+
+    def _row_norms(self, csr):
+        """逐行 L2 范数（分派）。"""
+        ip, _ix, vl = csr
+        if self._rs is None:
+            return _csr_row_norms(ip, vl)
+        out = np.zeros(ip.size - 1, dtype=np.float32)
+        self._rs.m2_row_norms(ip, _ix, vl, out, self.rs_threads)
+        return out
+
+    def _scale_rows(self, csr, target):
+        """逐行缩放（原地，分派）。"""
+        ip, ix, vl = csr
+        if self._rs is None:
+            return _csr_scale_rows(ip, vl, target)
+        return self._rs.m2_scale_rows(ip, ix, vl, target, self.rs_threads)
+
     def _dense(indptr, idx, val, n_rows: int, n_cols: int) -> np.ndarray:
         W = np.zeros((n_rows, n_cols))
         for i in range(n_rows):
@@ -510,17 +603,17 @@ class SparsePCStack:
         # P75：非融合路径 = P52 之前的原始实现（逐行照抄，语义确定），保留作
         # A/B 对照——服务器（昇腾 aarch64）实测融合核段 2.4 → 20-27 ms/tok，
         # 疑似 prange + fastmath 在该平台退化；x86 上融合核快 1.15-2.16×。
-        r1 = np.tanh(_csr_matvec(*self.up0, s0))
-        r2 = np.tanh(_csr_matvec(*self.up1, r1))
+        r1 = np.tanh(self._mv(self.up0, s0))
+        r2 = np.tanh(self._mv(self.up1, r1))
         for _ in range(n_steps):
-            e1 = r1 - _csr_matvec(*self.dn1, r2)
-            d2 = np.clip(_csr_matvec(*self.up1, e1), -0.5, 0.5)
+            e1 = r1 - self._mv(self.dn1, r2)
+            d2 = np.clip(self._mv(self.up1, e1), -0.5, 0.5)
             r2 = np.tanh(r2 + 0.15 * d2)
-            e0 = s0 - _csr_matvec(*self.dn0, r1)
-            d1 = np.clip(_csr_matvec(*self.up0, e0), -0.5, 0.5)
+            e0 = s0 - self._mv(self.dn0, r1)
+            d1 = np.clip(self._mv(self.up0, e0), -0.5, 0.5)
             r1 = np.tanh(r1 + 0.15 * d1)
-        e0 = s0 - _csr_matvec(*self.dn0, r1)
-        e1 = r1 - _csr_matvec(*self.dn1, r2)
+        e0 = s0 - self._mv(self.dn0, r1)
+        e1 = r1 - self._mv(self.dn1, r2)
         return {"s0": s0, "r1": r1, "r2": r2, "e0": e0, "e1": e1}
 
     # ---------- 学习（只更新存在的突触） ----------
@@ -541,17 +634,20 @@ class SparsePCStack:
                             e0, e1, r1, r2, s0, eta, self.eta_oja * eta_scale,
                             self.w_max)
             return
+        # ⚠ P175：走分派（`m2_backend="rust"` 时用 Rust 算子）。
+        # ⚠ 注意：**只有 homeostasis=True 才到得了这里** ——
+        #   `homeostasis=False` 走上面的融合核（numba njit，**结构性无法分派**）。
         # 下行生成权重：误差 × 上层表示（稀疏外积）
-        _csr_add_outer(*self.dn0, e0, r1, eta)
-        _csr_add_outer(*self.dn1, e1, r2, eta)
+        self._add_outer(self.dn0, e0, r1, eta)
+        self._add_outer(self.dn1, e1, r2, eta)
         # 上行识别权重：Oja 规则
         eo = self.eta_oja * eta_scale
-        _csr_oja_up(*self.up0, r1, s0, eo)
-        _csr_oja_up(*self.up1, r2, r1, eo)
-        _csr_clip(self.up0[2], self.w_max)
-        _csr_clip(self.up1[2], self.w_max)
-        _csr_clip(self.dn0[2], self.w_max)
-        _csr_clip(self.dn1[2], self.w_max)
+        self._oja(self.up0, r1, s0, eo)
+        self._oja(self.up1, r2, r1, eo)
+        self._clip(self.up0[2], self.w_max)
+        self._clip(self.up1[2], self.w_max)
+        self._clip(self.dn0[2], self.w_max)
+        self._clip(self.dn1[2], self.w_max)
         if homeostasis:
             self._homeostatic_scale()
 
@@ -566,8 +662,8 @@ class SparsePCStack:
         if homeostasis:
             e0 = e0 / max(float(np.linalg.norm(e0)), 1e-9)
             e1 = e1 / max(float(np.linalg.norm(e1)), 1e-9)
-        e0p = s0 - _csr_matvec(*self.dn0, p_r1)
-        e1p = r1 - _csr_matvec(*self.dn1, p_r2)
+        e0p = s0 - self._mv(self.dn0, p_r1)
+        e1p = r1 - self._mv(self.dn1, p_r2)
         if homeostasis:
             e0p = e0p / max(float(np.linalg.norm(e0p)), 1e-9)
             e1p = e1p / max(float(np.linalg.norm(e1p)), 1e-9)
@@ -576,17 +672,17 @@ class SparsePCStack:
         # ⚠ P59 实测：`learn_predictive` 的融合版**负收益**（12 个 prange 段
         # 的线程调度 > 省下的 11 次核启动；26 万边 1.36×、105 万边 0.96×、
         # 419 万边 0.91×，服务器 191 核只会更差）→ 保持多核调用原路径。
-        _csr_add_outer(*self.dn0, e0, r1, eta * one_minus)
-        _csr_add_outer(*self.dn0, e0p, p_r1, eta * mix)
-        _csr_add_outer(*self.dn1, e1, r2, eta * one_minus)
-        _csr_add_outer(*self.dn1, e1p, p_r2, eta * mix)
+        self._add_outer(self.dn0, e0, r1, eta * one_minus)
+        self._add_outer(self.dn0, e0p, p_r1, eta * mix)
+        self._add_outer(self.dn1, e1, r2, eta * one_minus)
+        self._add_outer(self.dn1, e1p, p_r2, eta * mix)
         eo = self.eta_oja * eta_scale
-        _csr_oja_up(*self.up0, r1, s0, eo)
-        _csr_oja_up(*self.up1, r2, r1, eo)
-        _csr_clip(self.up0[2], self.w_max)
-        _csr_clip(self.up1[2], self.w_max)
-        _csr_clip(self.dn0[2], self.w_max)
-        _csr_clip(self.dn1[2], self.w_max)
+        self._oja(self.up0, r1, s0, eo)
+        self._oja(self.up1, r2, r1, eo)
+        self._clip(self.up0[2], self.w_max)
+        self._clip(self.up1[2], self.w_max)
+        self._clip(self.dn0[2], self.w_max)
+        self._clip(self.dn1[2], self.w_max)
         if homeostasis:
             self._homeostatic_scale()
 
@@ -605,10 +701,10 @@ class SparsePCStack:
 
     def _homeostatic_scale(self) -> None:
         """突触缩放（Turrigiano 2008）：每行存在的权重范数拉回初始值。"""
-        _csr_scale_rows(self.up0[0], self.up0[2], self._hn_up0)
-        _csr_scale_rows(self.up1[0], self.up1[2], self._hn_up1)
-        _csr_scale_rows(self.dn0[0], self.dn0[2], self._hn_dn0)
-        _csr_scale_rows(self.dn1[0], self.dn1[2], self._hn_dn1)
+        self._scale_rows(self.up0, self._hn_up0)
+        self._scale_rows(self.up1, self._hn_up1)
+        self._scale_rows(self.dn0, self._hn_dn0)
+        self._scale_rows(self.dn1, self._hn_dn1)
 
     def prune_silence(self, threshold: float) -> int:
         """发育期突触修剪（`critical_period`）：把 |w| < threshold 的**存在突触**

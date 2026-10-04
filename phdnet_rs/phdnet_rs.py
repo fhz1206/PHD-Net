@@ -40,6 +40,27 @@ class RustKernels:
         L.phdnet_m1_kwta.restype = ctypes.c_int
         L.phdnet_m1_kwta.argtypes = [f32p, ctypes.c_size_t, ctypes.c_size_t,
                                      f32p, i32p]
+        # ── M2 CSR 全集（P175）─────────────────────────────────────
+        L.phdnet_m2_matvec.restype = ctypes.c_int
+        L.phdnet_m2_matvec.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
+                                       f32p, f32p, ctypes.c_size_t]
+        L.phdnet_m2_add_outer.restype = ctypes.c_int
+        L.phdnet_m2_add_outer.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
+                                          f32p, f32p, ctypes.c_float,
+                                          ctypes.c_size_t]
+        L.phdnet_m2_oja_up.restype = ctypes.c_int
+        L.phdnet_m2_oja_up.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
+                                       f32p, f32p, ctypes.c_float,
+                                       ctypes.c_size_t]
+        L.phdnet_m2_clip.restype = ctypes.c_int
+        L.phdnet_m2_clip.argtypes = [f32p, ctypes.c_size_t, ctypes.c_float,
+                                     ctypes.c_size_t]
+        L.phdnet_m2_row_norms.restype = ctypes.c_int
+        L.phdnet_m2_row_norms.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
+                                           f32p, ctypes.c_size_t]
+        L.phdnet_m2_scale_rows.restype = ctypes.c_int
+        L.phdnet_m2_scale_rows.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
+                                           f32p, ctypes.c_size_t]
         L.phdnet_csr_spmm_simd.restype = ctypes.c_int
         L.phdnet_csr_spmm_simd.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
                                             f32p, f32p, ctypes.c_size_t]
@@ -194,6 +215,187 @@ class RustKernels:
 
     # ── M2 ──────────────────────────────────────────────────────────────
     # ── 校验helper（P174 审计）──────────────────────────────────────
+    # ── M2 CSR 算子全集（P175）────────────────────────────────────
+    #⚠ 每个都先过 `_check_csr`（dtype/连续/形状/越界）——
+    #   P174 审计发现这些校验缺失会导致**静默算错**。
+
+    def m2_matvec(self, indptr, idx, val, x, out, n_threads: int = 8) -> None:
+        """`out[i] = Σ val[p]·x[idx[p]]`（M2 推理 SpMV，行宽≥32 走 AVX2）。
+
+        ⚠ **不与Python 逐位**（SIMD 改求和顺序）→ 门禁用容差 1e-5。
+        """
+        self._check_csr(indptr, idx, val, x, out)
+        n = indptr.size - 1
+        self.lib.phdnet_m2_matvec(
+            indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            idx.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(n),
+            x.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(n_threads))
+
+    def m2_add_outer(self, indptr, idx, val, a, b, eta: float,
+                     n_threads: int = 8) -> None:
+        """**原地** `val[p] += eta·a[i]·b[idx[p]]`（稀疏外积/Hebbian）。
+
+        ⚠ 逐边独立无依赖 → **可逐位**（含 `a[i]==0` 的跳过语义）。
+        """
+        self._check_csr_w(indptr, idx, val, a, b, None)
+        n = indptr.size - 1
+        self.lib.phdnet_m2_add_outer(
+            indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            idx.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(n),
+            a.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            b.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_float(eta),
+            ctypes.c_size_t(n_threads))
+
+    def m2_oja_up(self, indptr, idx, val, post, pre, eta: float,
+                  n_threads: int = 8) -> None:
+        """**原地** `val[p] += eta·post[i]·(pre[idx[p]] − post[i]·val[p])`。
+
+        ⚠ 逐边独立 → **可逐位**。
+        """
+        self._check_csr_w(indptr, idx, val, post, pre, None)
+        n = indptr.size - 1
+        self.lib.phdnet_m2_oja_up(
+            indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            idx.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(n),
+            post.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            pre.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_float(eta),
+            ctypes.c_size_t(n_threads))
+
+    def m2_clip(self, val, w_max: float, n_threads: int = 8) -> None:
+        """**原地** `val[p] = clip(val[p], ±w_max)`。
+
+        ⚠ 复刻 Python的 `if v > w_max / elif v < -w_max`（**不是** `f32::clamp`
+          —— 它对 NaN 的行为不同）→ **可逐位**。
+        """
+        if val.dtype != _np.float32:
+            raise ValueError("m2_clip: val 必须是 fp32，实得 %s" % val.dtype)
+        if not val.flags["C_CONTIGUOUS"]:
+            raise ValueError("m2_clip: val 非 C 连续")
+        self.lib.phdnet_m2_clip(
+            val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(val.size),
+            ctypes.c_float(w_max),
+            ctypes.c_size_t(n_threads))
+
+    def m2_row_norms(self, indptr, idx, val, out, n_threads: int = 8) -> None:
+        """`out[i] = ‖val[indptr[i]:indptr[i+1]]‖₂`。
+
+        ⚠ `s**0.5`（Python）与 `f32::sqrt()`（Rust）都是 IEEE 精确 sqrt
+          → **可逐位**。
+        ⚠ **矩形 CSR**（`n_cols != n_rows`，本项目是常态：up0 是 n1×n0）——
+          故**不能**用 `_check_csr`（它按方阵校验 idx 上界，会误报）。
+        """
+        self._check_csr_rect(indptr, idx, val, out)
+        n = indptr.size - 1
+        self.lib.phdnet_m2_row_norms(
+            indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            idx.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(n),
+            out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(n_threads))
+
+    def m2_scale_rows(self, indptr, idx, val, target, n_threads: int = 8) -> None:
+        """**原地** `val[p] *= target[i]/max(‖row‖₂, 1e-12)`。
+
+        ⚠ 逐位（两遍：先求 norm 再缩放，与 Python 同序）；
+          `1e-12` 保护复刻 → **不会除零**。
+        """
+        self._check_csr_w(indptr, idx, val, target, None, None)
+        n = indptr.size - 1
+        self.lib.phdnet_m2_scale_rows(
+            indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            idx.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(n),
+            target.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(n_threads))
+
+    @staticmethod
+    def _check_csr_w(indptr, idx, val, v1, v2, out) -> None:
+        """**原地更新**算子的校验（P175：`add_outer` / `oja_up` / `scale_rows`）。
+
+        与 `_check_csr` 的差别：
+        · `val` 须**可写**（`argtypes` 是 `f32p`，但语义上要写）
+        · 支持**方形/矩形**（`v1`/`v2` 的长度不必等于行数）
+        · `out=None`（原地算子无输出数组）
+        """
+        if indptr.dtype != _np.int64:
+            raise ValueError("indptr 必须是 int64，实得 %s" % indptr.dtype)
+        if idx.dtype != _np.int64:
+            raise ValueError("idx 必须是 int64，实得 %s" % idx.dtype)
+        if val.dtype != _np.float32:
+            raise ValueError(
+                "val 必须是 fp32（Rust 按 f32 读写），实得 %s" % val.dtype)
+        for nm, arr in (("indptr", indptr), ("idx", idx), ("val", val)):
+            if not arr.flags["C_CONTIGUOUS"]:
+                raise ValueError("%s 非 C 连续（strides=%s）"
+                                 % (nm, arr.strides))
+        n = indptr.size - 1
+        if indptr[-1] != idx.size or idx.size != val.size:
+            raise ValueError(
+                "indptr[-1]=%d / idx.size=%d / val.size=%d 不一致"
+                % (indptr[-1], idx.size, val.size))
+        for nm, arr in (("v1", v1), ("v2", v2)):
+            if arr is None:
+                continue
+            if arr.dtype != _np.float32:
+                raise ValueError("%s 必须是 fp32，实得 %s" % (nm, arr.dtype))
+            if not arr.flags["C_CONTIGUOUS"]:
+                raise ValueError("%s 非 C 连续" % nm)
+        if idx.size and idx.min() < 0:
+            raise ValueError("idx 有负值（min=%d）" % idx.min())
+        # ⚠ **P175 修正**：`add_outer` 查 `b`（源侧），`oja_up` 查 `pre`（源侧）——
+        #   二者是**列索引空间**，不是 `a`/`post`（行侧）。之前用 v1 判上界
+        #   会在矩形 CSR 上误报（实测 idx.max()=255 vs v1(post).size=192）。
+        #   `scale_rows` 不访问任何向量 → 跳过。
+        bound_arr = v2
+        if idx.size and bound_arr is not None and idx.max() >= bound_arr.size:
+            raise ValueError("idx 越界 [0,%d) —— 实得 max=%d"
+                             % (bound_arr.size, idx.max()))
+
+    @staticmethod
+    def _check_csr_rect(indptr, idx, val, out) -> None:
+        """**矩形** CSR 的校验（`n_cols != n_rows`）—— 用于**不访问 x** 的算子。
+
+        ⚠ 为什么需要（P175 实测踩到）：`_check_csr` 按**方阵**假设校验
+          `idx.max() < x.size`。但 `row_norms`/`scale_rows` **根本不读 x**，
+          且本项目的 CSR **普遍是矩形**（`up0` 是 n1×n0、n1≠n0）
+          → 方阵校验会**误报**「idx 越界」。
+
+        ⚠ idx 上界**无法在此校验**（没有 n_cols 信息）→ 由调用方保证
+          （Python 侧 CSR 由 `_random_csr` 生成，天然合法）。
+        """
+        for nm, arr, dt in (("indptr", indptr, _np.int64),
+                            ("idx", idx, _np.int64),
+                            ("val", val, _np.float32),
+                            ("out", out, _np.float32)):
+            if _np.dtype(arr.dtype) != _np.dtype(dt):
+                raise ValueError(
+                    "%s 的 dtype=%s，Rust 侧按 %s 读 —— 不符会**静默算错**（P175）"
+                    % (nm, arr.dtype, _np.dtype(dt).name))
+            if not arr.flags["C_CONTIGUOUS"]:
+                raise ValueError("%s 非 C 连续（strides=%s）"
+                                 % (nm, arr.strides))
+        if indptr.size < 1 or indptr.size - 1 != out.size:
+            raise ValueError("indptr.size-1=%d 应等于 out.size=%d"
+                             % (indptr.size - 1, out.size))
+        if indptr[-1] != idx.size or idx.size != val.size:
+            raise ValueError("indptr[-1]=%d / idx.size=%d / val.size=%d 不一致"
+                             % (indptr[-1], idx.size, val.size))
+        if idx.size and idx.min() < 0:
+            raise ValueError("idx 有负值（min=%d）" % idx.min())
+
     @staticmethod
     def _check_csr(indptr, idx, val, x, out) -> None:
         """CSR SpMV 的前置校验 —— **缺了会静默算错**（P174 审计发现）。
@@ -222,10 +424,14 @@ class RustKernels:
             raise ValueError(
                 "csr_spmm: indptr.size-1=%d 应等于 out.size=%d"
                 % (indptr.size - 1, out.size))
-        if x.size != out.size:
-            raise ValueError(
-                "csr_spmm: x.size=%d 应等于 out.size=%d（方阵 SpMV）"
-                % (x.size, out.size))
+        # ⚠⚠ **P175 修正：这里曾写 `x.size == out.size`（方阵假设）—— 是错的**。
+        #   本项目的 CSR **普遍是矩形**（`up0` 是 n1×n0、n1≠n0）→
+        #   方阵校验会让**生产默认场景直接报错**（实测 x.size=256 vs out.size=192）。
+        #   正确不变式（**两条都要**）：
+        #     · `x.size >= idx.max() + 1`（下面那一行在查 —— 这才是真正的越界判据）
+        #     · `x.size >= 1`（空 x 时下面那行不报错，这里兜住）
+        if x.size < 1:
+            raise ValueError("csr_spmm: x 为空（size=0）—— 无法解释 idx")
         if indptr[-1] != idx.size or idx.size != val.size:
             raise ValueError(
                 "csr_spmm: indptr[-1]=%d / idx.size=%d / val.size=%d 不一致"

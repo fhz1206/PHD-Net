@@ -363,13 +363,30 @@ except ValueError:
     check("J4 csr_spmm 的 fp64 val 抛异常（P173 前正是 fp64）",
           True, "已拦下")
 
-# J5 形状不匹配（x长度 ≠ out长度）
+# J5 矩形 CSR（P175 修正）：**x 比out 长是合法的**
+#（本项目 up0 是 n1×n0，n1≠n0 —— 早期「x.size 必须== out.size」的方阵断言
+#  是**错的**，会让生产默认场景直接报错）。真正必须拦的是 **idx 越界**。
 try:
     K.csr_spmm(_ip, _ix, _vf, rng.normal(0, 1, _N + 7).astype(np.float32),
                np.zeros(_N, np.float32), 4)
-    check("J5 csr_spmm 形状不匹配抛异常", False, "竟然没报错")
+    check("J5 矩形 CSR（x 更长）**合法**（P175 修正：方阵断言是错的）",
+          True, "已接受")
+except ValueError as e:
+    check("J5 矩形 CSR（x 更长）**合法**（P175 修正：方阵断言是错的）",
+          False, "被误拦：%s" % str(e)[:44])
+# J5b 真正必须拦的：idx 超出 x 的范围
+try:
+    K.csr_spmm(_ip, _ix, _vf, rng.normal(0, 1, 2).astype(np.float32),
+               np.zeros(_N, np.float32), 4)
+    check("J5b idx 超出 x 范围必须抛异常（真越界）", False, "竟然没报错")
 except ValueError:
-    check("J5 csr_spmm 形状不匹配抛异常", True, "已拦下")
+    check("J5b idx 超出 x 范围必须抛异常（真越界）", True, "已拦下")
+# J5c indptr 行数与 out 不一致
+try:
+    K.csr_spmm(_ip[:-1], _ix, _vf, _xv, np.zeros(_N + 3, np.float32), 4)
+    check("J5c indptr 行数与 out 不一致必须抛异常", False, "竟然没报错")
+except ValueError:
+    check("J5c indptr 行数与 out 不一致必须抛异常", True, "已拦下")
 
 # J6 idx 越界
 try:

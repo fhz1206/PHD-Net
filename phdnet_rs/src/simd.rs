@@ -267,7 +267,7 @@ mod tests {
 /// `idx_p`/`val_p` 有效且 `nnz >= 32`；`x` 有效。
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn csr_row_avx2(
+pub unsafe fn csr_row_avx2(
     idx_p: *const i64,
     val_p: *const f32,
     nnz: usize,
@@ -316,6 +316,31 @@ unsafe fn csr_row_avx2(
         while p < nnz {
             acc += *val_p.add(p) * *x.add(*idx_p.add(p) as usize);
             p += 1;
+        }
+        acc
+    }
+}
+
+/// [] 的别名（M2 各算子统一用这个名字）。
+///
+/// ⚠ 与 [] **同一份代码**（不重复实现）——P173 写的
+///   CSR SpMV 内部核与 P175 的 matvec 内核需求完全相同。
+#[inline]
+pub unsafe fn csr_dot_avx2(
+    idx_p: *const i64,
+    val_p: *const f32,
+    nnz: usize,
+    x: *const f32,
+) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        csr_row_avx2(idx_p, val_p, nnz, x)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let mut acc = 0.0f32;
+        for p in 0..nnz {
+            acc += *val_p.add(p) * *x.add(*idx_p.add(p) as usize);
         }
         acc
     }

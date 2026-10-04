@@ -57,7 +57,54 @@ pub mod ffi;
 pub mod mechanisms;
 pub mod pool;
 pub mod dispatch;
+pub mod m2_csr;
 pub mod simd;
+
+/// M2 判并行的工作量门限（**总非零数 nnz**）。
+///
+/// # 为什么需要它（P174 审计发现）
+/// 线程池派发固定成本 **41.5 µs**（本机实测，机器噪声仅 4%），
+/// 而 M2 的 CSR 算子**每元素工作量极小** → 中小规模并行**反而更慢**。
+///
+/// # 门限依据（实测盈亏平衡点，本机 x86）
+/// · 256x512（131072 nnz）：串行 28.7 µs → 8 线程 70.6 µs（**0.41×**）
+/// · 512x512（262144 nnz）：36.8 → 37.2 µs（**0.99×，持平**）← 平衡点
+/// · 1024x2048（2097152 nnz）：355.5 → 283.4 µs（**1.25×，并行赚**）
+///
+/// ⚠ **1b 档 M2**：`big_ltm 2^24 × 60` 的 nnz 量级 ≫ 门限 → 仍并行，正确。
+/// ⚠ **本机（Windows 开发机）性能测量不可信**（同一 shape 串行耗时在不同时刻
+///   差 7 倍：28.7 → 200.5 µs）→ 门限取**保守值**，需 Ascend 服务器复核。
+pub const MIN_PAR_NNZ: usize = 256 * 1024;
+
+/// 按「总工作量」决定分块数：nnz 太小就**串行**（省派发成本）。
+///
+/// # Safety
+/// `indptr` 须至少有 `n_rows+1` 个元素（读 `indptr[n_rows]` 作总 nnz）。
+#[inline]
+pub unsafe fn parts_for_csr(indptr: *const i64, n_rows: usize, want: usize) -> usize {
+    let nnz = if n_rows == 0 {
+        0
+    } else {
+        unsafe { *indptr.add(n_rows) as usize }
+    };
+    let n = want.clamp(1, n_rows.max(1));
+    if nnz < MIN_PAR_NNZ {
+        1
+    } else {
+        n
+    }
+}
+
+/// 按「元素总数」决定分块数（给没有 indptr 的算子如 `clip` 用）。
+#[inline]
+pub fn parts_for_len(n: usize, want: usize) -> usize {
+    let nt = want.clamp(1, n.max(1));
+    if n < MIN_PAR_NNZ {
+        1
+    } else {
+        nt
+    }
+}
 
 pub use acl::{Acl, AclError, DevBuf};
 pub use mechanisms::*;
