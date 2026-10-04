@@ -312,6 +312,95 @@ _ro = _AR(64, 64, None, device="cpu", dtype="fp16")
 check("I5 M6 读出计算域是 fp16（P163）",
       str(_ro._cdtype) == "torch.float16", "_cdtype=%s" % _ro._cdtype)
 
+# ── J. 审计回归门禁（P174：4 个曾静默算错的 BUG）────────────────────
+print("[J] fail-fast 校验（P174 审计：缺校验会**静默算错**）")
+
+# J1 非连续 W 必须报错（实测 relerr 1.04 =全错且无报错）
+_Wn = np.ascontiguousarray(rng.normal(0, 1, (128 * 2, 64)).astype(np.float32))
+_Wsub = _Wn[::2]                      #形状对但非连续
+_xn = rng.normal(0, 1, 64).astype(np.float32)
+_bn = rng.normal(0, 0.1, 128).astype(np.float32)
+_on = np.zeros(128, dtype=np.float32)
+try:
+    K.m1_gemv_dt(_Wsub, _xn, _bn, _on, np.float32, 4)
+    check("J1 非连续 W 抛异常（曾静默 relerr=1.04）", False, "竟然没报错")
+except ValueError:
+    check("J1 非连续 W 抛异常（曾静默 relerr=1.04）", True, "已拦下")
+
+# J2 dtype 不符必须报错（实测 relerr 8.2e+305）
+try:
+    K.m1_gemv_dt(_Wn.astype(np.float64), _xn.astype(np.float64),
+                 _bn.astype(np.float64), np.zeros(128, np.float64),
+                 np.float32, 4)
+    check("J2 dtype 不符抛异常（曾静默 relerr=8.2e+305）", False, "竟然没报错")
+except ValueError:
+    check("J2 dtype 不符抛异常（曾静默 relerr=8.2e+305）", True, "已拦下")
+
+# J3 fp64 必须回报真实并行度=1（不静默假装并行）
+_W64 = np.ascontiguousarray(rng.normal(0, 1, (256, 256)))
+_x64 = rng.normal(0, 1, 256)
+_b64 = rng.normal(0, 0.1, 256)
+_o64 = np.zeros(256)
+K.m1_gemv_dt(_W64, _x64, _b64, _o64, np.float64, 8)
+check("J3 fp64 如实回报 1 线程（曾静默串行而调用者以为并行）",
+      getattr(K, "_last_effective_threads", None) == 1,
+      "实得 %s" % getattr(K, "_last_effective_threads", None))
+
+# ── CSR 用例：方形 SpMV（512×512，每行 1 边 = SparsePC 的真实形状）──
+_N = 512
+_ip = np.arange(0, _N + 1, 1, dtype=np.int64)          # 513个 -> 512 行
+_ix = rng.integers(0, _N, _N).astype(np.int64)
+_xv = rng.normal(0, 1, _N).astype(np.float32)
+_vf = rng.normal(0, 1, _N).astype(np.float32)
+
+# J4 fp64 的 val 必须报错（P173 之前 val 正是 fp64 → 会静默按 fp32 读）
+try:
+    K.csr_spmm(_ip, _ix, _vf.astype(np.float64), _xv,
+               np.zeros(_N, np.float32), 4)
+    check("J4 csr_spmm 的 fp64 val 抛异常（P173 前正是 fp64）",
+          False, "竟然没报错")
+except ValueError:
+    check("J4 csr_spmm 的 fp64 val 抛异常（P173 前正是 fp64）",
+          True, "已拦下")
+
+# J5 形状不匹配（x长度 ≠ out长度）
+try:
+    K.csr_spmm(_ip, _ix, _vf, rng.normal(0, 1, _N + 7).astype(np.float32),
+               np.zeros(_N, np.float32), 4)
+    check("J5 csr_spmm 形状不匹配抛异常", False, "竟然没报错")
+except ValueError:
+    check("J5 csr_spmm 形状不匹配抛异常", True, "已拦下")
+
+# J6 idx 越界
+try:
+    _bad = _ix.copy()
+    _bad[0] = 99999                       # 远超 x.size=512
+    K.csr_spmm(_ip, _bad, _vf, _xv, np.zeros(_N, np.float32), 4)
+    check("J6 csr_spmm 的 idx 越界抛异常", False, "竟然没报错")
+except ValueError:
+    check("J6 csr_spmm 的 idx 越界抛异常", True, "已拦下")
+
+# J7 idx dtype 不符（int32 → Rust 按 i64 读会错位）
+try:
+    K.csr_spmm(_ip, _ix.astype(np.int32), _vf, _xv,
+               np.zeros(_N, np.float32), 4)
+    check("J7 csr_spmm 的 idx非 int64 抛异常", False, "竟然没报错")
+except ValueError:
+    check("J7 csr_spmm 的 idx 非 int64 抛异常", True, "已拦下")
+
+# J8 合法输入不被误伤（且 SIMD 与标量一致）
+_ok_s = np.zeros(_N, dtype=np.float32)
+_ok_d = np.zeros(_N, dtype=np.float32)
+try:
+    K.csr_spmm(_ip, _ix, _vf, _xv, _ok_s, 4)
+    K.csr_spmm_simd(_ip, _ix, _vf, _xv, _ok_d, 4)
+    _rel = float(np.abs(_ok_s - _ok_d).max()
+                 / max(1e-30, np.abs(_ok_s).max()))
+    check("J8 合法输入不被误伤 +标量/SIMD 一致", _rel < 1e-5,
+          "relerr=%.3e" % _rel)
+except ValueError as e:                                # noqa: BLE001
+    check("J8 合法输入不被误伤 + 标量/SIMD 一致", False, str(e)[:50])
+
 n_fail = sum(1 for ok, _, _ in _RESULTS if not ok)
 print()
 print("=" * 72)

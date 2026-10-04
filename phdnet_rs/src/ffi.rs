@@ -329,7 +329,9 @@ pub unsafe extern "C" fn phdnet_m1_gemv_dt(
         2 => DType::F16,
         _ => return -1,
     };
-    unsafe {
+    // ⚠ **P174**：返回**实际使用的线程数**（fp64/fp16 恒为 1），
+    //   `-1` 才是错误码。旧版恒返回 0 → 调用方无法区分「串行」与「出错」。
+    let used = unsafe {
         match dt {
             DType::F32 => gemv_f32(
                 w as *mut f32, rows, cols,
@@ -344,8 +346,8 @@ pub unsafe extern "C" fn phdnet_m1_gemv_dt(
                 x as *mut u16, b as *mut u16, out as *mut u16, n_threads,
             ),
         }
-    }
-    0
+    };
+    used as c_int
 }
 
 /// 把 dtype 名解析成内部码（供 Python 侧提前校验）。`0/1/2` = f32/f64/f16，
@@ -375,23 +377,27 @@ pub extern "C" fn phdnet_dtype_has_simd(code: c_int) -> c_int {
 
 // ── 三个具体实现 ────────────────────────────────────────────────────────
 
-/// f32 GEMV（**走手写 AVX2 SIMD** 若可用）。
+/// f32 GEMV（**走手写 AVX2 SIMD** 若可用）。返回**实际使用的线程数**。
 unsafe fn gemv_f32(
     w: *mut f32, rows: usize, cols: usize,
     x: *mut f32, b: *mut f32, out: *mut f32, n_threads: usize,
-) {
+) -> usize {
     if crate::simd::has_avx2() {
         unsafe { crate::simd::gemv_avx2(w, rows, cols, x, b, out, n_threads) };
     } else {
         unsafe { crate::mechanisms::m1_gemv_f32_raw(w, rows, cols, x, b, out, n_threads) };
     }
+    n_threads
 }
 
 /// f64 GEMV（**标量** —— 无 f64 SIMD）。
+///
+/// ⚠ **P174 审计**：此分支**不使用线程池**（恒串行）。`n_threads` 被忽略，
+///   但**如实返回 1**给调用方（而不是让调用方误以为并行）。
 unsafe fn gemv_f64(
     w: *mut f64, rows: usize, cols: usize,
     x: *mut f64, b: *mut f64, out: *mut f64, n_threads: usize,
-) {
+) -> usize {
     for r in 0..rows {
         let row = unsafe { w.add(r * cols) };
         let mut acc = 0.0f64;
@@ -400,14 +406,17 @@ unsafe fn gemv_f64(
         }
         unsafe { *out.add(r) = acc + *b.add(r) };
     }
-    let _ = n_threads;
+    let _ = n_threads;         // 恒串行，如实返回 1
+    1
 }
 
 /// f16 GEMV（**标量 + f32 累加器**，两步：算完舍入到 f16）。
+///
+/// ⚠ **P174 审计**：同 `gemv_f64`，**不使用线程池**（恒串行），如实返回 1。
 unsafe fn gemv_f16(
     w: *mut u16, rows: usize, cols: usize,
     x: *mut u16, b: *mut u16, out: *mut u16, n_threads: usize,
-) {
+) -> usize {
     for r in 0..rows {
         let row = unsafe { w.add(r * cols) };
         // ⚠ **累加器用 f32**（社区标准：低精度存储 + 高精度累加）
@@ -421,5 +430,6 @@ unsafe fn gemv_f16(
         // 最后一步舍入到 f16
         unsafe { *out.add(r) = f32_to_f16(acc + bi) };
     }
-    let _ = n_threads;
+    let _ = n_threads;         // 恒串行，如实返回 1
+    1
 }

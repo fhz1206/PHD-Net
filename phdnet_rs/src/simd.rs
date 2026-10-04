@@ -153,6 +153,22 @@ pub unsafe fn gemv_avx2(
         use_simd,
     };
     let nt = n_threads.max(1).min(rows.max(1));
+    // ⚠ **P174 审计：派发固定成本 41.5 µs** → 中小 shape 必须串行
+    //   （实测 256x512：串行 28.7 → 8 线程 70.6，**0.41×**；
+    //    盈亏平衡点 512x512 = 262144 cells）。
+    //   与 `mechanisms::m1_gemv` 用**同一个门限**，保证两条路径口径一致。
+    const _MIN_PAR_CELLS: usize = 256 * 1024;
+    if rows.saturating_mul(cols) < _MIN_PAR_CELLS {
+        for r in 0..rows {
+            let row = unsafe { w.add(r * cols) };
+            let mut acc = 0.0f32;
+            for j in 0..cols {
+                acc += unsafe { *row.add(j) * *x.add(j) };
+            }
+            unsafe { *out.add(r) = acc + *b.add(r) };
+        }
+        return;
+    }
     crate::pool::run(
         avx_work,
         &ctx as *const AvxCtx as *mut u8,
@@ -330,6 +346,26 @@ pub unsafe extern "C" fn phdnet_csr_spmm_simd(
         use_simd,
     };
     let nt = n_threads.max(1).min(n_rows.max(1));
+    // ⚠ **P174 审计：同样要门限**（派发固定成本 41.5 µs）。
+    // CSR 每边做 1 乘 1 加 → 工作量 ≈ 总 nnz。
+    // ⚠ 门限按**实测**定：盈亏平衡约在 nnz ~ 262144（与 GEMV 同量级）。
+    let nnz_total = if n_rows == 0 {
+        0
+    } else {
+        unsafe { *indptr.add(n_rows) as usize }
+    };
+    const _MIN_PAR_NNZ: usize = 256 * 1024;
+    if nnz_total < _MIN_PAR_NNZ {
+        for r in 0..n_rows {
+            let a = unsafe { *indptr.add(r) } as usize;
+            let b = unsafe { *indptr.add(r + 1) } as usize;
+            let v = unsafe {
+                csr_row_scalar(idx.add(a), val.add(a), b - a, x as *const f32)
+            };
+            unsafe { *y.add(r) = v };
+        }
+        return 0;
+    }
     crate::pool::run(
         csr_simd_work,
         &ctx as *const CsrSimdCtx as *mut u8,

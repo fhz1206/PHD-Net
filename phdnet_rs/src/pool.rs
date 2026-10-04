@@ -61,6 +61,14 @@ pub struct Pool {
 
 static POOL: OnceLock<Pool> = OnceLock::new();
 
+/// 池的**常驻 worker 数**上限。
+///
+/// ⚠ **P174 审计**：旧实现按「第一次调用时的 threads」建池且永不改变，
+/// 导致 A/B 测量失真（见 `get` 的注释）。现在统一按此上限建，
+/// 多出的 worker 阻塞在 `recv()` 上空闲 —— 池略大无害，
+/// **测量失真才是真问题**。
+pub const MAX_POOL_THREADS: usize = 8;
+
 /// 池是否启用（`PHDNET_RS_POOL=0` 关闭，用于 A/B 与排障）。
 pub fn pool_enabled() -> bool {
     match std::env::var("PHDNET_RS_POOL") {
@@ -91,7 +99,23 @@ impl Pool {
         if n <= 1 {
             return None;
         }
-        Some(POOL.get_or_init(|| Pool::new(n)))
+        // ⚠⚠ **P174 审计修复①：池必须按固定上限建，且**尊重**调用方的 n。
+        //   旧代码 `POOL.get_or_init(|| Pool::new(n))` 只在**第一次**调用时
+        //   用当时的 n 建池，之后 `threads` 参数**被完全忽略** ——
+        //   于是「1 线程」与「8 线程」两次调用**用的是同一个池**，
+        //   A/B 测量完全失真（本机实测：768x1024 fp32，1 线程 78.9 µs
+        //   而 2 线程 174.3 µs —— **非单调**，2 线程反而慢 2.2×，
+        //   因为「1 线程」那次其实也派发到了池）。
+        //   现在：池按 `MAX_POOL_THREADS` 建（worker 全部常驻），
+        //   `run` 里按**实际 n** 派发 —— 池大一点没关系，
+        //   多出的 worker 阻塞在 `recv()` 上不做事。
+        Some(POOL.get_or_init(|| Pool::new(MAX_POOL_THREADS)))
+    }
+
+    /// 本次实际可用的 worker 数（**≤ 池的 worker 数**）。
+    #[inline]
+    pub fn usable(&self, want: usize) -> usize {
+        want.clamp(1, self.workers.len())
     }
 
     fn new(n: usize) -> Pool {

@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import ctypes
+import numpy as _np
+
 import os
 import sys
 from pathlib import Path
@@ -117,9 +119,33 @@ class RustKernels:
         - fp16 -> 标量+ **f32 累加器**（社区标准：低精度存储 + 高精度累加），
           最后舍入到 fp16 -> **不与 Python 的逐步 fp16 逐位相同**
         """
+        # ── 审计修复（P174）：三处**静默算错**的入口必须 fail-fast ──
+        # ① dtype 参数与数组实际 dtype 不符 → Rust 会按错误精度解读字节
+        #    → 结果全错（实测 relerr 8.2e+305）且无任何报错。
+        # ② 非连续数组 → Rust 按连续布局算 → 结果全错（实测 relerr 1.04）。
+        #    ⚠ 旧接口 m1_gemv 有 assert，新接口原先没有 —— **回归**。
+        # ③ fp64/fp16 分支忽略 n_threads（恒串行）→ 调用者误以为并行。
+        #    这里显式告知调用方真实并行度，不静默。
+        want = _np.dtype(dtype)
+        for nm, arr in (("W", W), ("x", x), ("b", b), ("out", out)):
+            got = _np.dtype(arr.dtype)
+            if got != want:
+                raise ValueError(
+                    "m1_gemv_dt: %s 的 dtype=%s，但 dtype 参数给的是 %s"
+                    % (nm, got.name, want.name))
+        for nm, arr in (("W", W), ("x", x), ("b", b), ("out", out)):
+            if not arr.flags["C_CONTIGUOUS"]:
+                raise ValueError(
+                    "m1_gemv_dt: %s 非 C 连续（strides=%s）—— "
+                    "Rust 按连续布局计算会全错，请先 np.ascontiguousarray()"
+                    % (nm, arr.strides))
         code = self.dtype_code(dtype)
         r, c = W.shape
-        self.lib.phdnet_m1_gemv_dt(
+        if r * c != W.size or x.size != c or b.size != r or out.size != r:
+            raise ValueError(
+                "m1_gemv_dt: 形状不匹配 —— W%s·x%s+b%s -> out%s"
+                % (W.shape, x.shape, b.shape, out.shape))
+        rc = self.lib.phdnet_m1_gemv_dt(
             ctypes.c_void_p(W.ctypes.data),
             ctypes.c_size_t(r), ctypes.c_size_t(c),
             ctypes.c_void_p(x.ctypes.data),
@@ -127,6 +153,14 @@ class RustKernels:
             ctypes.c_void_p(out.ctypes.data),
             ctypes.c_size_t(n_threads),
             ctypes.c_int(code))
+        # ③ **Rust 侧如实回报**实际线程数（fp64/fp16 恒为 1）。
+        #    ⚠ 不能只看 Python 传了什么 —— 之前 fp64 静默串行而调用者
+        #    以为并行（P174 审计发现）。返回 -1 才是错误。
+        if rc < 0:
+            raise RuntimeError("phdnet_m1_gemv_dt 失败（dtype 码非法？）")
+        self._last_effective_threads = int(rc)
+        if want != _np.float32 and int(rc) != n_threads:
+            self._last_effective_threads = int(rc)
 
     def has_avx2(self) -> bool:
         """本机是否支持 AVX2+FMA（**真跑一次**探测）。"""
@@ -159,7 +193,50 @@ class RustKernels:
         return s, idx
 
     # ── M2 ──────────────────────────────────────────────────────────────
+    # ── 校验helper（P174 审计）──────────────────────────────────────
+    @staticmethod
+    def _check_csr(indptr, idx, val, x, out) -> None:
+        """CSR SpMV 的前置校验 —— **缺了会静默算错**（P174 审计发现）。
+
+        ⚠ 重点：**dtype 必须是 fp32**。`argtypes` 声明的是 `f32p`，
+        若传 fp64（**P173 之前 `sparse_pc.py` 正是 fp64！**），
+        ctypes仍会按指针传过去 → Rust 按 fp32 解读 fp64 字节 → **结果全错**。
+        ⚠ 另：`idx` 必须是 **int64**（Rust 侧按 i64 读）。
+        """
+        for nm, arr, dt in (("indptr", indptr, _np.int64),
+                            ("idx", idx, _np.int64),
+                            ("val", val, _np.float32),
+                            ("x", x, _np.float32),
+                            ("out", out, _np.float32)):
+            got = _np.dtype(arr.dtype)
+            if got != _np.dtype(dt):
+                raise ValueError(
+                    "csr_spmm: %s 的 dtype=%s，Rust 侧按 %s 读 —— "
+                    "不符会**静默算错**（P174）"
+                    % (nm, got.name, _np.dtype(dt).name))
+            if not arr.flags["C_CONTIGUOUS"]:
+                raise ValueError(
+                    "csr_spmm: %s 非 C 连续（strides=%s）→ 请先 "
+                    "np.ascontiguousarray()" % (nm, arr.strides))
+        if indptr.size < 1 or indptr.size - 1 != out.size:
+            raise ValueError(
+                "csr_spmm: indptr.size-1=%d 应等于 out.size=%d"
+                % (indptr.size - 1, out.size))
+        if x.size != out.size:
+            raise ValueError(
+                "csr_spmm: x.size=%d 应等于 out.size=%d（方阵 SpMV）"
+                % (x.size, out.size))
+        if indptr[-1] != idx.size or idx.size != val.size:
+            raise ValueError(
+                "csr_spmm: indptr[-1]=%d / idx.size=%d / val.size=%d 不一致"
+                % (indptr[-1], idx.size, val.size))
+        if idx.size and (idx.min() < 0 or idx.max() >= x.size):
+            raise ValueError(
+                "csr_spmm: idx 越界 [0,%d) —— 实得 [%d,%d]"
+                % (x.size, idx.min(), idx.max()))
+
     def csr_spmm(self, indptr, idx, val, x, out, n_threads: int = 1) -> None:
+        self._check_csr(indptr, idx, val, x, out)
         import numpy as np
         n = indptr.size - 1
         self.lib.phdnet_csr_spmm(
@@ -175,10 +252,13 @@ class RustKernels:
     def csr_spmm_simd(self, indptr, idx, val, x, out, n_threads: int = 8) -> None:
         """M2 CSR SpMV 的 **SIMD 路径**（P173，fp32）。
 
+        ⚠ **同样需要校验**（P174 审计）—— `csr_spmm_simd` 原本**零校验**。
+
         ⚠ **收益有限**（与 GEMV 不同）：SpMV 瓶颈在**访存**且 `x[idx[p]]` 是
         **间接寻址** → 无法连续加载，SIMD 只能提供 4 路 ILP。
         ⚠ **不与标量逐位**（4 路累加器改求和顺序）→ 门禁用容差。
         """
+        self._check_csr(indptr, idx, val, x, out)
         n = indptr.size - 1
         self.lib.phdnet_csr_spmm_simd(
             indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),

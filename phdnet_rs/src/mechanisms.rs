@@ -104,6 +104,27 @@ pub fn m1_gemv(
     }
     let nt = n_threads.max(1).min(n);
 
+    // ⚠⚠ **P174 审计发现：派发成本会让中小shape 反而变慢**
+    // 实测（best-of-25中位数，机器噪声仅 4%）：
+    //   · 派发固定成本 **41.5 µs**（线程池 send/recv 同步，实测 8x8 与16x16 稳定）
+    //   · 256x512（131072 cells）：串行 28.7 µs → 8 线程 **70.6 µs（0.41×）**
+    //     完全由派发成本解释（28.7 + 41.5 ≈ 70）。
+    //   · 512x512（262144 cells）：36.8 → 37.2 µs（**0.99×，持平**）← 盈亏平衡点
+    //   · 1024x2048（2097152 cells）：355.5 → 283.4 µs（**1.25×，并行赚**）
+    //
+    // 门限取 **262144 cells（512 KiB fp32）** —— 由实测盈亏平衡点定，
+    // **不是拍的**。判据：`串行耗时 < 派发成本` 时并行必亏。
+    //
+    // ⚠ 1b 档读出（vocab 73958 × n_h 3072 = 2.27e8 cells）**远超**此门限
+    //   → 仍走并行，正确。
+    const _MIN_PAR_CELLS: usize = 256 * 1024;
+    if n.saturating_mul(w.cols) < _MIN_PAR_CELLS {
+        for r in 0..n {
+            gemv_row(w, r, x, b[r], &mut out[r]);
+        }
+        return;
+    }
+
     if nt == 1 {
         for r in 0..n {
             gemv_row(w, r, x, b[r], &mut out[r]);
