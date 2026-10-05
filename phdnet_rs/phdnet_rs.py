@@ -55,6 +55,22 @@ class RustKernels:
         L.phdnet_m2_clip.restype = ctypes.c_int
         L.phdnet_m2_clip.argtypes = [f32p, ctypes.c_size_t, ctypes.c_float,
                                      ctypes.c_size_t]
+        # ── M2 融合核（P176）──────────────────────────────────────
+        # ⚠ 全部用 c_void_p（真实 dtype 已由 `_check_fused_csr` 校验）
+        _vp = ctypes.c_void_p
+        _sz = ctypes.c_size_t
+        # infer: up0(ip,ix,v,n1) up1(ip,ix,v,n2) dn0(3) dn1(3) s0 r1 r2 e0 e1(5)
+        #       + n_steps n_threads = **21**（⚠ 数错会静默传错位置）
+        L.phdnet_m2_infer_fused.argtypes = (
+            [_vp] * 3 + [_sz] + [_vp] * 3 + [_sz] + [_sz]
+            + [_vp] * 11 + [_sz, _sz])
+        # learn: dn0(3+sz) dn1(3+sz) up0(3) up1(3) + 5向量 + 3f32 + 1sz
+        # learn: dn0(3+sz) dn1(3+sz) up0(3) up1(3) + 5 向量
+        #        + 3 f32 + **4 个向量长度（P176越界钳制）** + 1 sz = 27
+        L.phdnet_m2_learn_fused.argtypes = (
+            [_vp] * 3 + [_sz] + [_vp] * 3 + [_sz] + [_vp] * 3 + [_sz]
+            + [_vp] * 3 + [_sz] + [_vp] * 5
+            + [ctypes.c_float] * 3 + [_sz] * 4 + [_sz])
         L.phdnet_m2_row_norms.restype = ctypes.c_int
         L.phdnet_m2_row_norms.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
                                            f32p, ctypes.c_size_t]
@@ -215,6 +231,115 @@ class RustKernels:
 
     # ── M2 ──────────────────────────────────────────────────────────────
     # ── 校验helper（P174 审计）──────────────────────────────────────
+    # ── M2 融合核（P176）──────────────────────────────────────────
+    # ⚠ 精度已统一为 **全 fp32**（P176）—— Python 融合核原本是
+    #   「fp32 存储 + fp64 累加 + fp64 中间数组」的混合精度。
+
+    def m2_infer_fused(self, up0, up1, dn0, dn1, s0, r1, r2, e0, e1,
+                       n_steps: int, n_threads: int = 0) -> None:
+        """**融合推理**（对应 `_pc_infer_fused`，P176 全 fp32）。
+
+        ⚠ **矩形 CSR**：up0 是 n1×n0、up1 是 n2×n1、
+          dn0 = transpose(up0)、dn1 = transpose(up1)。
+          ⚠ `dn0`/`dn1` 的**行数不是 n2** —— 传错会越界**段错误**（实测踩过）。
+        """
+        for nm, csr in (("up0", up0), ("up1", up1),
+                        ("dn0", dn0), ("dn1", dn1)):
+            self._check_fused_csr(csr, nm)
+        # ⚠ P176：`e0` 必须是 **n0** 长（`up0` 的列空间），`r1`/`e1` 是 n1
+        n1 = up0[0].size - 1
+        n2 = up1[0].size - 1
+        n0 = dn0[0].size - 1     # ⚠ P176：e0 的正确长度（原误用 n1）
+        for nm, arr, want in (("s0", s0, n0),
+                              ("r1", r1, n1), ("r2", r2, n2),
+                              ("e0", e0, n0), ("e1", e1, n1)):
+            if arr.size != want:
+                raise ValueError(
+                    "infer_fused: %s 长度应为 %d（= dn0/up0 行数），实得 %d"
+                    % (nm, want, arr.size))
+            if _np.dtype(arr.dtype) != _np.float32:
+                raise ValueError("infer_fused: %s 必须 fp32，实得 %s"
+                                 % (nm, arr.dtype))
+            if not arr.flags["C_CONTIGUOUS"]:
+                raise ValueError("infer_fused: %s 非 C 连续" % nm)
+        _p = ctypes.c_void_p
+        _sz = ctypes.c_size_t
+        self.lib.phdnet_m2_infer_fused(
+            _p(up0[0].ctypes.data), _p(up0[1].ctypes.data),
+            _p(up0[2].ctypes.data), _sz(n1),
+            _p(up1[0].ctypes.data), _p(up1[1].ctypes.data),
+            _p(up1[2].ctypes.data), _sz(n2),
+            _sz(n0),                     # ⚠ P176：dn0 行数 = e0 长度
+            _p(dn0[0].ctypes.data), _p(dn0[1].ctypes.data),
+            _p(dn0[2].ctypes.data),
+            _p(dn1[0].ctypes.data), _p(dn1[1].ctypes.data),
+            _p(dn1[2].ctypes.data),
+            _p(s0.ctypes.data),
+            _p(r1.ctypes.data), _p(r2.ctypes.data),
+            _p(e0.ctypes.data), _p(e1.ctypes.data),
+            _sz(n_steps), _sz(n_threads))
+
+    def m2_learn_fused(self, dn0, dn1, up0, up1, e0, e1, r1, r2, s0,
+                       eta_pc: float, eta_oja: float, w_max: float,
+                       n_threads: int = 0) -> None:
+        """**融合学习**（对应 `_pc_learn_fused`，P176 全 fp32）。**原地**更新 4 个 val。"""
+        for nm, csr in (("dn0", dn0), ("dn1", dn1),
+                        ("up0", up0), ("up1", up1)):
+            self._check_fused_csr(csr, nm, writable=True)
+        for nm, arr in (("e0", e0), ("e1", e1), ("r1", r1),
+                        ("r2", r2), ("s0", s0)):
+            if _np.dtype(arr.dtype) != _np.float32:
+                raise ValueError("learn_fused: %s 必须是 fp32，实得 %s"
+                                 % (nm, arr.dtype))
+            if not arr.flags["C_CONTIGUOUS"]:
+                raise ValueError("learn_fused: %s 非 C 连续" % nm)
+        _p = ctypes.c_void_p
+        _sz = ctypes.c_size_t
+        self.lib.phdnet_m2_learn_fused(
+            _p(dn0[0].ctypes.data), _p(dn0[1].ctypes.data),
+            _p(dn0[2].ctypes.data), _sz(dn0[0].size - 1),
+            _p(dn1[0].ctypes.data), _p(dn1[1].ctypes.data),
+            _p(dn1[2].ctypes.data), _sz(dn1[0].size - 1),
+            _p(up0[0].ctypes.data), _p(up0[1].ctypes.data),
+            _p(up0[2].ctypes.data), _sz(up0[0].size - 1),
+            _p(up1[0].ctypes.data), _p(up1[1].ctypes.data),
+            _p(up1[2].ctypes.data), _sz(up1[0].size - 1),
+            _p(e0.ctypes.data), _p(e1.ctypes.data),
+            _p(r1.ctypes.data), _p(r2.ctypes.data), _p(s0.ctypes.data),
+            ctypes.c_float(eta_pc), ctypes.c_float(eta_oja),
+            ctypes.c_float(w_max),
+            # ⚠ P176：传真实长度 —— Rust **不能**像 numba 那样越界读。
+            #Python 的 `_pc_learn_fused` 对 dn0(n0行) 读 e0(n1长) 会越界
+            #   → 静默读相邻内存。Rust 钳制到这些长度（**语义不等价**，
+            #   已在 `verify_m2_rust_kernels.py` 记录为已知差异）。
+            _sz(e0.size), _sz(e1.size), _sz(r1.size), _sz(r2.size),
+            _sz(n_threads))
+
+    @staticmethod
+    def _check_fused_csr(csr, name, writable: bool = False) -> None:
+        """融合核的 CSR 校验（**矩形合法**，不要求方阵 —— P174曾误加方阵断言）。"""
+        ip, ix, vl = csr
+        if _np.dtype(ip.dtype) != _np.int64:
+            raise ValueError("%s: indptr 必须 int64，实得 %s"
+                             % (name, ip.dtype))
+        if _np.dtype(ix.dtype) != _np.int64:
+            raise ValueError("%s: idx 必须 int64，实得 %s"
+                             % (name, ix.dtype))
+        if _np.dtype(vl.dtype) != _np.float32:
+            raise ValueError("%s: val 必须 fp32（Rust 按 f32 读），实得 %s"
+                             % (name, vl.dtype))
+        for nm, arr in (("indptr", ip), ("idx", ix), ("val", vl)):
+            if not arr.flags["C_CONTIGUOUS"]:
+                raise ValueError("%s: %s 非 C 连续" % (name, nm))
+        if ip.size < 1 or ip[-1] != ix.size or ix.size != vl.size:
+            raise ValueError(
+                "%s: indptr[-1]=%d / idx.size=%d / val.size=%d 不一致"
+                % (name, ip[-1], ix.size, vl.size))
+        if ix.size and ix.min() < 0:
+            raise ValueError("%s: idx 有负值（min=%d）" % (name, ix.min()))
+        if writable and not vl.flags["WRITEABLE"]:
+            raise ValueError("%s: val 不可写（learn 需原地更新）" % name)
+
     # ── M2 CSR 算子全集（P175）────────────────────────────────────
     #⚠ 每个都先过 `_check_csr`（dtype/连续/形状/越界）——
     #   P174 审计发现这些校验缺失会导致**静默算错**。

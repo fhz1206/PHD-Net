@@ -249,15 +249,22 @@ if NUMBA_OK:
     def _pc_infer_fused(up0, up1, dn0, dn1, s0, n_steps):
         n1 = up0[0].shape[0] - 1
         n2 = up1[0].shape[0] - 1
-        r1 = np.empty(n1)
-        r2 = np.empty(n2)
+        n0 = dn0[0].shape[0] - 1         # ⚠ P176：需要 n0（`e0` 的正确长度）
+        # ⚠⚠ **P176（fhz 拍板「统一改 fp32」）**：原本是 `np.empty(n1)`（**fp64**），
+        #   而 `val` 自 P173 起是 fp32 → 融合核是「fp32 存储 + fp64 累加 +
+        #   fp64 中间数组」的**混合精度**。现统一为 fp32。
+        #   · 代价：累加精度降低 → **需重新 rebaseline**
+        #   · 收益：① 可用 fp32 SIMD（fp64 无 FMA）
+        #         ② 与 `m2_matvec` 等原子算子**逐位一致** → 融合/非融合等价
+        r1 = np.empty(n1, dtype=np.float32)
+        r2 = np.empty(n2, dtype=np.float32)
         for i in prange(n1):                      # up0 @ s0 → tanh
-            s = 0.0
+            s = np.float32(0.0)
             for p in range(up0[0][i], up0[0][i + 1]):
                 s += up0[2][p] * s0[up0[1][p]]
             r1[i] = np.tanh(s)
         for i in prange(n2):                      # up1 @ r1 → tanh
-            s = 0.0
+            s = np.float32(0.0)
             for p in range(up1[0][i], up1[0][i + 1]):
                 s += up1[2][p] * r1[up1[1][p]]
             r2[i] = np.tanh(s)
@@ -265,35 +272,44 @@ if NUMBA_OK:
             e1 = np.empty(n1)                     # e1 = r1 - dn1 @ r2
             d2 = np.empty(n2)
             for i in prange(n1):
-                s = 0.0
+                s = np.float32(0.0)
                 for p in range(dn1[0][i], dn1[0][i + 1]):
                     s += dn1[2][p] * r2[dn1[1][p]]
                 e1[i] = r1[i] - s
             for i in prange(n2):                  # d2 = clip(up1 @ e1)
-                s = 0.0
+                s = np.float32(0.0)
                 for p in range(up1[0][i], up1[0][i + 1]):
                     s += up1[2][p] * e1[up1[1][p]]
                 d2[i] = min(0.5, max(-0.5, s))
             for i in prange(n2):                  # r2 = tanh(r2 + 0.15*d2)
                 r2[i] = np.tanh(r2[i] + 0.15 * d2[i])
-            e0 = np.empty(n1)                     # e0 = s0 - dn0 @ r1
-            d1 = np.empty(n1)
-            for i in prange(n1):
-                s = 0.0
+            # ⚠⚠ **P176 修正越界 bug**（P52 遗留，fhz 拍板「按语义应读 s0」）：
+            #   `e0` 原分配为 `np.empty(n1)`，但 **`dn0` 有 `n0` 行**、
+            #   且 **`up0` 的列空间也是 `n0`** → 下面的
+            #   `d1 = clip(up0 @ e0)` 会**越界读** `e0` 的相邻内存
+            #   （实测 n0=256 / n1=192 时越界 **64** 个元素；
+            #     numba `prange` **不做边界检查** → 静默读垃圾）。
+            #   **正确长度是 `n0`** —— 与非融合路径实测一致（非融合 `e0` 长 256）。
+            #   ⚠ 这修正了 docstring 里「融合前后逐位一致」的**真实 bug**
+            #     （该声明此前**不成立**）。**需重新 rebaseline。**
+            e0 = np.empty(n0, dtype=np.float32)  # e0 = s0 - dn0 @ r1
+            d1 = np.empty(n1, dtype=np.float32)
+            for i in prange(n0):                  # ⚠ P176：n1 -> n0（dn0 有 n0 行）
+                s = np.float32(0.0)
                 for p in range(dn0[0][i], dn0[0][i + 1]):
                     s += dn0[2][p] * r1[dn0[1][p]]
                 e0[i] = s0[i] - s
             for i in prange(n1):                  # d1 = clip(up0 @ e0)
-                s = 0.0
+                s = np.float32(0.0)
                 for p in range(up0[0][i], up0[0][i + 1]):
                     s += up0[2][p] * e0[up0[1][p]]
                 d1[i] = min(0.5, max(-0.5, s))
             for i in prange(n1):                  # r1 = tanh(r1 + 0.15*d1)
                 r1[i] = np.tanh(r1[i] + 0.15 * d1[i])
-        e0 = np.empty(n1)                          # 末尾误差（与原版同序）
-        e1 = np.empty(n1)
-        for i in prange(n1):
-            s = 0.0
+        e0 = np.empty(n0, dtype=np.float32)  # 末尾误差（⚠ P176：n1→n0，原越界）
+        e1 = np.empty(n1, dtype=np.float32)
+        for i in prange(n0):                     # ⚠ P176：n1 -> n0（dn0 有 n0 行）
+            s = np.float32(0.0)
             for p in range(dn0[0][i], dn0[0][i + 1]):
                 s += dn0[2][p] * r1[dn0[1][p]]
             e0[i] = s0[i] - s

@@ -58,6 +58,7 @@ pub mod mechanisms;
 pub mod pool;
 pub mod dispatch;
 pub mod m2_csr;
+pub mod m2_fused;
 pub mod simd;
 
 /// M2 判并行的工作量门限（**总非零数 nnz**）。
