@@ -9,6 +9,7 @@ k 条**存在**的入边，不存在的连接不存储、不计算），复用 `
 学习规则**不变**（仍是 softmax 交叉熵的末端梯度）——变化的是连接的存在性结构。
 """
 
+import os
 import numpy as np
 
 from .sparse_pc import (_csr_add_outer, _csr_clip, _csr_matvec, _csr_oja_up,
@@ -48,6 +49,101 @@ if NUMBA_OK:                                        # pragma: no cover
     # 1.4e-14）。故前向仍走 BLAS，融合核只用于更新（tests/verifiers/verify_readout_fused.py）。
 else:                                               # pragma: no cover
     _ro_dense_update = None
+
+
+# ---------------------------------------------------------------------------
+# P183：M1 fp32 前向走 **Rust AVX2 核**（默认），BLAS 作回退。
+# ---------------------------------------------------------------------------
+# # 为什么（实测，本机 x86，best-of-8，8 线程）
+#
+#   | shape             | 标量 m1_gemv | **AVX2** | BLAS    | AVX2 vs BLAS |
+#   |-------------------|--------------|----------|---------|---------------|
+#   | 4096× 4096        | 3.51 ms      | 1.94 ms  | 2.37 ms | **1.22×**     |
+#   | 73958× 512        | 7.52 ms      | 6.53 ms  | 7.14 ms | **1.09×**     |
+#   | 51962× 3072(1b档) | 28.35 ms     | 20.92 ms | 31.80 ms| **1.52×**     |
+#   | 16384× 2048       | 6.78 ms      | 6.23 ms  | 8.07 ms | **1.30×**     |
+#   | 8192× 8192        | 12.79 ms     | 10.72 ms | 18.72 ms| **1.75×**     |
+#
+# → **Rust AVX2 全面快于 BLAS**（1.09–1.75×）。
+#   关键事实：`mechanisms::m1_gemv` 用的是**标量** `gemv_row`（逐列累加），
+#   而 `simd::gemv_row_avx2`（4 路 FMA 累加器）此前**只被 `m1_gemv_simd` 用**，
+#   生产前向从未走它 → 本次让前向直接用 AVX2 核。
+# ⚠ **数值**：AVX2 改变求和顺序 → **非逐位**（实测 relerr 1.6e-06 ~ 3.1e-06，
+#   落在 1e-5 容差门内；与 P131 einsum 非逐位 3e-5 同量级或更好）。
+# ⚠ **降级可归因**（P161）：Rust 库不可用/无 AVX2 → 回落 BLAS，原因记入 `_RO_M1`。
+_RO_M1 = {"k": None, "why": ""}
+
+
+def _m1_rust_kernels():
+    """惰性加载 Rust 核 + 探测 AVX2。返回 `(kernels, reason)`。"""
+    if _RO_M1["k"] is not None:
+        return _RO_M1["k"], ""
+    if _RO_M1["why"]:
+        return None, _RO_M1["why"]
+    try:
+        import os as _os
+        import sys as _sys
+        _d = _os.path.join(_os.path.dirname(_os.path.dirname(
+            _os.path.abspath(__file__))), "phdnet_rs")
+        if _d not in _sys.path:
+            _sys.path.insert(0, _d)
+        from phdnet_rs import load as _load
+        _k, _why = _load()
+    except Exception as _e:                       # noqa: BLE001
+        _RO_M1["why"] = "Rust 库导入失败：%s: %s" % (type(_e).__name__, _e)
+        return None, _RO_M1["why"]
+    if _k is None:
+        _RO_M1["why"] = "Rust 库不可用：%s（修：bash phdnet_rs/build.sh）" % _why
+        return None, _RO_M1["why"]
+    if not _k.has_avx2():
+        _RO_M1["why"] = "本机无 AVX2 → M1 回落 BLAS"
+        return None, _RO_M1["why"]
+    _RO_M1["k"] = _k
+    return _k, ""
+
+
+def _m1_threads() -> int:
+    """M1 核的线程数（P183：**默认 8**，与 M2 一致；env `PHDNET_M1_THREADS` 可覆盖）。"""
+    try:
+        return int(os.environ.get("PHDNET_M1_THREADS", "") or 8)
+    except ValueError:
+        return 8
+
+
+def _m1_rust_worth_it(n_in: int, n_out: int) -> bool:
+    """**按规模判断** Rust AVX2 是否比 BLAS 快（P183 实测）。
+
+    实测（本机 x86，8 线程，含调用开销）：
+
+    | n_in × n_out | cells | Rust | BLAS | 比值 |
+    |---|---|---|---|---|
+    | 256 × 1024| 26万 | 0.048ms | 0.023ms | 0.48x（输，跨界开销占主导） |
+    | 1024 × 4096 | 419万 | 0.630 | 0.659 | 1.05x |
+    | **3072 × 51962（1b档）** | **1.6亿** | 26.29 | 38.00 | **1.45x** |
+    | 2048 × 16384 | 3355万 | 7.09 | 8.44 | 1.19x |
+
+    → 门限取 **cells ≥ 1<<23（8M）**：小于它ctypes 跨界 + 分配 `out` 的
+    固定开销摊不薄，回落 BLAS。
+    ⚠ 门限可用 env `PHDNET_M1_MIN_CELLS` 覆盖（0 = 强制全程 Rust）。
+    """
+    try:
+        thr = int(os.environ.get("PHDNET_M1_MIN_CELLS", "") or (1 << 23))
+    except ValueError:
+        thr = 1 << 23
+    return n_in * n_out >= thr
+
+
+# 前向**无 bias**（等价 `W @ h`）→共享零向量，按 n_out 缓存避免每次分配
+_M1_ZERO_B = {}
+
+
+def _m1_zero_b(n_out: int):
+    z = _M1_ZERO_B.get(n_out)
+    if z is None:
+        z = np.zeros(n_out, dtype=np.float32)
+        _M1_ZERO_B[n_out] = z
+    return z
+
 
 
 # P9：量化码本的融合核（fp16/bf16/fp8/fp4）——**位算法量化**（非二分搜索：
@@ -1000,9 +1096,18 @@ class Readout:
                 return K(self._codes, hh, self._n_in, self._wscale)
             scale = self._wscales if self.qfmt == "int4" else self._wscale
             return K(self._codes, self._lut, hh, self._n_in, scale)
-        if self._W.dtype == np.float32:         # fp32：BLAS sgemv（升精度返回）
-            return (self._W @ h.astype(np.float32, copy=False)).astype(np.float64,
-                                                                       copy=False)
+        if self._W.dtype == np.float32:         # fp32：Rust AVX2 核（P183），回退 BLAS
+            hh = h.astype(np.float32, copy=False)
+            # ⚠ P183：Rust AVX2 比 BLAS 快 **1.09-1.75×**（本机 8线程实测）。
+            #   数值**非逐位**（改求和顺序，relerr~1e-6，在 1e-5 容差门内）。
+            #   Rust 不可用 / 无 AVX2 → 回落 BLAS（原因记在 `_RO_M1["why"]`）。
+            _k, _why = _m1_rust_kernels()
+            if _k is not None and _m1_rust_worth_it(self._n_in, self._n_out):
+                _out = np.empty(self._n_out, dtype=np.float32)
+                _k.m1_gemv_simd(self._W, hh, _m1_zero_b(self._n_out), _out,
+                                _m1_threads())
+                return _out.astype(np.float64, copy=False)
+            return (self._W @ hh).astype(np.float64, copy=False)
         return self._W @ h
 
     def _apply_update(self, dp: np.ndarray, h: np.ndarray, eta: float) -> bool:
