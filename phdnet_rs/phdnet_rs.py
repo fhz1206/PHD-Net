@@ -325,20 +325,33 @@ class RustKernels:
                 raise ValueError("infer_fused: %s 非 C 连续" % nm)
         _p = ctypes.c_void_p
         _sz = ctypes.c_size_t
+        # ⚠⚠ **P182修复（真 bug，relerr≈1.9 的根因）**：融合核的 `idx` 走 `c_void_p`，
+        #   **从未做 int64→int32 转换**，而 Rust 侧按 `*const i32` 读 →
+        #   int64 数组被当成 int32 交错读 → **读到垃圾，数值全错**。
+        #   （P178 落地 i32 时只改了原子算子`_idx_i32`，**漏了融合核**。）
+        #   典型触发：`SparsePCStack` 的 CSR idx **是 int64**（见 `_random_csr`），
+        #   故 `m2_infer_fused`/`m2_learn_fused` 一直不可用（门禁 N2/N3 FAIL）。
+        # ✅ 修法：与原子算子一致，idx 统一走 `_idx_i32`（int32 零拷贝 / int64 转换）。
+        # ⚠⚠ **必须用局部变量持有转换结果**：`c_void_p` 只传地址、**不持引用**，
+        #   若写成 `_p(self._idx_i32(up0[1]).ctypes.data)`，临时数组会在
+        #   ctypes 实际使用前被 GC 回收 → **access violation**（已实测）。
+        #   故先把4 个转换结果存进列表，用完后再释放。
+        _i32 = [self._idx_i32(c[1]) for c in (up0, up1, dn0, dn1)]
         self.lib.phdnet_m2_infer_fused(
-            _p(up0[0].ctypes.data), _p(up0[1].ctypes.data),
+            _p(up0[0].ctypes.data), _p(_i32[0].ctypes.data),
             _p(up0[2].ctypes.data), _sz(n1),
-            _p(up1[0].ctypes.data), _p(up1[1].ctypes.data),
+            _p(up1[0].ctypes.data), _p(_i32[1].ctypes.data),
             _p(up1[2].ctypes.data), _sz(n2),
             _sz(n0),                     # ⚠ P176：dn0 行数 = e0 长度
-            _p(dn0[0].ctypes.data), _p(dn0[1].ctypes.data),
+            _p(dn0[0].ctypes.data), _p(_i32[2].ctypes.data),
             _p(dn0[2].ctypes.data),
-            _p(dn1[0].ctypes.data), _p(dn1[1].ctypes.data),
+            _p(dn1[0].ctypes.data), _p(_i32[3].ctypes.data),
             _p(dn1[2].ctypes.data),
             _p(s0.ctypes.data),
             _p(r1.ctypes.data), _p(r2.ctypes.data),
             _p(e0.ctypes.data), _p(e1.ctypes.data),
             _sz(n_steps), _sz(n_threads))
+        del _i32
 
     def m2_learn_fused(self, dn0, dn1, up0, up1, e0, e1, r1, r2, s0,
                        eta_pc: float, eta_oja: float, w_max: float,
@@ -356,14 +369,17 @@ class RustKernels:
                 raise ValueError("learn_fused: %s 非 C 连续" % nm)
         _p = ctypes.c_void_p
         _sz = ctypes.c_size_t
+        # ⚠⚠ **P182**：同 `m2_infer_fused`，idx 必须 int64→int32 转换，
+        #   否则 Rust 按 i32 读 int64 数组 → 读到垃圾（门禁 N3 FAIL 根因）。
+        _i32 = [self._idx_i32(c[1]) for c in (dn0, dn1, up0, up1)]
         self.lib.phdnet_m2_learn_fused(
-            _p(dn0[0].ctypes.data), _p(dn0[1].ctypes.data),
+            _p(dn0[0].ctypes.data), _p(_i32[0].ctypes.data),
             _p(dn0[2].ctypes.data), _sz(dn0[0].size - 1),
-            _p(dn1[0].ctypes.data), _p(dn1[1].ctypes.data),
+            _p(dn1[0].ctypes.data), _p(_i32[1].ctypes.data),
             _p(dn1[2].ctypes.data), _sz(dn1[0].size - 1),
-            _p(up0[0].ctypes.data), _p(up0[1].ctypes.data),
+            _p(up0[0].ctypes.data), _p(_i32[2].ctypes.data),
             _p(up0[2].ctypes.data), _sz(up0[0].size - 1),
-            _p(up1[0].ctypes.data), _p(up1[1].ctypes.data),
+            _p(up1[0].ctypes.data), _p(_i32[3].ctypes.data),
             _p(up1[2].ctypes.data), _sz(up1[0].size - 1),
             _p(e0.ctypes.data), _p(e1.ctypes.data),
             _p(r1.ctypes.data), _p(r2.ctypes.data), _p(s0.ctypes.data),
@@ -375,6 +391,7 @@ class RustKernels:
             #   已在 `verify_m2_rust_kernels.py` 记录为已知差异）。
             _sz(e0.size), _sz(e1.size), _sz(r1.size), _sz(r2.size),
             _sz(n_threads))
+        del _i32
 
     @staticmethod
     def _check_fused_csr(csr, name, writable: bool = False) -> None:

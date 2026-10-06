@@ -46,7 +46,8 @@ class PHDNet:
                                 fused=getattr(cfg, "pc_fused_kernel", True),       # P75
                                 # P181：M2 算子后端默认 Rust + 8 线程（Python 核保留）
                                 m2_backend=getattr(cfg, "m2_backend", "rust"),
-                                rs_threads=getattr(cfg, "rs_threads", 8))
+                                rs_threads=getattr(cfg, "rs_threads", 8),
+                                rs_fused_min_nnz=getattr(cfg, "rs_fused_min_nnz", 393216))
         # M3 关联核：默认 numpy(+numba)；显式指定或检测到加速器时改用 torch 后端
         # （同一算子语义，覆盖 CPU / CUDA / ROCm(HIP) / 昇腾 NPU）
         # M3 关联核：**只走 numpy(+numba) CPU**（P30 定稿）。

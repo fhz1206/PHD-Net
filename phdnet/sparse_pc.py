@@ -425,7 +425,8 @@ class SparsePCStack:
                  rng: np.random.Generator, w_max: float = 2.0,
                  conn_k: int = 0, lognormal_init: bool = False,
                  exc_ratio: float = 0.8, fused: bool = True,
-                 m2_backend: str = "rust", rs_threads: int = 8):
+                 m2_backend: str = "rust", rs_threads: int = 8,
+                 rs_fused_min_nnz: int = 393216):
         self.eta_pc, self.eta_oja, self.w_max = eta_pc, eta_oja, w_max
         # P181：`m2_backend` —— **"rust"（默认）** / "numpy"（numba 参照）。
         # ⚠ **默认从numpy 改为 rust**（P181，fhz 指示）。依据：P179 实测
@@ -470,26 +471,20 @@ class SparsePCStack:
         # Rust 侧线程数（P181）：**默认 8**（P180 实测 8 线程最优；
         # 显式给 0 时Rust 按 CPU 核自动取 min(8, 核-1)）。
         self.rs_threads = int(rs_threads)
+        # P182：Rust 融合核的**规模门限**（实测交叉点 nnz≈52万，见
+        # `_rust_fused_worth_it` 的对照表）。低于它 → 走 numba（ctypes 跨界占主导）。
+        # 设 0 = 强制全程用 Rust 融合核；设很大 = 强制全程 numba（对拍用）。
+        self._rs_fused_min_nnz = int(rs_fused_min_nnz)
         # P103：**不能 bool()**——那会把 "serial" 变成 True，让 P99 的单核核
         # 永不可达（审查实测：`--m2-kernel serial` 实际走的是 parallel 核，
         # 整条 P99 链净效果为零）。三态原样保留：True / "fused" / "serial" / False。
         self.fused = fused
-        # P181：Rust 算子的**实际生效范围**（诚实口径）。
-        # ⚠⚠ **融合核（`fused=True`）走 numba，Rust 融合核不可用**：
-        #   门禁 `verify_m2_rust_kernels.py` 实测 `phdnet_m2_infer_fused` relerr
-        #   **~1.9**、`m2_learn_fused` **~0.18** → **数值错误**，一律不启用。
-        #   而 `fused=True` 是**生产默认**（融合核比非融合快 1.4-1.8×）→
-        #   → **默认配置下 M2 实际仍走 numba**，Rust 库处于「已加载待命」状态。
-        #   → Rust 真正生效的唯一路径：`fused=False` + `m2_backend="rust"`
-        #     （但那条路实测慢 1.4-2.9×，见 P181 记忆日志 → **不推荐**）。
-        # → 所以本次改动的实际收益是：**8 线程默认** + 架构对齐（Rust 优先、
-        #   不可用可归因回落），**性能收益为零**，直到融合核修好。
-        self.rust_effective = (self._rs is not None) and (not self.fused)
-        if self._rs is not None and self.fused:
-            self.m2_backend_reason = (
-                "Rust 融合核数值错误（门禁 N2/N3 relerr ~1.9/~0.18，未修复）→ "
-                "fused=True 时实际走 numba 融合核；Rust 仅在 fused=False 时生效"
-                "（实测更慢，不推荐）")
+        # P182：Rust 融合核**已修复并可用**（int64→i32 漏转是根因，已补），
+        #   门禁 N2/N3 → 0 例 FAIL（relerr ~2e-07）。故 `fused=True` 也走 Rust。
+        self.rust_effective = (self._rs is not None)
+        if self._rs is None:
+            self.m2_backend_reason = self.m2_backend_reason or (
+                "Rust 库不可用 → 全部走 numba 参照")
         self.n0, self.n1, self.n2 = n0, n1, n2
         k0 = conn_k if conn_k > 0 else max(1, n0 // 8)
         k1 = conn_k if conn_k > 0 else max(1, n1 // 8)
@@ -507,6 +502,14 @@ class SparsePCStack:
         # 下行（生成）稀疏图 = 上行图转置 × 0.5（与稠密版同一初始化语义）
         self.dn0 = _transpose_csr(*self.up0, n_new_rows=n0, scale=0.5)
         self.dn1 = _transpose_csr(*self.up1, n_new_rows=n1, scale=0.5)
+        # P182：**int32 idx 视图缓存**（Rust 融合核要 i32，原始是 int64）。
+        # 实测每次转换 ≈ **1.85 ms**（4 个 CSR、1.05M nnz），而融合核本身只要
+        # 1.01ms → 不缓存会让 Rust **慢 3.2×**（比 numba 融合核 1.26ms 差得多）。
+        # ⚠ **缓存安全性**：CSR 的**稀疏结构（indptr/idx）终身不变**，学习只**原地
+        #   更新 val**（`m2_learn_fused` / `_add_outer` / `_oja_up` 都只写 `val`），
+        #   且 `val` 数组**共享同一对象**（不替换）→ 故按 `(id(indptr), id(idx))`
+        #   记账即可：结构换了才会重建缓存。
+        self._csr_i32_cache = {}
         # 稳态目标：各行权重初始 L2 范数（突触缩放拉回此值）
         self._hn_up0 = self._row_norms(self.up0)
         self._hn_up1 = self._row_norms(self.up1)
@@ -621,6 +624,55 @@ class SparsePCStack:
         """实际存在的突触数（结构性稀疏的存储/计算单位）。"""
         return int(sum(len(v[2]) for v in (self.up0, self.up1, self.dn0, self.dn1)))
 
+    def _csr_i32(self, csr, tag):
+        """返回 `(indptr, idx_int32, val)` —— idx 为 int32 的**缓存视图**（P182）。
+
+        Rust 融合核按 `*const i32` 读 idx，而本项目的 CSR 存的是 **int64**
+        → 每次调用都要转换（实测 1.85ms/次，比核本身还贵）。
+        因**稀疏结构终身不变**（学习只原地改 `val`），故按对象身份缓存转换结果。
+
+        ⚠ 缓存 key 用 `id(indptr)`+`id(idx)`+size：**结构被替换时会自动重建**
+          （`id` 复用有风险，故同时校验 dtype/size；val **不**参与 key，
+          因为它是原地更新的同一对象）。
+        """
+        ip, ix, vl = csr
+        key = (tag, id(ip), id(ix), ix.size)
+        hit = self._csr_i32_cache.get(key)
+        if hit is not None:
+            return hit
+        if self._rs is None:
+            raise RuntimeError("_csr_i32 需要 Rust 核")
+        out = (ip, self._rs._idx_i32(ix), vl)
+        self._csr_i32_cache[key] = out
+        return out
+
+    def _rust_fused_worth_it(self) -> bool:
+        """**按规模判断** Rust 融合核是否比 numba 融合核快（P182 实测）。
+
+        实测交叉点（x86 本机，`infer`含 2 个 n_steps）：
+
+        | n0 × k | nnz | numba | Rust | 比值 |
+        |---|---|---|---|---|
+        | 256× 16 | 4千 | 0.063ms | 0.123ms | 0.51x（输） |
+        | 512 × 32 | 1.6万 | 0.077 | 0.190 | 0.40x |
+        | 1024 × 64 | 6.6万 | 0.162 | 0.467 | 0.35x |
+        | 2048 × 96 | 20万 | 0.299 | 0.878 | 0.34x |
+        | **4096 × 128** | **52万** | 0.906 | **0.793** | **1.14x（赢）** |
+        | **8192 × 128** | **105万** | 2.600 | **1.972** | **1.32x** |
+
+        原因：小 shape时 Rust 的 **6 次 ctypes 跨界 + 池派发**占主导；
+        大 shape 才被真正的计算量摊薄。
+        ⚠ 门限 `nnz ≥ 393216`（= 384K，介于 20万与 52万之间，取保守偏低）。
+        ⚠ **生产 1b 档读出门 nnz ≈ 51962×128 ≈ 6.6M** → 稳居赢区。
+        """
+        return self._rs is not None and self._rs_fused_min_nnz > 0 and (
+            self._fused_nnz() >= self._rs_fused_min_nnz)
+
+    def _fused_nnz(self) -> int:
+        """融合路径一次调用处理的 nnz 估计（4 个 CSR 之和）。"""
+        return int(self.up0[1].size + self.up1[1].size
+                   + self.dn0[1].size + self.dn1[1].size)
+
     # ---------- 推理（稀疏前向，逻辑与稠密版逐条对应） ----------
     def infer(self, s0: np.ndarray, n_steps: int = 1) -> dict:
         """M2 预测编码推理（**融合核**版，P52：最大段做 numba 融合）。
@@ -638,13 +690,40 @@ class SparsePCStack:
                 self.up0, self.up1, self.dn0, self.dn1, s0, n_steps)
             return {"s0": s0, "r1": r1, "r2": r2, "e0": e0, "e1": e1}
         if self.fused:
-            # ⚠⚠ **P181：Rust 融合核目前【不可用】，必须走 numba。**
-            #   实测（`tests/verifiers/verify_m2_rust_kernels.py` 门禁）：
-            #   `N2 infer 融合核` relerr **~1.9**、`N3 learn 融合核` relerr **~0.18**
-            #   → `phdnet_m2_infer_fused` / `m2_learn_fused` **数值是错的**。
-            #   门禁 M7 也早已写明「fused=True 时仍走 numba 融合核（如实标注未生效）」。
-            #   → **不接 Rust 融合核**（性能虽快 1.4-1.8×，但数值错误 = 不可接受）。
-            #   → 修复该核是独立工作项（见 P181 记忆日志），修好前一律 numba。
+            # P182：**Rust 融合核**（P182 修好 int64→i32 漏转后已可用，
+            #   门禁 N2/N3 从 relerr~1.9 → ~2e-07，**0 例 FAIL**）。
+            # ⚠ 为什么必须走**融合核**而非独立算子：实测单次 `m2_matvec` 裸调用
+            #   0.954ms ≈ numba 融合核， 但 6 次独立派发 = 6.32ms（**6.6×**）。
+            # ⚠ **idx 必须走缓存的 int32 视图**（`_csr_i32`）—— 否则每次转换
+            #   1.85ms，会把 1.01ms 的核拖成 3.2ms（比 numba 还慢）。
+            # ⚠ 数值：Rust 融合核与 numba 融合核**容差 1e-6 等价**（非逐位，
+            #   SIMD 改求和顺序）；已过门禁 N2/N3。
+            if self._rust_fused_worth_it():
+                try:
+                    n0 = self.dn0[0].size - 1
+                    n1 = self.up0[0].size - 1
+                    n2 = self.up1[0].size - 1
+                    r1 = np.empty(n1, np.float32)
+                    r2 = np.empty(n2, np.float32)
+                    e0 = np.empty(n0, np.float32)
+                    e1 = np.empty(n1, np.float32)
+                    s0f = np.ascontiguousarray(s0, dtype=np.float32)
+                    self._rs.m2_infer_fused(
+                        self._csr_i32(self.up0, "up0"),
+                        self._csr_i32(self.up1, "up1"),
+                        self._csr_i32(self.dn0, "dn0"),
+                        self._csr_i32(self.dn1, "dn1"),
+                        s0f, r1, r2, e0, e1, n_steps, self.rs_threads)
+                    return {"s0": s0, "r1": r1, "r2": r2, "e0": e0, "e1": e1}
+                except Exception as _e:      # noqa: BLE001
+                    # ⚠ **降级可归因**（P161）：不中断训练，记原因回落 numba。
+                    self.m2_backend = "numpy"
+                    self._rs = None
+                    self.rust_effective = False
+                    self._csr_i32_cache.clear()
+                    self.m2_backend_reason = (
+                        "Rust 融合核失败 → 回落 numba 融合核：%s: %s"
+                        % (type(_e).__name__, _e))
             r1, r2, e0, e1 = _pc_infer_fused(self.up0, self.up1, self.dn0,
                                             self.dn1, s0, n_steps)
             return {"s0": s0, "r1": r1, "r2": r2, "e0": e0, "e1": e1}
@@ -678,8 +757,25 @@ class SparsePCStack:
         # P59：homeostasis=False 走融合核（8 次 → 1 次，逐位一致）；
         # homeostasis=True 保持原路径（e0/e1 归一化在核外，见融合核注释）。
         if not homeostasis:
-            # ⚠⚠ **P181：Rust 融合学习核同样【不可用】**（门禁 N3 relerr ~0.18），
-            #   与 infer 同因 → 一律走 numba 融合核。
+            # P182：Rust 融合学习核（idx 走缓存的 int32 视图）。
+            if self._rust_fused_worth_it():
+                try:
+                    self._rs.m2_learn_fused(
+                        self._csr_i32(self.dn0, "dn0"),
+                        self._csr_i32(self.dn1, "dn1"),
+                        self._csr_i32(self.up0, "up0"),
+                        self._csr_i32(self.up1, "up1"),
+                        e0, e1, r1, r2, s0, eta, self.eta_oja * eta_scale,
+                        self.w_max, self.rs_threads)
+                    return
+                except Exception as _e:      # noqa: BLE001
+                    self.m2_backend = "numpy"
+                    self._rs = None
+                    self.rust_effective = False
+                    self._csr_i32_cache.clear()
+                    self.m2_backend_reason = (
+                        "Rust 融合学习核失败 → 回落 numba：%s: %s"
+                        % (type(_e).__name__, _e))
             _pc_learn_fused(self.dn0, self.dn1, self.up0, self.up1,
                             e0, e1, r1, r2, s0, eta, self.eta_oja * eta_scale,
                             self.w_max)

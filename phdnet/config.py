@@ -210,6 +210,10 @@ class PHDNetConfig:
     m2_backend: str = "rust"             # "rust"（默认） | "numpy"
     # P181：Rust 侧线程数（**默认 8**）。0 = 按 CPU 核自动取 min(8, 核-1)。
     rs_threads: int = 8
+    # P182：Rust 融合核的**规模门限**（融合路径 nnz 低于它就走 numba）。
+    # 实测交叉点 nnz≈52万（4096×128 时 Rust 快 1.14x，2048×96 时输 0.34x）。
+    # 0 = 强制全程 Rust；极大值 = 强制全程 numba（对拍用）。
+    rs_fused_min_nnz: int = 393216
     # P84：fp8 forward 副本的重建间隔（步）——量化成本摊到 N 步；N 越大越省，
     # 但 forward 用的副本越旧（默认 8）。
     fp8_refresh: int = 8
