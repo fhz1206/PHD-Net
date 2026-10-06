@@ -78,11 +78,12 @@ pub unsafe extern "C" fn phdnet_m1_kwta(
 /// M2 CSR SpMV。
 ///
 /// # Safety
-/// `indptr`/`idx` 为 `i64`，`val` 为 `f32`，`x`/`y` 长度须 ≥ `n_rows`。
+/// `indptr` 为 `i64`，`idx` 为 `i32`（P178 原生 i32 落地），`val` 为 `f32`，
+/// `x`/`y` 长度须 ≥ `n_rows`。
 #[no_mangle]
 pub unsafe extern "C" fn phdnet_csr_spmm(
     indptr: *const c_longlong,
-    idx: *const c_longlong,
+    idx: *const c_int,
     val: *const c_float,
     n_rows: usize,
     x: *mut c_float,
@@ -158,13 +159,13 @@ pub unsafe extern "C" fn phdnet_m5_gate(
 /// M6 稀疏读出前向。
 ///
 /// # Safety
-/// `gather_idx` 长度 ≥ `k`；其每个值须 < `h.len()`。
+/// `gather_idx` 为 `i32`（P178 原生 i32 落地），长度 ≥ `k`；其每个值须 < `h.len()`。
 #[no_mangle]
 pub unsafe extern "C" fn phdnet_m6_sparse_fwd(
     w: *mut c_float,
     rows: usize,
     cols: usize,
-    gather_idx: *const c_longlong,
+    gather_idx: *const c_int,
     k: usize,
     h: *mut c_float,
     out: *mut c_float,

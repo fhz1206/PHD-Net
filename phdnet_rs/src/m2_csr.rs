@@ -37,7 +37,7 @@ use crate::simd::has_avx2;
 /// CSR + 行/列向量的**只读**视图。**零拷贝**（不持有所有权）。
 pub struct CsrView {
     pub indptr: *const i64,
-    pub idx: *const i64,
+    pub idx: *const i32,
     pub val: *const f32,
     pub n_rows: usize,
 }
@@ -48,7 +48,7 @@ impl CsrView {
     #[inline]
     pub unsafe fn new(
         indptr: *const i64,
-        idx: *const i64,
+        idx: *const i32,
         val: *const f32,
         n_rows: usize,
     ) -> Self {
@@ -73,7 +73,7 @@ pub struct CsrMut<'a> {
 
 /// 标量行内（**按p 顺序累加** → 与 Python 逐位）。
 #[inline]
-unsafe fn row_dot(idx: *const i64, val: *const f32, lo: usize, hi: usize,
+unsafe fn row_dot(idx: *const i32, val: *const f32, lo: usize, hi: usize,
                   x: *const f32) -> f32 {
     unsafe {
         let mut s = 0.0f32;
@@ -91,7 +91,7 @@ unsafe fn row_dot(idx: *const i64, val: *const f32, lo: usize, hi: usize,
 #[no_mangle]
 pub unsafe extern "C" fn phdnet_m2_matvec(
     indptr: *const i64,
-    idx: *const i64,
+    idx: *const i32,
     val: *const f32,
     n_rows: usize,
     x: *const f32,
@@ -114,21 +114,71 @@ pub unsafe extern "C" fn phdnet_m2_matvec(
     0
 }
 
+/// 标量行内，**4 路累加器**（打断依赖链，但**不用 gather 指令**）。
+///
+/// P178 诊断：AVX2 `vgatherdps` 在本机**不缩放**（微码共享执行端口），
+/// 8 线程只到 1.29×；而标量循环（numba 内层）能到 2.78×。本函数用于
+/// 验证「标量 + 短依赖链」能否在多线程下追平 numba。
+/// 展开改求和顺序 → **非逐位**（与 gather 核同级，落在 1e-5 容差门内）。
+#[inline]
+unsafe fn row_dot4(idx_p: *const i32, val_p: *const f32, lo: usize, hi: usize,
+                   x: *const f32) -> f32 {
+    unsafe {
+        let n4 = (hi - lo) / 4 * 4;
+        let mut a0 = 0.0f32; let mut a1 = 0.0f32; let mut a2 = 0.0f32; let mut a3 = 0.0f32;
+        let mut p = lo;
+        while p < lo + n4 {
+            a0 += *val_p.add(p) * *x.add(*idx_p.add(p) as usize);
+            a1 += *val_p.add(p + 1) * *x.add(*idx_p.add(p + 1) as usize);
+            a2 += *val_p.add(p + 2) * *x.add(*idx_p.add(p + 2) as usize);
+            a3 += *val_p.add(p + 3) * *x.add(*idx_p.add(p + 3) as usize);
+            p += 4;
+        }
+        let mut acc = (a0 + a1) + (a2 + a3);
+        while p < hi { acc += *val_p.add(p) * *x.add(*idx_p.add(p) as usize); p += 1; }
+        acc
+    }
+}
+
+/// SpMV 内层策略（`PHDNET_CSR_KERNEL` 环境变量，A/B 用；**默认 gather**）。
+/// · `gather`（默认）= AVX2 `vgatherdps`（单线程最快，多线程不缩放）
+/// · `scalar4` = 标量 4 路累加器（可缩放）
+/// · `scalar1` = 标量单累加器（**与 numba 内层逐位同构**）
+fn csr_kernel_mode() -> u8 {
+    static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        match std::env::var("PHDNET_CSR_KERNEL") {
+            Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+                "scalar4" => 1,
+                "scalar1" => 2,
+                _ => 0,
+            },
+            Err(_) => 0,
+        }
+    })
+}
+
 unsafe fn mv_serial(ctx: *mut u8, part: usize, n_parts: usize) {
     let c = unsafe { &*(ctx as *const MvCtx) };
     let chunk = c.v.n_rows.div_ceil(n_parts);
     let lo = part * chunk;
     let hi = ((part + 1) * chunk).min(c.v.n_rows);
     let use_simd = has_avx2();
+    let mode = csr_kernel_mode();
     for r in lo..hi {
         let a = unsafe { *c.v.indptr.add(r) } as usize;
         let b = unsafe { *c.v.indptr.add(r + 1) } as usize;
-        // ⚠ 行宽≥ 32 且本机有 AVX2 → 走 SIMD（**改变求和顺序 → 非逐位**）
+        // ⚠ 行宽≥ 32 且本机有 AVX2 → 走 `csr_dot_avx2`（P178：AVX2 gather 向量化 +
+        //   8 向量累加器展开，**非逐位**，fp32 relerr ~1e-6；落在 m2_matvec 的 1e-5
+        //   容差门内）。短行（<64）走尾部标量、逐位。
         #[cfg(target_arch = "x86_64")]
-        let s = if use_simd && b - a >= 32 {
-            unsafe { crate::simd::csr_dot_avx2(c.v.idx.add(a), c.v.val.add(a), b - a, c.x) }
-        } else {
-            unsafe { row_dot(c.v.idx, c.v.val, a, b, c.x) }
+        let s = match mode {
+            1 => unsafe { row_dot4(c.v.idx, c.v.val, a, b, c.x) },
+            2 => unsafe { row_dot(c.v.idx, c.v.val, a, b, c.x) },
+            _ if use_simd && b - a >= 32 => unsafe {
+                crate::simd::csr_dot_avx2(c.v.idx.add(a), c.v.val.add(a), b - a, c.x)
+            },
+            _ => unsafe { row_dot(c.v.idx, c.v.val, a, b, c.x) },
         };
         #[cfg(not(target_arch = "x86_64"))]
         let s = unsafe { row_dot(c.v.idx, c.v.val, a, b, c.x) };
@@ -156,7 +206,7 @@ unsafe impl Sync for MvCtx {}
 #[no_mangle]
 pub unsafe extern "C" fn phdnet_m2_add_outer(
     indptr: *const i64,
-    idx: *const i64,
+    idx: *const i32,
     val: *mut f32,
     n_rows: usize,
     a: *const f32,
@@ -229,7 +279,7 @@ unsafe impl Sync for AoCtx {}
 #[no_mangle]
 pub unsafe extern "C" fn phdnet_m2_oja_up(
     indptr: *const i64,
-    idx: *const i64,
+    idx: *const i32,
     val: *mut f32,
     n_rows: usize,
     post: *const f32,
@@ -360,7 +410,7 @@ unsafe impl Sync for ClipCtx {}
 #[no_mangle]
 pub unsafe extern "C" fn phdnet_m2_row_norms(
     indptr: *const i64,
-    idx: *const i64,
+    idx: *const i32,
     val: *const f32,
     n_rows: usize,
     out: *mut f32,
@@ -421,7 +471,7 @@ unsafe impl Sync for RnCtx {}
 #[no_mangle]
 pub unsafe extern "C" fn phdnet_m2_scale_rows(
     indptr: *const i64,
-    idx: *const i64,
+    idx: *const i32,
     val: *mut f32,
     n_rows: usize,
     target: *const f32,
@@ -483,7 +533,7 @@ mod tests_m2 {
     use super::*;
 
     /// 造一个小的随机 CSR（确定性种子）。
-    fn make(n_rows: usize, k: usize, seed: u64) -> (Vec<i64>, Vec<i64>, Vec<f32>) {
+    fn make(n_rows: usize, k: usize, seed: u64) -> (Vec<i64>, Vec<i32>, Vec<f32>) {
         let mut s = seed;
         let mut next = || {
             s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -495,7 +545,7 @@ mod tests_m2 {
         let mut idx = Vec::with_capacity(n_rows * k);
         let mut val = Vec::with_capacity(n_rows * k);
         for _ in 0..n_rows * k {
-            idx.push(next() as i64);
+            idx.push(next() as i32);
             let t = next() as f32 / (n_rows as f32);
             val.push(t - 0.5);
         }
@@ -504,7 +554,7 @@ mod tests_m2 {
 
     /// Python 参考（fp32，按 p 顺序累加）。
     fn ref_matvec(
-        indptr: &[i64], idx: &[i64], val: &[f32], x: &[f32], n: usize,
+        indptr: &[i64], idx: &[i32], val: &[f32], x: &[f32], n: usize,
     ) -> Vec<f32> {
         (0..n)
             .map(|i| {
@@ -678,7 +728,7 @@ mod tests_m2 {
         // 全零行 → nrm 被夹到 1e-12，**不得除零/产生 NaN**
         let n = 4usize;
         let ip: Vec<i64> = vec![0, 2, 4, 6, 8];
-        let idx: Vec<i64> = vec![0, 1, 0, 1, 0, 1, 0, 1];
+        let idx: Vec<i32> = vec![0, 1, 0, 1, 0, 1, 0, 1];
         let mut val = vec![0.0f32; 8];
         let target = vec![1.0f32, 1.0, 1.0, 1.0];
         unsafe {

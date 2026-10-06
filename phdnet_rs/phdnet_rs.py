@@ -42,14 +42,14 @@ class RustKernels:
                                      f32p, i32p]
         # ── M2 CSR 全集（P175）─────────────────────────────────────
         L.phdnet_m2_matvec.restype = ctypes.c_int
-        L.phdnet_m2_matvec.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
+        L.phdnet_m2_matvec.argtypes = [i64p, i32p, f32p, ctypes.c_size_t,
                                        f32p, f32p, ctypes.c_size_t]
         L.phdnet_m2_add_outer.restype = ctypes.c_int
-        L.phdnet_m2_add_outer.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
+        L.phdnet_m2_add_outer.argtypes = [i64p, i32p, f32p, ctypes.c_size_t,
                                           f32p, f32p, ctypes.c_float,
                                           ctypes.c_size_t]
         L.phdnet_m2_oja_up.restype = ctypes.c_int
-        L.phdnet_m2_oja_up.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
+        L.phdnet_m2_oja_up.argtypes = [i64p, i32p, f32p, ctypes.c_size_t,
                                        f32p, f32p, ctypes.c_float,
                                        ctypes.c_size_t]
         L.phdnet_m2_clip.restype = ctypes.c_int
@@ -72,16 +72,16 @@ class RustKernels:
             + [_vp] * 3 + [_sz] + [_vp] * 5
             + [ctypes.c_float] * 3 + [_sz] * 4 + [_sz])
         L.phdnet_m2_row_norms.restype = ctypes.c_int
-        L.phdnet_m2_row_norms.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
+        L.phdnet_m2_row_norms.argtypes = [i64p, i32p, f32p, ctypes.c_size_t,
                                            f32p, ctypes.c_size_t]
         L.phdnet_m2_scale_rows.restype = ctypes.c_int
-        L.phdnet_m2_scale_rows.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
+        L.phdnet_m2_scale_rows.argtypes = [i64p, i32p, f32p, ctypes.c_size_t,
                                            f32p, ctypes.c_size_t]
         L.phdnet_csr_spmm_simd.restype = ctypes.c_int
-        L.phdnet_csr_spmm_simd.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
+        L.phdnet_csr_spmm_simd.argtypes = [i64p, i32p, f32p, ctypes.c_size_t,
                                             f32p, f32p, ctypes.c_size_t]
         L.phdnet_csr_spmm.restype = ctypes.c_int
-        L.phdnet_csr_spmm.argtypes = [i64p, i64p, f32p, ctypes.c_size_t,
+        L.phdnet_csr_spmm.argtypes = [i64p, i32p, f32p, ctypes.c_size_t,
                                       f32p, f32p, ctypes.c_size_t]
         L.phdnet_m4a.restype = ctypes.c_int
         L.phdnet_m4a.argtypes = [f32p, ctypes.c_size_t, f32p,
@@ -94,7 +94,7 @@ class RustKernels:
                                      ctypes.POINTER(ctypes.c_longlong)]
         L.phdnet_m6_sparse_fwd.restype = ctypes.c_int
         L.phdnet_m6_sparse_fwd.argtypes = [f32p, ctypes.c_size_t, ctypes.c_size_t,
-                                           i64p, ctypes.c_size_t, f32p, f32p,
+                                           i32p, ctypes.c_size_t, f32p, f32p,
                                            ctypes.c_size_t]
         L.phdnet_has_npu.restype = ctypes.c_int
         L.phdnet_has_npu.argtypes = []
@@ -322,8 +322,8 @@ class RustKernels:
         if _np.dtype(ip.dtype) != _np.int64:
             raise ValueError("%s: indptr 必须 int64，实得 %s"
                              % (name, ip.dtype))
-        if _np.dtype(ix.dtype) != _np.int64:
-            raise ValueError("%s: idx 必须 int64，实得 %s"
+        if _np.dtype(ix.dtype) not in (_np.int64, _np.int32):
+            raise ValueError("%s: idx 必须 int64/int32（Rust 核 P178 原生 i32），实得 %s"
                              % (name, ix.dtype))
         if _np.dtype(vl.dtype) != _np.float32:
             raise ValueError("%s: val 必须 fp32（Rust 按 f32 读），实得 %s"
@@ -344,16 +344,37 @@ class RustKernels:
     #⚠ 每个都先过 `_check_csr`（dtype/连续/形状/越界）——
     #   P174 审计发现这些校验缺失会导致**静默算错**。
 
+    @staticmethod
+    def _idx_i32(idx):
+        """把 CSR 的 `idx` 转成 Rust 核要的 **int32**（P178 原生 i32 落地）。
+
+        · 已是 int32 → 零拷贝视图（若非连续则 `ascontiguousarray`）。
+        · int64 → 副本转换（一次，调用方应缓存以避免热路径重复分配）。
+        · 其余 dtype → 直接报错（不静默降级，P161 纪律）。
+        """
+        dt = _np.dtype(idx.dtype)
+        if dt == _np.int32:
+            return _np.ascontiguousarray(idx) if not idx.flags["C_CONTIGUOUS"] \
+                else idx
+        if dt == _np.int64:
+            return _np.ascontiguousarray(idx, dtype=_np.int32)
+        raise ValueError(
+            "CSR idx 的 dtype=%s 不支持；Rust 核只接受 int64/int32（P178）"
+            % dt)
+
     def m2_matvec(self, indptr, idx, val, x, out, n_threads: int = 8) -> None:
         """`out[i] = Σ val[p]·x[idx[p]]`（M2 推理 SpMV，行宽≥32 走 AVX2）。
 
         ⚠ **不与Python 逐位**（SIMD 改求和顺序）→ 门禁用容差 1e-5。
+        ⚠ idx 经边界转 **int32**（P178 原生 i32 落地；列下标在 vocab 范围内
+          ≤ 65535，int32 无损；已是 int32 则零拷贝）。
         """
         self._check_csr(indptr, idx, val, x, out)
         n = indptr.size - 1
+        idx32 = self._idx_i32(idx)
         self.lib.phdnet_m2_matvec(
             indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
-            idx.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            idx32.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
             val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             ctypes.c_size_t(n),
             x.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
@@ -368,9 +389,10 @@ class RustKernels:
         """
         self._check_csr_w(indptr, idx, val, a, b, None)
         n = indptr.size - 1
+        idx32 = self._idx_i32(idx)
         self.lib.phdnet_m2_add_outer(
             indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
-            idx.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            idx32.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
             val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             ctypes.c_size_t(n),
             a.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
@@ -386,9 +408,10 @@ class RustKernels:
         """
         self._check_csr_w(indptr, idx, val, post, pre, None)
         n = indptr.size - 1
+        idx32 = self._idx_i32(idx)
         self.lib.phdnet_m2_oja_up(
             indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
-            idx.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            idx32.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
             val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             ctypes.c_size_t(n),
             post.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
@@ -422,9 +445,10 @@ class RustKernels:
         """
         self._check_csr_rect(indptr, idx, val, out)
         n = indptr.size - 1
+        idx32 = self._idx_i32(idx)
         self.lib.phdnet_m2_row_norms(
             indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
-            idx.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            idx32.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
             val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             ctypes.c_size_t(n),
             out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
@@ -438,9 +462,10 @@ class RustKernels:
         """
         self._check_csr_w(indptr, idx, val, target, None, None)
         n = indptr.size - 1
+        idx32 = self._idx_i32(idx)
         self.lib.phdnet_m2_scale_rows(
             indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
-            idx.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            idx32.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
             val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             ctypes.c_size_t(n),
             target.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
@@ -457,8 +482,8 @@ class RustKernels:
         """
         if indptr.dtype != _np.int64:
             raise ValueError("indptr 必须是 int64，实得 %s" % indptr.dtype)
-        if idx.dtype != _np.int64:
-            raise ValueError("idx 必须是 int64，实得 %s" % idx.dtype)
+        if idx.dtype not in (_np.int64, _np.int32):
+            raise ValueError("idx 必须是 int64/int32（Rust 核 P178 原生 i32），实得 %s" % idx.dtype)
         if val.dtype != _np.float32:
             raise ValueError(
                 "val 必须是 fp32（Rust 按 f32 读写），实得 %s" % val.dtype)
@@ -502,9 +527,18 @@ class RustKernels:
           （Python 侧 CSR 由 `_random_csr` 生成，天然合法）。
         """
         for nm, arr, dt in (("indptr", indptr, _np.int64),
-                            ("idx", idx, _np.int64),
+                            ("idx", idx, None),
                             ("val", val, _np.float32),
                             ("out", out, _np.float32)):
+            if nm == "idx":
+                if _np.dtype(arr.dtype) not in (_np.int64, _np.int32):
+                    raise ValueError(
+                        "%s 的 dtype=%s，Rust 侧按 int64/int32 读 —— 不符会**静默算错**（P175）"
+                        % (nm, arr.dtype))
+                if not arr.flags["C_CONTIGUOUS"]:
+                    raise ValueError("%s 非 C 连续（strides=%s）"
+                                     % (nm, arr.strides))
+                continue
             if _np.dtype(arr.dtype) != _np.dtype(dt):
                 raise ValueError(
                     "%s 的 dtype=%s，Rust 侧按 %s 读 —— 不符会**静默算错**（P175）"
@@ -531,11 +565,21 @@ class RustKernels:
         ⚠ 另：`idx` 必须是 **int64**（Rust 侧按 i64 读）。
         """
         for nm, arr, dt in (("indptr", indptr, _np.int64),
-                            ("idx", idx, _np.int64),
+                            ("idx", idx, None),
                             ("val", val, _np.float32),
                             ("x", x, _np.float32),
                             ("out", out, _np.float32)):
             got = _np.dtype(arr.dtype)
+            if nm == "idx":
+                if got not in (_np.int64, _np.int32):
+                    raise ValueError(
+                        "csr_spmm: idx 的 dtype=%s，Rust 侧按 int64/int32 读 —— "
+                        "不符会**静默算错**（P174）" % got.name)
+                if not arr.flags["C_CONTIGUOUS"]:
+                    raise ValueError(
+                        "csr_spmm: %s 非 C 连续（strides=%s）→ 请先 "
+                        "np.ascontiguousarray()" % (nm, arr.strides))
+                continue
             if got != _np.dtype(dt):
                 raise ValueError(
                     "csr_spmm: %s 的 dtype=%s，Rust 侧按 %s 读 —— "
@@ -570,9 +614,10 @@ class RustKernels:
         self._check_csr(indptr, idx, val, x, out)
         import numpy as np
         n = indptr.size - 1
+        idx32 = self._idx_i32(idx)
         self.lib.phdnet_csr_spmm(
             indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
-            idx.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            idx32.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
             val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             ctypes.c_size_t(n),
             x.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
@@ -591,9 +636,10 @@ class RustKernels:
         """
         self._check_csr(indptr, idx, val, x, out)
         n = indptr.size - 1
+        idx32 = self._idx_i32(idx)
         self.lib.phdnet_csr_spmm_simd(
             indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
-            idx.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            idx32.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
             val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             ctypes.c_size_t(n),
             x.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
@@ -630,9 +676,10 @@ class RustKernels:
     def m6_sparse_fwd(self, W, gather_idx, h, out, n_threads: int = 1) -> None:
         import numpy as np
         r, c = W.shape
+        g32 = self._idx_i32(gather_idx)
         self.lib.phdnet_m6_sparse_fwd(
             W.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), r, c,
-            gather_idx.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            g32.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
             ctypes.c_size_t(c),
             h.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),

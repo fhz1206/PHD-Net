@@ -92,7 +92,7 @@ fn clip05(s: f32) -> f32 {
 // ══════════════════════════════════════════════════════════════════════════
 //
 // ⚠⚠ **为什么不用闭包 + `thread::scope`**（第一次尝试编译失败的原因）：
-//   闭包捕获 `CsrView`（含 `*const i64` / `*const f32`）→ 裸指针**不是 `Sync`**
+//   闭包捕获 `CsrView`（含 `*const i64` / `*const i32` / `*const f32`）→ 裸指针**不是 `Sync`**
 //   → 编译器直接拒绝（6 处 E0277）。`pool.rs` 用 `usize` 间接绕过，
 //   这里沿用**同一手法**：`#[repr(C)] struct` + `unsafe impl Send/Sync`，
 //   并把指针字段存成 `usize`（整数是 `Send`）。
@@ -155,22 +155,22 @@ unsafe impl Sync for InferCtxC {}
 impl InferCtxC {
     #[inline]
     unsafe fn up0(&self) -> CsrView {
-        CsrView::new(self.up0_ip as *const i64, self.up0_ix as *const i64,
+        CsrView::new(self.up0_ip as *const i64, self.up0_ix as *const i32,
                      self.up0_v as *const f32, self.up0_n)
     }
     #[inline]
     unsafe fn up1(&self) -> CsrView {
-        CsrView::new(self.up1_ip as *const i64, self.up1_ix as *const i64,
+        CsrView::new(self.up1_ip as *const i64, self.up1_ix as *const i32,
                      self.up1_v as *const f32, self.up1_n)
     }
     #[inline]
     unsafe fn dn0(&self) -> CsrView {
-        CsrView::new(self.dn0_ip as *const i64, self.dn0_ix as *const i64,
+        CsrView::new(self.dn0_ip as *const i64, self.dn0_ix as *const i32,
                      self.dn0_v as *const f32, self.dn0_n)
     }
     #[inline]
     unsafe fn dn1(&self) -> CsrView {
-        CsrView::new(self.dn1_ip as *const i64, self.dn1_ix as *const i64,
+        CsrView::new(self.dn1_ip as *const i64, self.dn1_ix as *const i32,
                      self.dn1_v as *const f32, self.dn1_n)
     }
 }
@@ -396,12 +396,12 @@ unsafe fn run_stage(
 /// 全部 **fp32 且 C 连续**（Python 侧 `_check_csr_fused` 已校验）。
 #[no_mangle]
 pub unsafe extern "C" fn phdnet_m2_infer_fused(
-    up0_indptr: *const i64, up0_idx: *const i64, up0_val: *const f32, n1: usize,
-    up1_indptr: *const i64, up1_idx: *const i64, up1_val: *const f32, n2: usize,
+    up0_indptr: *const i64, up0_idx: *const i32, up0_val: *const f32, n1: usize,
+    up1_indptr: *const i64, up1_idx: *const i32, up1_val: *const f32, n2: usize,
     // `dn0` 的行数 = `e0` 的长度（P176 修正：原为 n1 → 越界）
     n0: usize,
-    dn0_indptr: *const i64, dn0_idx: *const i64, dn0_val: *const f32,
-    dn1_indptr: *const i64, dn1_idx: *const i64, dn1_val: *const f32,
+    dn0_indptr: *const i64, dn0_idx: *const i32, dn0_val: *const f32,
+    dn1_indptr: *const i64, dn1_idx: *const i32, dn1_val: *const f32,
     s0: *const f32,
     r1: *mut f32, r2: *mut f32, e0: *mut f32, e1: *mut f32,
     n_steps: usize,
@@ -480,7 +480,7 @@ unsafe fn lrn_dn0(c: *const LearnCtxC, lo: usize, hi_in: usize) {
     unsafe {
         let c = &*c;
         let ip = c.dn0_ip as *const i64;
-        let ix = c.dn0_ix as *const i64;
+        let ix = c.dn0_ix as *const i32;
         let v = c.dn0_v as *mut f32;
         let e0 = c.e0 as *const f32;
         let r1 = c.r1 as *const f32;
@@ -518,7 +518,7 @@ unsafe fn lrn_dn1(c: *const LearnCtxC, lo: usize, hi: usize) {
     unsafe {
         let c = &*c;
         let ip = c.dn1_ip as *const i64;
-        let ix = c.dn1_ix as *const i64;
+        let ix = c.dn1_ix as *const i32;
         let v = c.dn1_v as *mut f32;
         let e1 = c.e1 as *const f32;
         let r2 = c.r2 as *const f32;
@@ -546,7 +546,7 @@ unsafe fn lrn_up0(c: *const LearnCtxC, lo: usize, hi: usize) {
     unsafe {
         let c = &*c;
         let ip = c.up0_ip as *const i64;
-        let ix = c.up0_ix as *const i64;
+        let ix = c.up0_ix as *const i32;
         let v = c.up0_v as *mut f32;
         let r1 = c.r1 as *const f32;
         let s0 = c.s0 as *const f32;
@@ -571,7 +571,7 @@ unsafe fn lrn_up1(c: *const LearnCtxC, lo: usize, hi: usize) {
     unsafe {
         let c = &*c;
         let ip = c.up1_ip as *const i64;
-        let ix = c.up1_ix as *const i64;
+        let ix = c.up1_ix as *const i32;
         let v = c.up1_v as *mut f32;
         let r1 = c.r1 as *const f32;
         let r2 = c.r2 as *const f32;
@@ -671,13 +671,13 @@ unsafe fn run_lrn(
 ///   ⚠ 这是 P176 实测发现的**既有 bug**（P52 遗留），待 fhz 拍板。
 #[no_mangle]
 pub unsafe extern "C" fn phdnet_m2_learn_fused(
-    dn0_indptr: *const i64, dn0_idx: *const i64, dn0_val: *mut f32,
+    dn0_indptr: *const i64, dn0_idx: *const i32, dn0_val: *mut f32,
     n_dn0: usize,
-    dn1_indptr: *const i64, dn1_idx: *const i64, dn1_val: *mut f32,
+    dn1_indptr: *const i64, dn1_idx: *const i32, dn1_val: *mut f32,
     n_dn1: usize,
-    up0_indptr: *const i64, up0_idx: *const i64, up0_val: *mut f32,
+    up0_indptr: *const i64, up0_idx: *const i32, up0_val: *mut f32,
     n_up0: usize,
-    up1_indptr: *const i64, up1_idx: *const i64, up1_val: *mut f32,
+    up1_indptr: *const i64, up1_idx: *const i32, up1_val: *mut f32,
     n_up1: usize,
     e0: *const f32, e1: *const f32,
     r1: *const f32, r2: *const f32, s0: *const f32,
@@ -720,7 +720,7 @@ mod tests_fused {
     use super::*;
 
     /// 造确定性 CSR（**方阵**：`n_rows == n_cols`）。
-    fn make(n: usize, k: usize, seed: u64) -> (Vec<i64>, Vec<i64>, Vec<f32>) {
+    fn make(n: usize, k: usize, seed: u64) -> (Vec<i64>, Vec<i32>, Vec<f32>) {
         make_rect(n, n, k, seed)
     }
 
@@ -734,7 +734,7 @@ mod tests_fused {
     ///   拿方阵 helper 造矩形 → **idx 越界 → 段错误**（实测踩到**两次**：
     ///   第一次行数错、第二次列数错）。
     fn make_rect(n_rows: usize, n_cols: usize, k: usize, seed: u64)
-        -> (Vec<i64>, Vec<i64>, Vec<f32>)
+        -> (Vec<i64>, Vec<i32>, Vec<f32>)
     {
         let mut s = seed;
         let nc = n_cols.max(1);
@@ -746,7 +746,7 @@ mod tests_fused {
         let mut idx = Vec::with_capacity(n_rows * k);
         let mut val = Vec::with_capacity(n_rows * k);
         for _ in 0..n_rows * k {
-            idx.push(next() as i64);
+            idx.push(next() as i32);
             let t = next() as f32 / (nc as f32);
             val.push(t - 0.5);
         }
@@ -802,7 +802,7 @@ mod tests_fused {
                 e0.as_mut_ptr(), e1.as_mut_ptr(), 2, 1,
             );
         }
-        let mv = |ip: &[i64], ix: &[i64], vl: &[f32], x: &[f32], n: usize| -> Vec<f32> {
+        let mv = |ip: &[i64], ix: &[i32], vl: &[f32], x: &[f32], n: usize| -> Vec<f32> {
             (0..n).map(|i| {
                 let mut s = 0.0f32;
                 for p in ip[i] as usize..ip[i + 1] as usize {
@@ -953,7 +953,7 @@ mod tests_fused {
                 e0.as_mut_ptr(), e1.as_mut_ptr(), 2, 1,
             );
         }
-        let mv = |ip: &[i64], ix: &[i64], vl: &[f32], x: &[f32], n: usize| -> Vec<f32> {
+        let mv = |ip: &[i64], ix: &[i32], vl: &[f32], x: &[f32], n: usize| -> Vec<f32> {
             (0..n).map(|i| {
                 let mut s = 0.0f32;
                 for p in ip[i] as usize..ip[i + 1] as usize {

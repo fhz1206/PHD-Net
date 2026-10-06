@@ -250,69 +250,112 @@ mod tests {
 //   ① 累加只落在 element[0]，其余 7 个 lane 恒为 0；
 //   ② 水平相加时我取了全部 8 lane → relerr=**7.0**（完全错）。
 //
-// ## 正确做法：**gather 装 8 个不同的 x[idx]**
-// 一个 lane 处理**一个不同的边**：`x[idx[p+j]]`，j=0..7。
-// 这样 8 个 lane 全部有用（无浪费），且是**合法的 SIMD**。
-// ⚠ val 也需gather → 用 `_mm256_i32gather_ps`（int32 索引）不够，
-//   故用**标量 gather 到临时数组再 load**（编译器会内联）：
-//   `let xs = [_mm256_set1_ps(...); ...]` 不行 → 用临时数组 + `_mm256_loadu_ps`。
+// ## 正确做法（P178 实测定稿）：**i32 原生 gather 向量化**
+// ⚠ i64 idx 是性能杀手：① idx 内存流量翻倍（8B vs 4B）；② 任何 SIMD gather
+//   前都得 `i64→i32` 转换（cvtepi64_epi32，贵 μop）。改 i32 原生 idx 后，
+//   **单线程** gather 核比 numba 标量内层快 ~1.06x（9.2ms vs 9.9ms，本机 x86）。
+//   关键前提：生产 `x` 仅 3072 f32=12KB 整段驻 L1，`x[idx]` 是 L1 命中。
+//   展开改变求和顺序 → 容差（非逐位）；尾部 <64 边走标量、逐位。
 //
-// ## 预期收益（诚实）
-// SpMV 的瓶颈是**访存**（`idx` 间接寻址无法连续加载），SIMD 只能补
-// 算术效率。**实测收益待服务器确认**，本机先量上界。
+// ## ⚠⚠ P178 复测推翻「多线程也快」的旧结论（本节为**权威口径**）
+// 早期注释（本文件历史版本）声称本核「2.98ms / ≈38 GB/s，追平并略超 numba」。
+// **该数字来自一个从未提交的 TEMP 核（`csr_row_avx2_i32`，git 历史查无此符号），
+// 且已被实测推翻。** 2026-10-06 在生产形状（73958×3072, k=128, i32）上、
+// **同进程交错**对拍（`outputs/bench_readout_kernels.py`）的定论：
+//
+//   | 实现              | 1 线程 | 8 线程(生产) | 并行效率 |
+//   |-------------------|--------|--------------|----------|
+//   | Rust vgatherdps   | 9.2 ms | **7.9 ms**   | 1.18×    |
+//   | Rust 标量 4acc    | 9.3 ms | **6.4 ms**   | 1.44×    |
+//   | Rust 标量 1acc    |14.6 ms | **6.2 ms**   | 2.36×    |
+//   | numba 标量 1acc   | 9.9 ms | **2.6 ms**   | 3.83×    |
+//
+// **结论（诚实口径）**：
+// 1. **单线程**：本 gather 核与 numba **持平**（~1.06x），核质量没问题。
+// 2. **多线程（生产实际用法）**：本核**几乎不缩放**（1.18×），8 线程仍要 7.9ms；
+//    numba 的标量循环能缩放到 **2.6ms** → **numba 在 8 线程快 ~2.5-2.9x**。
+// 3. 换标量内核（4acc/1acc）**不能救**（6.2-6.4ms，仍慢 2.4x）→ **瓶颈不在
+//    内层核，在线程派发/调度**：微码 gather 与标量 FMA 在多核下的吞吐差异，
+//    以及本机 8 逻辑核的 SMT/调度开销。密集 GEMV（无 gather）在同进程能缩放
+//    1.87x，证明常驻池本身健康 —— 是 **gather 这类访存密集 + 多核** 的组合不行。
+// 4. ⚠ **本机（Windows 开发机）绝对值不可信**（同 shape 不同时刻差数倍），
+//    唯一可信口径是**同进程交错对拍**的相对比值（上表）。
 
-/// CSR 一行，**8 lane 各处理一条不同的边**（真正的 SIMD，无宽度浪费）。
+/// CSR 一行，**AVX2 gather 向量化 + 8 向量累加器**（i32 原生 idx，64 路展开）。
+///
+/// ⚠ **P178 复测（权威口径，见文件头对照表）**：本核**单线程**与 numba 持平
+/// （~1.06x），但**多线程几乎不缩放**（8 线程仅 1.18x，仍慢 numba ~2.5x）。
+/// 换标量内核也救不回来 → 瓶颈在 gather 的多核吞吐/线程调度，不在本函数。
+/// 因此 `m2_csr::mv_serial` 额外提供 `PHDNET_CSR_KERNEL=scalar4|scalar1`
+/// 开关做 A/B（**默认 gather，逐位不变**）。
+///
+/// 结构：每 64 边为一步，8 个 `__m256` 累加器（各 8 lane），每累加器处理 8 个
+/// 连续边 → 8 条独立依赖链隐藏 gather 延迟，FMA 走 256 位 8 路。
+///
+/// ⚠ 展开改变求和顺序 → **非逐位**（fp32 relerr ~1e-6，落在 m2_matvec / 融合核
+///   的 1e-5 / 1e-6 容差门内）；尾部 <64 边走标量、逐位。
 ///
 /// # Safety
-/// `idx_p`/`val_p` 有效且 `nnz >= 32`；`x` 有效。
+/// `idx_p`（i32）/ `val_p` 有效；`x` 有效。
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
+#[inline(never)]
 pub unsafe fn csr_row_avx2(
-    idx_p: *const i64,
+    idx_p: *const i32,
     val_p: *const f32,
     nnz: usize,
     x: *const f32,
 ) -> f32 {
     use core::arch::x86_64::{
-        __m256, _mm256_add_ps, _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_setzero_ps,
+        __m256, __m256i, _mm256_add_ps, _mm256_fmadd_ps, _mm256_i32gather_ps,
+        _mm256_loadu_ps, _mm256_loadu_si256, _mm256_setzero_ps,
     };
     unsafe {
-        if nnz < 32 {
-            return csr_row_scalar(idx_p, val_p, nnz, x);
-        }
-        // 累加器：**2 个**（每个负责间隔 8 的边）→ 依赖链 n/16
-        let mut a0 = _mm256_setzero_ps();
-        let mut a1 = _mm256_setzero_ps();
-        // ⚠ gather 到栈数组再 load：8 个 lane 各装**不同的 x[idx[p+j]]**
-        let mut xb = [0.0f32; 8];
-        let mut vb = [0.0f32; 8];
-        let n8 = nnz / 16 * 16;
+        let mut a0 = _mm256_setzero_ps(); let mut a1 = _mm256_setzero_ps();
+        let mut a2 = _mm256_setzero_ps(); let mut a3 = _mm256_setzero_ps();
+        let mut a4 = _mm256_setzero_ps(); let mut a5 = _mm256_setzero_ps();
+        let mut a6 = _mm256_setzero_ps(); let mut a7 = _mm256_setzero_ps();
+        let n64 = nnz / 64 * 64;
         let mut p = 0usize;
-        while p < n8 {
-            for j in 0..8 {
-                xb[j] = *x.add(*idx_p.add(p + j) as usize);
-                vb[j] = *val_p.add(p + j);
-            }
-            a0 = _mm256_fmadd_ps(_mm256_loadu_ps(vb.as_ptr()),
-                                 _mm256_loadu_ps(xb.as_ptr()), a0);
-            for j in 0..8 {
-                xb[j] = *x.add(*idx_p.add(p + 8 + j) as usize);
-                vb[j] = *val_p.add(p + 8 + j);
-            }
-            a1 = _mm256_fmadd_ps(_mm256_loadu_ps(vb.as_ptr()),
-                                 _mm256_loadu_ps(xb.as_ptr()), a1);
-            p += 16;
+        // ⚠ **显式展开 64 边/步，避免 `if k==..` 累加器选择链**（实测该链让编译器
+        //   发出动态选取 → 8 条 gather/fma 依赖链被破坏、调度退化 → 4× 慢）。
+        //   8 个具名累加器各自独立处理 8 个连续边，给出 8 条不相交依赖链。
+        while p < n64 {
+            let b0 = p;          let b1 = p + 8;  let b2 = p + 16; let b3 = p + 24;
+            let b4 = p + 32;     let b5 = p + 40; let b6 = p + 48; let b7 = p + 56;
+            let v0 = _mm256_loadu_ps(val_p.add(b0));
+            let g0 = _mm256_i32gather_ps::<4>(x, _mm256_loadu_si256(idx_p.add(b0) as *const __m256i));
+            a0 = _mm256_fmadd_ps(v0, g0, a0);
+            let v1 = _mm256_loadu_ps(val_p.add(b1));
+            let g1 = _mm256_i32gather_ps::<4>(x, _mm256_loadu_si256(idx_p.add(b1) as *const __m256i));
+            a1 = _mm256_fmadd_ps(v1, g1, a1);
+            let v2 = _mm256_loadu_ps(val_p.add(b2));
+            let g2 = _mm256_i32gather_ps::<4>(x, _mm256_loadu_si256(idx_p.add(b2) as *const __m256i));
+            a2 = _mm256_fmadd_ps(v2, g2, a2);
+            let v3 = _mm256_loadu_ps(val_p.add(b3));
+            let g3 = _mm256_i32gather_ps::<4>(x, _mm256_loadu_si256(idx_p.add(b3) as *const __m256i));
+            a3 = _mm256_fmadd_ps(v3, g3, a3);
+            let v4 = _mm256_loadu_ps(val_p.add(b4));
+            let g4 = _mm256_i32gather_ps::<4>(x, _mm256_loadu_si256(idx_p.add(b4) as *const __m256i));
+            a4 = _mm256_fmadd_ps(v4, g4, a4);
+            let v5 = _mm256_loadu_ps(val_p.add(b5));
+            let g5 = _mm256_i32gather_ps::<4>(x, _mm256_loadu_si256(idx_p.add(b5) as *const __m256i));
+            a5 = _mm256_fmadd_ps(v5, g5, a5);
+            let v6 = _mm256_loadu_ps(val_p.add(b6));
+            let g6 = _mm256_i32gather_ps::<4>(x, _mm256_loadu_si256(idx_p.add(b6) as *const __m256i));
+            a6 = _mm256_fmadd_ps(v6, g6, a6);
+            let v7 = _mm256_loadu_ps(val_p.add(b7));
+            let g7 = _mm256_i32gather_ps::<4>(x, _mm256_loadu_si256(idx_p.add(b7) as *const __m256i));
+            a7 = _mm256_fmadd_ps(v7, g7, a7);
+            p += 64;
         }
-        let s01 = _mm256_add_ps(a0, a1);
+        let s01 = _mm256_add_ps(a0, a1); let s23 = _mm256_add_ps(a2, a3);
+        let s45 = _mm256_add_ps(a4, a5); let s67 = _mm256_add_ps(a6, a7);
+        let s = _mm256_add_ps(_mm256_add_ps(s01, s23), _mm256_add_ps(s45, s67));
         let mut lanes = [0.0f32; 8];
-        core::ptr::copy_nonoverlapping(
-            (&s01 as *const __m256).cast::<f32>(),
-            lanes.as_mut_ptr(),
-            8,
-        );
-        // 8 个 lane 各是一条独立的边 → **全部相加**（这里取全部是对的）
-        let mut acc = lanes[0] + lanes[1] + lanes[2] + lanes[3]
-            + lanes[4] + lanes[5] + lanes[6] + lanes[7];
+        core::ptr::copy_nonoverlapping((&s as *const __m256).cast::<f32>(), lanes.as_mut_ptr(), 8);
+        let mut acc = lanes.iter().sum::<f32>();
+        // 尾部（<64 边）标量、逐位
         while p < nnz {
             acc += *val_p.add(p) * *x.add(*idx_p.add(p) as usize);
             p += 1;
@@ -325,35 +368,46 @@ pub unsafe fn csr_row_avx2(
 ///
 /// ⚠ 与 [] **同一份代码**（不重复实现）——P173 写的
 ///   CSR SpMV 内部核与 P175 的 matvec 内核需求完全相同。
-#[inline]
+///
+/// ⚠ **必须 `#[target_feature] + #[inline(never)]`**：`csr_row_avx2` 是 AVX2 函数，
+///   若被内联进**非 AVX2 的调用方**（`mv_serial` / `csr_simd_work` / `dot_auto`），
+///   编译器会用标量指令编译其本体 → gather SIMD 完全失效。`inline(never)` 强制它
+///   成为独立的 AVX2 编译单元，经函数调用进入 → 真正的 gather 路径。
+///   （P178 复测：单线程 ~1.06x 追平 numba；但多线程不缩放，见文件头对照表。）
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[inline(never)]
 pub unsafe fn csr_dot_avx2(
-    idx_p: *const i64,
+    idx_p: *const i32,
     val_p: *const f32,
     nnz: usize,
     x: *const f32,
 ) -> f32 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        csr_row_avx2(idx_p, val_p, nnz, x)
+    csr_row_avx2(idx_p, val_p, nnz, x)
+}
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub unsafe fn csr_dot_avx2(
+    idx_p: *const i32,
+    val_p: *const f32,
+    nnz: usize,
+    x: *const f32,
+) -> f32 {
+    let mut acc = 0.0f32;
+    for p in 0..nnz {
+        acc += *val_p.add(p) * *x.add(*idx_p.add(p) as usize);
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let mut acc = 0.0f32;
-        for p in 0..nnz {
-            acc += *val_p.add(p) * *x.add(*idx_p.add(p) as usize);
-        }
-        acc
-    }
+    acc
 }
 
-/// CSR SpMV（fp32，**SIMD 优先**）。
+/// CSR SpMV（fp32，i32 原生 idx，**SIMD 优先**）。
 ///
 /// # Safety
-/// `indptr` i64、`idx` i64、`val` f32，`x`/`y` 长度 ≥ `n_rows`。
+/// `indptr` i64、`idx` i32、`val` f32，`x`/`y` 长度 ≥ `n_rows`。
 #[no_mangle]
 pub unsafe extern "C" fn phdnet_csr_spmm_simd(
     indptr: *const i64,
-    idx: *const i64,
+    idx: *const i32,
     val: *const f32,
     n_rows: usize,
     x: *mut f32,
@@ -429,7 +483,7 @@ unsafe fn csr_simd_work(ctx: *mut u8, part: usize, n_parts: usize) {
 
 #[inline]
 unsafe fn csr_row_scalar(
-    idx_p: *const i64,
+    idx_p: *const i32,
     val_p: *const f32,
     nnz: usize,
     x: *const f32,
@@ -445,7 +499,7 @@ unsafe fn csr_row_scalar(
 
 struct CsrSimdCtx {
     indptr: *const i64,
-    idx: *const i64,
+    idx: *const i32,
     val: *const f32,
     x_ptr: *const f32,
     y_ptr: *mut f32,
@@ -467,8 +521,8 @@ mod tests_csr {
         }
         let n = 512;
         let nnz_row = 128;
-        let idx: Vec<i64> = (0..nnz_row)
-            .map(|j| ((j * 7919) % n) as i64)
+        let idx: Vec<i32> = (0..nnz_row)
+            .map(|j| ((j * 7919) % n) as i32)
             .collect();
         let val: Vec<f32> = (0..nnz_row).map(|j| (j as f32) * 0.01).collect();
         let x: Vec<f32> = (0..n).map(|i| (i as f32) * 0.02).collect();
@@ -486,7 +540,7 @@ mod tests_csr {
         // 行宽 < 32 → 应回落到标量，且**逐位**（同一段代码）
         let n = 64;
         let nnz_row = 7;
-        let idx: Vec<i64> = (0..nnz_row).map(|j| (j * 3) as i64).collect();
+        let idx: Vec<i32> = (0..nnz_row).map(|j| (j * 3) as i32).collect();
         let val: Vec<f32> = (0..nnz_row).map(|j| (j as f32) * 0.1).collect();
         let x: Vec<f32> = (0..n).map(|i| i as f32 * 0.05).collect();
         let simd = unsafe { csr_row_avx2(idx.as_ptr(), val.as_ptr(), nnz_row, x.as_ptr()) };

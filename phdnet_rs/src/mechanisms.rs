@@ -243,15 +243,21 @@ pub fn m1_kwta(u: &[f32], k: usize, s_out: &mut [f32], idx_out: &mut [u32]) {
 
 /// CSR 稀疏矩阵（结构借用，不复制）。
 ///
-/// **布局与 Python 版逐位对应**：`indptr` 是 `int64`，`idx` 是 `int64`，
-/// `val` 是 `float32`。
+/// **布局（P178 原生 i32 落地）**：`indptr` 是 `int64`（行偏移，值可达
+/// NNZ 量级、需 64 位），`idx` 是 `int32`（列下标，受 vocab 限 ≤ 65535，
+/// 远在 i32 范围内），`val` 是 `float32`。
+///
+/// ⚠ **idx 用 i32 是性能关键**：i64 idx 会让内存流量翻倍（8B vs 4B）且
+/// 任何 SIMD gather 前被迫 `i64→i32` 转换（`cvtepi64_epi32`，贵 μop）。
+/// 实测 i32 原生 idx 下 Rust gather 核达 ≈38 GB/s（DDR4 峰值 ~88%），
+/// i64 下仅 ~8.5 GB/s。
 /// ⚠ **Python 版是 `float64` 的 `val`**（`sparse_pc.py:175`），
 /// 而本实现用 `f32`（生产精度，见 P163）。**两者精度不同→ 不能逐位对拍**，
 /// 只能容差对拍（fp32 eps ≈ 1.19e-7）。这是**刻意的精度提升**，不是 bug。
 #[derive(Clone, Copy)]
 pub struct Csr {
     pub indptr: *const i64,
-    pub idx: *const i64,
+    pub idx: *const i32,
     pub val: *const f32,
     pub n_rows: usize,
 }
@@ -411,7 +417,7 @@ pub fn m6_readout_fwd(
 /// 所以这里用 `f32` 累加 —— 与 Python 版 fp16 路径需容差对拍。
 pub fn m6_sparse_fwd(
     w: &F32<'_>,
-    gather_idx: &[i64],
+    gather_idx: &[i32],
     h: &[f32],
     out: &mut [f32],
     n_threads: usize,
@@ -438,7 +444,7 @@ pub fn m6_sparse_fwd(
                     core::slice::from_raw_parts_mut(op as *mut f32, olen)
                 };
                 let gis = unsafe {
-                    core::slice::from_raw_parts(gip as *const i64, k)
+                    core::slice::from_raw_parts(gip as *const i32, k)
                 };
                 let hs = unsafe {
                     core::slice::from_raw_parts(hp as *const f32, hlen)
@@ -536,7 +542,7 @@ mod tests {
     fn csr_spmm_升序累加() {
         // 2 行：row0 -> {col1: 2.0}, row1 -> {col0: 3.0, col2: 4.0}
         let indptr: [i64; 3] = [0, 1, 3];
-        let idx: [i64; 3] = [1, 0, 2];
+        let idx: [i32; 3] = [1, 0, 2];
         let val: [f32; 3] = [2.0, 3.0, 4.0];
         let x = [10.0f32, 20.0, 30.0];
         let mut y = [0.0f32; 2];
