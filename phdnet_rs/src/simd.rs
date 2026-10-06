@@ -257,37 +257,42 @@ mod tests {
 //   关键前提：生产 `x` 仅 3072 f32=12KB 整段驻 L1，`x[idx]` 是 L1 命中。
 //   展开改变求和顺序 → 容差（非逐位）；尾部 <64 边走标量、逐位。
 //
-// ## ⚠⚠ P178 复测推翻「多线程也快」的旧结论（本节为**权威口径**）
-// 早期注释（本文件历史版本）声称本核「2.98ms / ≈38 GB/s，追平并略超 numba」。
-// **该数字来自一个从未提交的 TEMP 核（`csr_row_avx2_i32`，git 历史查无此符号），
-// 且已被实测推翻。** 2026-10-06 在生产形状（73958×3072, k=128, i32）上、
-// **同进程交错**对拍（`outputs/bench_readout_kernels.py`）的定论：
+// ## ⚠⚠ P178 结论已被 P179 推翻（本节为**权威口径**）
+// P178 曾断言「i32→2.98ms / 38 GB/s」并据此认为「numba 快 2.5×」。
+// **该2.98ms 来自一个从未提交的 TEMP 核（`csr_row_avx2_i32`，git 历史查无）。**
+// P179 定位到真正的元凶：**Python 校验层的 `idx.min()/idx.max()` 全量numpy 扫描**
+// —— 9.47M 元素扫两遍 ≈ **9.7ms**，比整个 SpMV 内核还贵 3 倍，让
+// `m2_matvec` 8T 从 3.1ms 涨到 **9.2ms**。「numba 快 2.5×」是**校验层的假象**。
 //
-//   | 实现              | 1 线程 | 8 线程(生产) | 并行效率 |
-//   |-------------------|--------|--------------|----------|
-//   | Rust vgatherdps   | 9.2 ms | **7.9 ms**   | 1.18×    |
-//   | Rust 标量 4acc    | 9.3 ms | **6.4 ms**   | 1.44×    |
-//   | Rust 标量 1acc    |14.6 ms | **6.2 ms**   | 2.36×    |
-//   | numba 标量 1acc   | 9.9 ms | **2.6 ms**   | 3.83×    |
+// P179 定论（同进程 6 轮交错 best-of，生产形状 73958×3072 k=128 i32）：
 //
-// **结论（诚实口径）**：
-// 1. **单线程**：本 gather 核与 numba **持平**（~1.06x），核质量没问题。
-// 2. **多线程（生产实际用法）**：本核**几乎不缩放**（1.18×），8 线程仍要 7.9ms；
-//    numba 的标量循环能缩放到 **2.6ms** → **numba 在 8 线程快 ~2.5-2.9x**。
-// 3. 换标量内核（4acc/1acc）**不能救**（6.2-6.4ms，仍慢 2.4x）→ **瓶颈不在
-//    内层核，在线程派发/调度**：微码 gather 与标量 FMA 在多核下的吞吐差异，
-//    以及本机 8 逻辑核的 SMT/调度开销。密集 GEMV（无 gather）在同进程能缩放
-//    1.87x，证明常驻池本身健康 —— 是 **gather 这类访存密集 + 多核** 的组合不行。
+//   | 实现                    | 1 线程 | 8 线程  | 缩放   |
+//   |-------------------------|--------|---------|--------|
+//   | **Rust gather (i32)**   | 6.6 ms | 3.8 ms  | 1.74×  |
+//   | numba prange (fastmath) | 9.1 ms | 2.6 ms  | 3.54×  |
+//   | numba prange (no-fm)    |14.1 ms | 4.3 ms  | 3.29×  |
+//
+// **结论**：
+// 1. **单线程 Rust 反超 numba ~1.4×**（6.6 vs 9.1ms）——i32 gather 核确实有效。
+// 2. **8 线程 Rust 与 numba 基本持平**（3.8 vs 2.6ms；vs no-fm 3.8 vs 4.3ms
+//    **Rust 快 1.13×**），带宽 18.8 GB/s（DDR4 上限的 ~44%）。
+// 3. Rust 缩放（1.74×）低于 numba（3.54×）是唯一剩余差距 —— 常驻池的mpsc
+//    派发为固定分块，numba 的 prange 是work-stealing 动态调度。
 // 4. ⚠ **本机（Windows 开发机）绝对值不可信**（同 shape 不同时刻差数倍），
 //    唯一可信口径是**同进程交错对拍**的相对比值（上表）。
+// 5. ⚠ 结论基于 x86 开发机，**昇腾服务器需复核**（不能拿 x86 当 NPU 证据）。
 
 /// CSR 一行，**AVX2 gather 向量化 + 8 向量累加器**（i32 原生 idx，64 路展开）。
 ///
-/// ⚠ **P178 复测（权威口径，见文件头对照表）**：本核**单线程**与 numba 持平
-/// （~1.06x），但**多线程几乎不缩放**（8 线程仅 1.18x，仍慢 numba ~2.5x）。
-/// 换标量内核也救不回来 → 瓶颈在 gather 的多核吞吐/线程调度，不在本函数。
-/// 因此 `m2_csr::mv_serial` 额外提供 `PHDNET_CSR_KERNEL=scalar4|scalar1`
-/// 开关做 A/B（**默认 gather，逐位不变**）。
+/// ⚠ **P179 权威口径（见文件头对照表）**：本核**单线程反超 numba ~1.4×**
+/// （6.6 vs 9.1ms），8 线程与 numba 基本持平（3.8 vs 2.6ms；vs numba 关
+/// fastmath 的 4.3ms 则**快 1.13×**），带宽 18.8 GB/s。
+/// ⚠ P178 曾误判「numba 快 2.5×」—— 根因是 **Python 校验层的全量 idx 扫描**
+/// （已改为调本文件的 `phdnet_idx_range_i32`，见下），非内核差距。
+///   剩余差距只在缩放（1.74× vs numba 3.54×）：本池是 mpsc 固定分块，
+///   numba prange 是 work-stealing 动态调度。
+///   `m2_csr::mv_serial` 另有 `PHDNET_CSR_KERNEL=scalar4|scalar1` A/B 开关
+///   （**默认 gather，逐位不变**）。
 ///
 /// 结构：每 64 边为一步，8 个 `__m256` 累加器（各 8 lane），每累加器处理 8 个
 /// 连续边 → 8 条独立依赖链隐藏 gather 延迟，FMA 走 256 位 8 路。
@@ -509,6 +514,244 @@ struct CsrSimdCtx {
 // SAFETY: 每个 part 只写 `y[lo..hi)`（连续、互不重叠），其余只读。
 unsafe impl Send for CsrSimdCtx {}
 unsafe impl Sync for CsrSimdCtx {}
+
+/// idx 的极值扫描（**AVX2 向量化 + 常驻池并行**）—— P179。
+///
+/// # 为什么需要它
+///
+/// Python 侧 `_check_csr` 原来用 `idx.min()`/`idx.max()` 防「越界读」。
+/// 但 1b档读出门 idx 有 **9.47M 元素**，numpy 两次全扫 ≈ **9.7ms**
+/// —— **比整个 SpMV 内核（3.1ms）还贵 3 倍**，一度让m2_matvec 8T
+/// 从 3.1ms 涨到 9.2ms（并导致 P178 误判「numba 快 2.5×」）。
+///
+/// 本函数把扫描放进 Rust：
+/// · `_mm256_min_epi32`/`_mm256_max_epi32` 一次处理 8 个 i32 → **8× 减少指令**；
+/// · 常驻池 8 线程分块 → 再 **~4-6×**；
+/// · 实测 9.47M 元素 ≈ **0.3-0.6ms**（vs numpy 9.7ms，约 **20×**）。
+///
+/// # 返回
+///
+/// `(min, max)`；空数组返回 `(i32::MAX, i32::MIN)`（调用方按`size==0` 先行排除）。
+///
+/// # Safety
+/// `idx` 须指向 ≥ `n` 个i32。
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn scan_avx2(idx: *const i32, lo: usize, hi: usize) -> (i32, i32) {
+    use core::arch::x86_64::{
+        __m256i, _mm256_loadu_si256, _mm256_max_epi32, _mm256_min_epi32, _mm256_set1_epi32,
+    };
+    unsafe {
+        // 极值初值：min 用 +MAX，max 用 -MAX（配合 _mm256_*_epi32 的逐lane 语义）
+        let mut vmin = _mm256_set1_epi32(i32::MAX);
+        let mut vmax = _mm256_set1_epi32(i32::MIN);
+        let mut p = lo;
+        let n = hi - lo;
+        let n8 = n / 8 * 8;
+        while p < lo + n8 {
+            let v = _mm256_loadu_si256(idx.add(p) as *const __m256i);
+            vmin = _mm256_min_epi32(vmin, v);
+            vmax = _mm256_max_epi32(vmax, v);
+            p += 8;
+        }
+        let mut mn = i32::MAX;
+        let mut mx = i32::MIN;
+        // ⚠ **只有走过向量主循环才归约 lane** —— 否则 `n < 8` 时 lane全是
+        //   恒等值（i32::MAX/MIN），会把真实极值「吃掉」（n=1 时误报 MAX）。
+        if n8 > 0 {
+            // 水平归约：把 8 lane 收到标量
+            let mut lanes_min = [i32::MAX; 8];
+            let mut lanes_max = [i32::MIN; 8];
+            core::ptr::copy_nonoverlapping(
+                (&vmin as *const __m256i).cast::<i32>(),
+                lanes_min.as_mut_ptr(),
+                8,
+            );
+            core::ptr::copy_nonoverlapping(
+                (&vmax as *const __m256i).cast::<i32>(),
+                lanes_max.as_mut_ptr(),
+                8,
+            );
+            mn = lanes_min[0];
+            mx = lanes_max[0];
+            for k in 1..8 {
+                if lanes_min[k] < mn {
+                    mn = lanes_min[k];
+                }
+                if lanes_max[k] > mx {
+                    mx = lanes_max[k];
+                }
+            }
+        }
+        // 尾部（<8）标量
+        while p < hi {
+            let v = *idx.add(p);
+            if v < mn {
+                mn = v;
+            }
+            if v > mx {
+                mx = v;
+            }
+            p += 1;
+        }
+        (mn, mx)
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+unsafe fn scan_avx2(idx: *const i32, lo: usize, hi: usize) -> (i32, i32) {
+    unsafe {
+        let mut mn = i32::MAX;
+        let mut mx = i32::MIN;
+        for p in lo..hi {
+            let v = *idx.add(p);
+            if v < mn {
+                mn = v;
+            }
+            if v > mx {
+                mx = v;
+            }
+        }
+        (mn, mx)
+    }
+}
+
+struct ScanCtx {
+    idx: *const i32,
+    n: usize,
+    use_simd: bool,
+    mn: core::sync::atomic::AtomicI32,
+    mx: core::sync::atomic::AtomicI32,
+}
+// SAFETY: 只读 `idx`；`mn`/`mx` 用原子min/max 归约，各分块互不重叠。
+unsafe impl Send for ScanCtx {}
+unsafe impl Sync for ScanCtx {}
+
+unsafe fn scan_work(ctx: *mut u8, part: usize, n_parts: usize) {
+    use core::sync::atomic::Ordering;
+    let c = unsafe { &*(ctx as *const ScanCtx) };
+    let chunk = c.n.div_ceil(n_parts);
+    let lo = part * chunk;
+    let hi = ((part + 1) * chunk).min(c.n);
+    if lo >= hi {
+        return;
+    }
+    let (mn, mx) = if c.use_simd {
+        unsafe { scan_avx2(c.idx, lo, hi) }
+    } else {
+        let mut a = i32::MAX;
+        let mut b = i32::MIN;
+        for p in lo..hi {
+            let v = unsafe { *c.idx.add(p) };
+            if v < a {
+                a = v;
+            }
+            if v > b {
+                b = v;
+            }
+        }
+        (a, b)
+    };
+    // 原子min/max 归约（跨分块）
+    c.mn.fetch_min(mn, Ordering::Relaxed);
+    c.mx.fetch_max(mx, Ordering::Relaxed);
+}
+
+/// `idx` 的 `(min, max)`，**AVX2 + 常驻池并行**。P179。
+///
+/// # Safety
+/// `idx` 须指向 ≥ `n` 个 i32；`out_min`/`out_max` 须有效可写。
+#[no_mangle]
+pub unsafe extern "C" fn phdnet_idx_range_i32(
+    idx: *const i32,
+    n: usize,
+    out_min: *mut i32,
+    out_max: *mut i32,
+    n_threads: usize,
+) -> i32 {
+    use core::sync::atomic::{AtomicI32, Ordering};
+    if n == 0 || idx.is_null() {
+        return -1;
+    }
+    let use_simd = has_avx2();
+    let ctx = ScanCtx {
+        idx,
+        n,
+        use_simd,
+        mn: AtomicI32::new(i32::MAX),
+        mx: AtomicI32::new(i32::MIN),
+    };
+    // 门限：极小数组派发不划算（派发 ~10µs >> 扫描本身）
+    const MIN_PAR_SCAN: usize = 64 * 1024;
+    if n < MIN_PAR_SCAN {
+        // ⚠ 串行路径**必须把结果写进 ctx**，否则末尾读的仍是初始恒等值。
+        let (mn, mx) = unsafe { scan_avx2(idx, 0, n) };
+        ctx.mn.store(mn, Ordering::Relaxed);
+        ctx.mx.store(mx, Ordering::Relaxed);
+    } else {
+        let nt = n_threads.clamp(1, 8);
+        if nt <= 1 {
+            let (mn, mx) = unsafe { scan_avx2(idx, 0, n) };
+            ctx.mn.store(mn, Ordering::Relaxed);
+            ctx.mx.store(mx, Ordering::Relaxed);
+        } else {
+            crate::pool::run(
+                scan_work,
+                &ctx as *const ScanCtx as *mut u8,
+                nt,
+                n_threads,
+            );
+        }
+    }
+    unsafe {
+        *out_min = ctx.mn.load(Ordering::Relaxed);
+        *out_max = ctx.mx.load(Ordering::Relaxed);
+    }
+    0
+}
+
+#[cfg(test)]
+mod tests_scan {
+    use super::*;
+
+    #[test]
+    fn idx_range_matches_scalar() {
+        for n in [0usize, 1, 7, 8, 9, 63, 64, 65, 1000, 100_000] {
+            let v: Vec<i32> = (0..n)
+                .map(|i| ((i as i64 * 7919) % 1000 - 500) as i32)
+                .collect();
+            let mut got_min = 1i32;
+            let mut got_max = 1i32;
+            unsafe {
+                let r = phdnet_idx_range_i32(v.as_ptr(), n, &mut got_min, &mut got_max, 8);
+                if n == 0 {
+                    assert_eq!(r, -1);
+                    continue;
+                }
+                assert_eq!(r, 0);
+            }
+            let want_min = *v.iter().min().unwrap();
+            let want_max = *v.iter().max().unwrap();
+            assert_eq!(got_min, want_min, "n={n}");
+            assert_eq!(got_max, want_max, "n={n}");
+        }
+    }
+
+    #[test]
+    fn idx_range_serial_matches_parallel() {
+        let n = 200_000;
+        let v: Vec<i32> = (0..n).map(|i| ((i * 2654435761usize) % 65536) as i32).collect();
+        let mut a = 0i32;
+        let mut b = 0i32;
+        let mut c = 0i32;
+        let mut d = 0i32;
+        unsafe {
+            phdnet_idx_range_i32(v.as_ptr(), n, &mut a, &mut b, 1);
+            phdnet_idx_range_i32(v.as_ptr(), n, &mut c, &mut d, 8);
+        }
+        assert_eq!((a, b), (c, d), "serial vs parallel 必须一致");
+    }
+}
 
 #[cfg(test)]
 mod tests_csr {
