@@ -611,6 +611,25 @@ docstring 明写「必须在 numpy/torch 初始化前调用才完全生效」。
 `cfg.m2_kernel` / `cfg.encoder_dtype` / `cfg.readout_dtype` 三个计数器开关
 就是这条铁律的产物（`train.py:250-261`、`train.py:206-213`）。
 
+### 6.3 ⚠ 设备 profiler 的解读纪律（P144 教训，跨平台通用）
+
+msprof 昇腾实测曾让我下错两次结论，**两次都是读指标的方法错**：
+
+1. **算子名里的硬件名不等于它跑在那个硬件上。**
+   `aclnnIndex_IndexAiCore_Index` 名字带 "AiCore"，但 `aicore_time=0`、
+   `aiv_time=99.6%` →它跑在 **Vector 单元**。"AiCore" 只是 CANN 的**分类标签**。
+2. **`Task Duration` 含排队，不等于执行时间。**
+   该算子 Task Wait 是自身耗时的 **6.8 倍** →「算子慢」是错误表述，
+   真因是**没被调度到**（= 每步只提交 12 个小 kernel，NPU 大部分时间空转等 CPU）。
+
+→ **三条纪律**：
+- 每个 profiler 指标都要问「**这个 0 是真 0 还是缺数据**」。
+  我第一版解析器只取 `aicore_time` 一个指标，把 0 当「没数据」→误判。
+- **必须看多个硬件单元**（Cube / Vector / 搬运 / 排队），单看一个必误判。
+  `tools/analyse_readout_timeline.py` 已内置「硬件单元归属判读」：
+  AICore>50% = 真在算矩阵｜AIV/Vector>30% = 访存/向量型｜
+  搬运>30% = memory-bound ｜**wait ≫ 耗时 = 不是它慢，是没被调度到**。
+
 ---
 
 ## 七、待验证的结构性候选（**以下全部未验证，不是结论**）
@@ -622,12 +641,13 @@ docstring 明写「必须在 numpy/torch 初始化前调用才完全生效」。
 
 | # | 候选 | 现状（实测口径） | 待测问题 | 工程量 |
 |---|---|---|---|---|
-| **1** | **读出 7.83 ms 的 26.1 倍差**（原「NPU 侧结构性上限的表述」） | 读出 7.83 ms/tok vs 每步 **229.15 MiB ÷ ~800 GB/s = 0.300 ms** 估算下界（性能文档 §3.5 / `diag_readout_npu.py`）→ **26.1×**。**静态扫描已确认热路径无设备同步点** | 既然不是带宽饱和、也不是同步，瓶颈就在**算子效率**（gather 指令效率、两处 `(n_out,k)` 临时张量物化、kernel launch）。需 NPU 内核级 profiling（msprof）定位 | 中（需 CANN 级工具） |
+| **1** | **读出 7.83 ms 的 26.1 倍差**（原「NPU 侧结构性上限的表述」） | 读出 7.83 ms/tok vs 每步 **229.15 MiB ÷ ~800 GB/s = 0.300 ms** 估算下界（性能文档 §3.5 / `diag_readout_npu.py`）→ **26.1×**。**静态扫描已确认热路径无设备同步点** | ✅ **已定位（P144，msprof 昇腾 600 步）**：`aclnnIndex_IndexAiCore_Index` 占 **89.3%**（13.11 ms/步），但其 **`aicore_time=0`、aiv_time=99.6%**（跑在 Vector 单元）且 **Task Wait 是自身耗时的 6.8 倍** → **不是「算子慢」而是「大部分时间在等资源」**。真因：**每步只提交 12 个小 kernel，NPU 大部分时间空转等 CPU**（AI Core 只在 BatchMatMul 的 1.41 ms/step 上工作）。→ 方向是**流水线/减少同步点**，**不是换算子**（P134/P135 已双重证伪换算子方向）。⚠ 名字里的 "AiCore" 是 CANN 分类标签，**不代表跑在 AI Core 上**（教训见下） | 中（需流水线改造） |
 | **2** | **`configure_host_threads()` 接入生产** | 已实现（`multi_device.py:166-182`）、已被 verifier 覆盖（`verify_multi_device.py:159-163`）、**零生产调用点** | 多卡场景下 CPU 线程与卡内线程争抢的实测影响有多大？单卡场景下是否也应统一走这条路径？ | 小（接线） |
 | **3** | **`--encoder-dtype` / `--readout-dtype` 的档位收敛** | `--m2-kernel` 已在 P113 收敛为 `plain`（并改为默认），`--encoder-dtype` 的 help 与 `default=` 矛盾**仍在**（§7.1） | 昇腾 191 核 + NPU 上 `encoder_dtype` / `readout_dtype` 的最优值是哪一个？两者是否有交互？ | 小（跑 A/B） |
 | **4** | **CPU/NPU 流水重叠** | CPU 侧 **4.26 ms** vs NPU 侧 **7.83 ms** → **NPU 是 CPU 的 1.84 倍**；完全重叠理论上限 = `max` = **7.83 ms**（12.09 → 7.83，**1.55×**） | 两侧时间是否可叠加。⚠ **违反逐 token 语义**：状态跨 token 连续演化，不能批处理、不能回溯重算 → 必须靠前瞻机制。**三方案 A/B/C 与执行顺序建议见 `docs/PHD-Net_CPU-NPU重叠执行计划.md`** | **大**（架构级） |
 | **5** | **层间线程池用在训练稳态** | 现有层间 `ThreadPoolExecutor` 只在**词表构建/扫描**阶段（`vocab_parallel.py:120,275`） | 稳态分词已被 `tokenizer_core.py` 的 nogil 核覆盖；M4b 的 `_recall_project` 因写竞态**结构性串行**。稳态路径上是否还有 nogil 化的空间？ | 待评估 |
 | **6** | **M4b 批量核的服务器侧复测** | `BATCH_MIN_COMBOS = 4096` 门槛（`sparse_table.py:209`）；本机计时仅 1.0–1.1× | 收益完全押在服务器侧，**至今未复测**（性能文档 §4.3）。`M4b_ltm` 当前 0.40 ms/tok，收益上界已被端到端占比限制 | 小（跑一次） |
+| **7** | **NPU 侧脱离 torch_npu**（fhz 指示：C++/Rust 专属核，config 开关并存） | 现状 **torch_npu 2.9 + `accel_readout.py` 1668 行**；Rust `acl.rs` 只有传输层（**未加载 `aclrtLaunchKernel`/`aclnn*`**，`Graph::compile` 是恒返回 `None` 的占位）。**Rust CANN 库已调研**：`cann`/`cann-sys`（RAII + 两段式 aclnn 算子树 + GE 图）、`rust-ascend`（公共 IR→CCE 编译器）、`ascend-rs`（AscendC→Rust 路线） | ⚠ **三者均需 aarch64 + CANN SDK，本机 Windows 无法编译验证** → 只能「写了不能验」，违反项目验证纪律 → **必须在昇腾服务器上做**。建议先在本机只写接口层（config 开关 + 与 torch_npu 并存的抽象），逐个核在服务器实现 + 对拍 | 大（新后端） |
 
 ⚠ **候选 4 的诚实边界**：它是**收益最大、代价也最大**的一条。
 「CPU 与 NPU 重叠」在别的项目里是常规工程问题，在这里被铁律③直接封住。
