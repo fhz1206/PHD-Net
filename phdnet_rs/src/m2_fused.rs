@@ -137,8 +137,16 @@ struct InferCtxC {
     n0: usize,
     r1: usize, r2: usize, e0: usize, e1: usize,
     /// 线程内暂存（**只分配一次**，8 阶段 x n_steps 轮全部复用）。
-    /// ⚠ `te0`/`td1` 长 **n0**（与 `e0` 同，见 `n0` 字段）。
+    /// ⚠ `te0` 长 **n0**（= `e0` 长度），但 `td1` 长 **n1**（= `up0` 行数）。
     te1: usize, td2: usize, te0: usize, td1: usize,
+    // ── P177：常驻池派发所需 ────────────────────────────────────
+    /// 当前 stage 的**函数指针位模式**。
+    /// ⚠ 为什么存 ctx 而不用 `static`：池的 `WorkFn` 是**裸 fn 指针**
+    ///   （不收闭包）。若用全局 `static` 存 stage → **共享写 + 竞态**。
+    ///   存ctx → 每个 worker 读**自己的** ctx（只读），**无共享写**。
+    stage_fn: usize,
+    /// 本次要遍历的行数（worker 按它分块）。
+    n_rows_hint: usize,
 }
 // SAFETY: 每个 part 只写自己的行块（见 `infer_stage_*` 的 SAFETY 注释）。
 unsafe impl Send for InferCtxC {}
@@ -300,12 +308,52 @@ unsafe fn stage_out_e1(c: *const InferCtxC, lo: usize, hi: usize) {
     }
 }
 
+/// P177：常驻池桥接（infer）。`pool::run` 把 `(ctx, part, n_parts)` 交给本函数，
+/// 本函数从 ctx 读出 `stage_fn`（已存好的 stage 函数指针位模式）与 `n_rows_hint`，
+/// 分块后调用真正的 stage 函数。
+///
+/// SAFETY：ctx 由 `run_stage` 在派发前写入 `stage_fn`/`n_rows_hint`，且
+/// `pool::run` 同步返回（所有 worker 完成后才返回）→ 无并发写、无竞态。
+unsafe fn infer_bridge(ctx: *mut u8, part: usize, n_parts: usize) {
+    unsafe {
+        let c = ctx as *const InferCtxC;
+        let fp = (*c).stage_fn as *const ();
+        if fp.is_null() {
+            return;
+        }
+        let f: unsafe fn(*const InferCtxC, usize, usize) = core::mem::transmute(fp);
+        let (lo, hi) = row_range((*c).n_rows_hint, part, n_parts);
+        if lo >= hi {
+            return;
+        }
+        f(c, lo, hi);
+    }
+}
+
+/// P177：常驻池桥接（learn）。结构与 [`infer_bridge`] 完全相同，仅 ctx 类型不同。
+unsafe fn learn_bridge(ctx: *mut u8, part: usize, n_parts: usize) {
+    unsafe {
+        let c = ctx as *const LearnCtxC;
+        let fp = (*c).stage_fn as *const ();
+        if fp.is_null() {
+            return;
+        }
+        let f: unsafe fn(*const LearnCtxC, usize, usize) = core::mem::transmute(fp);
+        let (lo, hi) = row_range((*c).n_rows_hint, part, n_parts);
+        if lo >= hi {
+            return;
+        }
+        f(c, lo, hi);
+    }
+}
+
 /// 并行跑一个阶段。
 ///
-/// ⚠ **每次调用都 `thread::scope`**（建/销线程）。P171 的「每步新建线程」
-///   问题在此依然存在，但调用次数是 **8/步**（而非每算子 9 次）。
-///   ⚠ **门限**：派发固定成本实测 41.5 µs（P174）→ 行数太小时必须串行。
-///   ⚠ **待办（P177）**：融合核也用常驻线程池（ctx 已可通过 usize 传递）。
+/// ⚠ **P177：已改用常驻线程池**（`crate::pool::run`）—— 不再每步建/销线程。
+///   P171 实测「每步新建线程」让 Rust 慢 numba 1.8×；融合核每 step 调本函数
+///   **2 + 6·n_steps + 2** 次（`n_steps=1` 时 10 次/step，每次 8 线程 →
+///   **80 次线程创建/step**），常驻池把这部分降为微秒级派发。
+///   ⚠ **门限**：派发固定成本实测 41.5 µs（P174）→ 行数太小时仍串行。
 #[inline]
 unsafe fn run_stage(
     ctx: CtxPtr<InferCtxC>,
@@ -328,20 +376,16 @@ unsafe fn run_stage(
         return;
     }
     let nt = nt.min(n);
-    // ⚠ **闭包里必须传 `usize`，不能传 `*const T`** —— 裸指针不是 `Send`，
-    //   即使外面包了 `Send` 的 `CtxPtr`，`move` 捕获时解包又变回裸指针
-    //   （实测 E0277）。整数是 `Send`，与 `pool.rs` 同一手法。
-    let addr = ctx.0 as usize;
+    // ⚠ **P177：改用常驻线程池**（`crate::pool::run`）—— 不再每步建/销线程
+    //   （P171 实测这部分开销让 Rust 慢 numba 1.8×）。
+    //   池的 `WorkFn` 是 `unsafe fn(*mut u8, usize, usize)`，不收闭包 →
+    //   把当前 stage 的函数指针存进 ctx（`stage_fn`），并把行数存 `n_rows_hint`，
+    //   由 `infer_bridge` 读出来分块派发。
     unsafe {
-        std::thread::scope(|s| {
-            for part in 0..nt {
-                let (lo, hi) = row_range(n, part, nt);
-                if lo >= hi {
-                    continue;
-                }
-                s.spawn(move || f(addr as *const InferCtxC, lo, hi));
-            }
-        });
+        let cm = ctx.0 as *mut InferCtxC;
+        (*cm).stage_fn = f as *const () as usize;
+        (*cm).n_rows_hint = n;
+        crate::pool::run(infer_bridge, cm as *mut u8, nt, n_threads);
     }
 }
 
@@ -387,6 +431,7 @@ pub unsafe extern "C" fn phdnet_m2_infer_fused(
         td2: td2.as_mut_ptr() as usize,
         te0: te0.as_mut_ptr() as usize,
         td1: td1.as_mut_ptr() as usize,
+        stage_fn: 0, n_rows_hint: 0,   // P177：run_stage 派发前覆写
     };
     let p = CtxPtr(&ctx as *const InferCtxC);
     unsafe {
@@ -422,6 +467,9 @@ struct LearnCtxC {
     /// 向量长度（**P176 钳制用** —— 见`lrn_dn0` 的越界说明）。
     e0_len: usize, e1_len: usize, r1_len: usize, r2_len: usize,
     eta_pc: f32, eta_oja: f32, w_max: f32,
+    // ── P177：常驻池派发所需（理由同 `InferCtxC::stage_fn`）──
+    stage_fn: usize,
+    n_rows_hint: usize,
 }
 // SAFETY: 每个阶段只写自己 CSR 的行块；不同阶段写不同数组（或不同块）。
 unsafe impl Send for LearnCtxC {}
@@ -597,20 +645,14 @@ unsafe fn run_lrn(
         return;
     }
     let nt = nt.min(n);
-    // ⚠ **闭包里必须传 `usize`，不能传 `*const T`** —— 裸指针不是 `Send`，
-    //   即使外面包了 `Send` 的 `CtxPtr`，`move` 捕获时解包又变回裸指针
-    //   （实测 E0277）。整数是 `Send`，与 `pool.rs` 同一手法。
-    let addr = ctx.0 as usize;
+    // ⚠ **P177：同 `run_stage`，改用常驻线程池**（`crate::pool::run`）。
+    //   把当前 stage 的函数指针存进 ctx（`stage_fn`），行数存 `n_rows_hint`，
+    //   由 `learn_bridge` 读出来分块派发。
     unsafe {
-        std::thread::scope(|s| {
-            for part in 0..nt {
-                let (lo, hi) = row_range(n, part, nt);
-                if lo >= hi {
-                    continue;
-                }
-                s.spawn(move || f(addr as *const LearnCtxC, lo, hi));
-            }
-        });
+        let cm = ctx.0 as *mut LearnCtxC;
+        (*cm).stage_fn = f as *const () as usize;
+        (*cm).n_rows_hint = n;
+        crate::pool::run(learn_bridge, cm as *mut u8, nt, n_threads);
     }
 }
 
@@ -656,6 +698,7 @@ pub unsafe extern "C" fn phdnet_m2_learn_fused(
         r1: r1 as usize, r2: r2 as usize, s0: s0 as usize,
         e0_len: e0_len, e1_len: e1_len, r1_len: r1_len, r2_len: r2_len,
         eta_pc, eta_oja, w_max,
+        stage_fn: 0, n_rows_hint: 0,   // P177：run_lrn 派发前覆写
     };
     let p = CtxPtr(&ctx as *const LearnCtxC);
     unsafe {
