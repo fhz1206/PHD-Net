@@ -425,46 +425,71 @@ class SparsePCStack:
                  rng: np.random.Generator, w_max: float = 2.0,
                  conn_k: int = 0, lognormal_init: bool = False,
                  exc_ratio: float = 0.8, fused: bool = True,
-                 m2_backend: str = "numpy"):
+                 m2_backend: str = "rust", rs_threads: int = 8):
         self.eta_pc, self.eta_oja, self.w_max = eta_pc, eta_oja, w_max
-        # P175：`m2_backend` —— "numpy"（**默认**，走 numba 参照）/ "rust"。
-        # ⚠ **默认关**（项目铁律：新增行为以配置开关承载且默认关闭、默认路径逐位不变）。
-        # ⚠ "rust" 需先通过 `tests/verifiers/verify_m2_rust_kernels.py`。
-        # ⚠ "rust" 只换**算子实现**，**不改编排**（融合核仍是 numba）——
-        #   编排属 Python 职责（见 `phdnet_rs/README.md` 架构边界）。
+        # P181：`m2_backend` —— **"rust"（默认）** / "numpy"（numba 参照）。
+        # ⚠ **默认从numpy 改为 rust**（P181，fhz 指示）。依据：P179 实测
+        #   修掉 Python 校验层全量 idx 扫描后，Rust 核与 numba 已持平
+        #   （单线程 Rust 反超 ~1.4x，8T 差距在 1.1-1.6x 波动= 本机热噪声），
+        #   且 Rust 是昇腾 hybrid 栈的必需路径。
+        # ⚠ **降级必须可归因**（P161）：Rust 库缺失/加载失败 → **回落 numpy
+        #   并记录原因**到 `self.m2_backend_reason`，绝不静默、也不抛错中断训练。
+        # ⚠ **Python 核保留**：`m2_backend="numpy"` 随时可切回（对拍/回归基准）。
         if m2_backend not in ("numpy", "rust"):
             raise ValueError(
-                "m2_backend 只能是 'numpy'（默认，numba 参照）或 'rust'；"
+                "m2_backend 只能是 'rust'（默认）或 'numpy'（numba 参照）；"
                 "实得 %r" % (m2_backend,))
         self.m2_backend = m2_backend
+        self.m2_backend_reason = ""      # 回落原因（""= 未回落）
+        self._rs = None
         if m2_backend == "rust":
-            # 延迟导入 + **启动即校验**（fail-fast，不留到第一次调用）
+            # 延迟导入 + **启动即校验**（fail-fast 不留到第一次调用）
             # ⚠ `phdnet_rs/` 是**目录**，模块是其中的 `phdnet_rs.py`
-            #→ 必须先把该目录放进 sys.path，否则 import 会命中「命名空间包」
-            #   （`cannot import name 'load' from 'phdnet_rs' (unknown location)`）。
-            import os as _os
-            import sys as _sys
-            _rs_dir = _os.path.join(
-                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
-                "phdnet_rs")
-            if _rs_dir not in _sys.path:
-                _sys.path.insert(0, _rs_dir)
-            from phdnet_rs import load as _rs_load
-            _kernels, _why = _rs_load()
+            #   → 必须先把该目录放进 sys.path，否则 import 会命中「命名空间包」
+            #     （`cannot import name 'load' from 'phdnet_rs' (unknown location)`）。
+            try:
+                import os as _os
+                import sys as _sys
+                _rs_dir = _os.path.join(
+                    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                    "phdnet_rs")
+                if _rs_dir not in _sys.path:
+                    _sys.path.insert(0, _rs_dir)
+                from phdnet_rs import load as _rs_load
+                _kernels, _why = _rs_load()
+            except Exception as _e:                      # noqa: BLE001
+                _kernels, _why = None, "导入异常 %s: %s" % (type(_e).__name__, _e)
             if _kernels is None:
-                raise RuntimeError(
-                    "m2_backend='rust' 但 Rust 库加载失败：%s\n"
-                    "→ 先运行 bash phdnet_rs/build.sh；或改回 m2_backend='numpy'"
-                    % _why)
-            self._rs = _kernels
-        else:
-            self._rs = None
-        # Rust 侧线程数（P175）：0 =让Rust 按 CPU 核自动取 min(8, 核-1)
-        self.rs_threads = 0
+                # ⚠ **回落而非抛错**（fhz 指示）：训练不中断，原因可查。
+                self.m2_backend = "numpy"
+                self.m2_backend_reason = (
+                    "Rust 库不可用 → 回落 numba 参照：%s"
+                    "（修复：bash phdnet_rs/build.sh）" % _why)
+            else:
+                self._rs = _kernels
+        # Rust 侧线程数（P181）：**默认 8**（P180 实测 8 线程最优；
+        # 显式给 0 时Rust 按 CPU 核自动取 min(8, 核-1)）。
+        self.rs_threads = int(rs_threads)
         # P103：**不能 bool()**——那会把 "serial" 变成 True，让 P99 的单核核
         # 永不可达（审查实测：`--m2-kernel serial` 实际走的是 parallel 核，
         # 整条 P99 链净效果为零）。三态原样保留：True / "fused" / "serial" / False。
         self.fused = fused
+        # P181：Rust 算子的**实际生效范围**（诚实口径）。
+        # ⚠⚠ **融合核（`fused=True`）走 numba，Rust 融合核不可用**：
+        #   门禁 `verify_m2_rust_kernels.py` 实测 `phdnet_m2_infer_fused` relerr
+        #   **~1.9**、`m2_learn_fused` **~0.18** → **数值错误**，一律不启用。
+        #   而 `fused=True` 是**生产默认**（融合核比非融合快 1.4-1.8×）→
+        #   → **默认配置下 M2 实际仍走 numba**，Rust 库处于「已加载待命」状态。
+        #   → Rust 真正生效的唯一路径：`fused=False` + `m2_backend="rust"`
+        #     （但那条路实测慢 1.4-2.9×，见 P181 记忆日志 → **不推荐**）。
+        # → 所以本次改动的实际收益是：**8 线程默认** + 架构对齐（Rust 优先、
+        #   不可用可归因回落），**性能收益为零**，直到融合核修好。
+        self.rust_effective = (self._rs is not None) and (not self.fused)
+        if self._rs is not None and self.fused:
+            self.m2_backend_reason = (
+                "Rust 融合核数值错误（门禁 N2/N3 relerr ~1.9/~0.18，未修复）→ "
+                "fused=True 时实际走 numba 融合核；Rust 仅在 fused=False 时生效"
+                "（实测更慢，不推荐）")
         self.n0, self.n1, self.n2 = n0, n1, n2
         k0 = conn_k if conn_k > 0 else max(1, n0 // 8)
         k1 = conn_k if conn_k > 0 else max(1, n1 // 8)
@@ -613,6 +638,13 @@ class SparsePCStack:
                 self.up0, self.up1, self.dn0, self.dn1, s0, n_steps)
             return {"s0": s0, "r1": r1, "r2": r2, "e0": e0, "e1": e1}
         if self.fused:
+            # ⚠⚠ **P181：Rust 融合核目前【不可用】，必须走 numba。**
+            #   实测（`tests/verifiers/verify_m2_rust_kernels.py` 门禁）：
+            #   `N2 infer 融合核` relerr **~1.9**、`N3 learn 融合核` relerr **~0.18**
+            #   → `phdnet_m2_infer_fused` / `m2_learn_fused` **数值是错的**。
+            #   门禁 M7 也早已写明「fused=True 时仍走 numba 融合核（如实标注未生效）」。
+            #   → **不接 Rust 融合核**（性能虽快 1.4-1.8×，但数值错误 = 不可接受）。
+            #   → 修复该核是独立工作项（见 P181 记忆日志），修好前一律 numba。
             r1, r2, e0, e1 = _pc_infer_fused(self.up0, self.up1, self.dn0,
                                             self.dn1, s0, n_steps)
             return {"s0": s0, "r1": r1, "r2": r2, "e0": e0, "e1": e1}
@@ -646,6 +678,8 @@ class SparsePCStack:
         # P59：homeostasis=False 走融合核（8 次 → 1 次，逐位一致）；
         # homeostasis=True 保持原路径（e0/e1 归一化在核外，见融合核注释）。
         if not homeostasis:
+            # ⚠⚠ **P181：Rust 融合学习核同样【不可用】**（门禁 N3 relerr ~0.18），
+            #   与 infer 同因 → 一律走 numba 融合核。
             _pc_learn_fused(self.dn0, self.dn1, self.up0, self.up1,
                             e0, e1, r1, r2, s0, eta, self.eta_oja * eta_scale,
                             self.w_max)

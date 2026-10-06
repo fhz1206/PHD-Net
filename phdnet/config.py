@@ -199,6 +199,17 @@ class PHDNetConfig:
     # 5 次独立核调用。**昇腾 aarch64 实测融合核段 2.4 → 20-27 ms/tok**（疑似
     # prange + fastmath 在该平台退化）→ 保留开关做 A/B，不擅自改默认。
     pc_fused_kernel: bool | str = True   # True/"fused" / "serial" / False
+    # P181：M2 算子后端 —— **"rust"（默认）** / "numpy"（numba 参照，保留）。
+    # ⚠ **默认改Rust**（fhz 指示）：P179 修掉 Python 校验层全量 idx 扫描后，
+    #   Rust 核与 numba 已持平（单线程 Rust 反超 ~1.4x），且 Rust 是昇腾 hybrid
+    #   栈的必需路径。Rust 库不可用时**自动回落 numpy 并记原因**
+    #   （`SparsePCStack.m2_backend_reason`），不中断训练。
+    # ⚠ **与 `pc_fused_kernel=True` 互斥**：融合核是 numba njit，内部不能
+    #   ctypes 分派 → `fused=True` 时 Rust **不会生效**（`rust_effective=False`）。
+    #   Rust 真正生效需 `pc_fused_kernel=False`。
+    m2_backend: str = "rust"             # "rust"（默认） | "numpy"
+    # P181：Rust 侧线程数（**默认 8**）。0 = 按 CPU 核自动取 min(8, 核-1)。
+    rs_threads: int = 8
     # P84：fp8 forward 副本的重建间隔（步）——量化成本摊到 N 步；N 越大越省，
     # 但 forward 用的副本越旧（默认 8）。
     fp8_refresh: int = 8
