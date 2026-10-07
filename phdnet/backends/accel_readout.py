@@ -377,6 +377,15 @@ class AccelReadout:
         # ════════════════════════════════════════════════════════════════
         self._fp8_bits = bool(_req == "fp8" and _res["dtype"] in ("fp8", "fp16")
                               and _res["dtype"] != "fp8")
+        if self._fp8_bits:
+            # P191d（服务器 2026-10-07 实测 PPL 34354 + 读出 313ms 的根因）：
+            # fp8_bits 模式下**强制关 int8 计算域**——`--readout-int8-compute
+            # auto` 会把 auto 判 True，稀疏臂 `_matmul` 随即把 uint8 位模式
+            # 当 0..255 实数参与运算（数值全错）；且 int8 计算需每步 D2H 转
+            # 码（这正是 313ms 的来源）。P189 语义 = fp8 位模式存储 + **fp16
+            # 前向/迭代**（LUT 反量化，零主机交互）；int8 计算仍可显式
+            # --readout-int8-compute on 走 P154 路径（知情选择）。
+            self._int8_compute = False
         if dtype == "int8":
             self.tdtype = torch.int8
             self._cdtype = _INT8_CDTYPE
@@ -754,6 +763,11 @@ class AccelReadout:
                 _Wm = self.W
             elif self._wscale is not None and self._int8_like:
                 _Wm = self.W.to(self._cdtype) * float(self._wscale)
+            elif getattr(self, "_fp8_bits", False):
+                # P191d：fp8 位模式（uint8 承载）→ 设备端 LUT 反量化成 fp16
+                # 再算（零 D2H）。⚠ 必须排在 `_int8_compute` 之前——uint8 码
+                # 不是实数，落进 int8/通用分支就是 PPL 34354（服务器实测）。
+                _Wm = self._fp8_bits_to_real()
             elif self._int8_compute:
                 # ⚠⚠ **P152（fhz 2026-10-03）：fp8 存储 + int8 计算域**。
                 #   动机：910B **无 fp8 算子**（P86ERR01007）但**有 int8 算子**，
@@ -934,23 +948,62 @@ class AccelReadout:
 
         用于迭代（learn）与前向稠密臂的反量化。fp8 的值域由 dtype 语义
         决定（无 per-tensor scale），查表即精确反量化。
+
+        ⚠⚠ **P191d 修正（服务器实测 313ms/tok 负优化的根因之一）**：
+        首版实现 `self.W.cpu() → CPU 查表 → H2D`——**每步 2×6.65 MiB 的
+        D2H/H2D 往返 + 全量 CPU 查表**，NPU 全程空转等 CPU。改为
+        **设备端 gather**：LUT 常驻设备（1 KB），`LUT[bits]` 一次
+        fancy-index kernel 完成，零主机交互。
         """
-        from .fp8_int8_convert import FP8_VAL_LUT
-        _host = self.W.detach().cpu().numpy().reshape(-1)
-        _real = FP8_VAL_LUT[_host]                    # (N,) fp32 精确值
-        return torch.from_numpy(_real).to(self.device).reshape(
-            self.W.shape).to(self._cdtype)
+        lut = self._fp8_dev_lut()
+        # ⚠ uint8 张量做索引会被 torch 当成 bool mask（歧义，实测 IndexError）
+        # → 必须先转 int64 再 fancy-index。
+        return lut[self.W.long()].to(self._cdtype)   # (n_out,k) 设备内查表
+
+    def _fp8_dev_lut(self):
+        """fp8 e4m3fn 位模式 → 实值 的 **设备端** 256 项 LUT（懒建，1 KB）。"""
+        lut = getattr(self, "_fp8_lut_dev", None)
+        if lut is None:
+            from .fp8_int8_convert import FP8_VAL_LUT
+            lut = torch.from_numpy(np.ascontiguousarray(FP8_VAL_LUT)).to(
+                self.device)
+            self._fp8_lut_dev = lut
+        return lut
 
     def _real_to_fp8_bits(self, t_real):
         """P189：实值张量 → fp8 e4m3fn 位模式（uint8）写回存储。
 
-        torch 的 fp8 cast 舍入 = RNE（与构造期 `_val.to(fp8)` 同）。
-        在 CPU 上 cast（910B 无 fp8 算子，设备侧 cast 可能 ERR01007），
-        再以 uint8 位模式回设备。
+        ⚠⚠ **P191d 重写（服务器实测 313ms/tok 负优化的根因之一）**：
+        首版 `t.cpu() → .to(float8_e4m3fn) → .view(uint8) → H2D`——每步
+        2×6.65 MiB D2H/H2D 往返 + CPU cast，且 910B 上 fp8 cast 本身
+        ERR01007（P86：create/cast/matmul 全禁）。改为**设备端位运算核**：
+        纯 int64 位操作向量化，零主机交互、不依赖任何 fp8 算子。
+
+        数值语义（与 torch CPU cast **逐位对齐**，边界已实测探针确认）：
+          · RNE（half-to-even）舍入到 3 位 mantissa；
+          · |v| ≥ 448 → **饱和**到 0x7E（max finite，不进 NaN 槽 0x7F）；
+          · 次正规 = man×2^-9（RNE 到整数 man∈0..8，man=8 自然进正规 0x08）；
+          · ±0 带符号位（-0.0 → 0x80）。
         """
-        _bits = (t_real.detach().float().cpu().to(torch.float8_e4m3fn)
-                 .view(torch.uint8))
-        return _bits.to(self.device)
+        t = t_real.detach().float()
+        a = torch.nan_to_num(t, nan=0.0).abs()
+        sign = torch.signbit(t).to(torch.int64) << 7      # -0.0 → 0x80 ✓
+        a = torch.clamp(a, max=448.0)                     # 饱和语义（先夹再舍）
+        u = a.view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+        # ── 正规数：f32 位 RNE 到 3 位 mantissa ──────────────────────────
+        # 保留 bit22..20，在 bit19 上半进位 + guard=(保留段 LSB)（标准
+        # RNE 加法技巧）；(un>>20) = f32 的 [sign|E|m3]，减 120<<3 = 960
+        # 得 e4m3 复合码（e4m3 bias 7 vs f32 bias 127 → 差 120）。
+        un = u + 0x7FFFF + ((u >> 20) & 1)
+        comp_n = ((un >> 20) - 960).clamp(8, 0x7E)
+        # ── 次正规：man = RNE(a×2^9)，man=8 自然等于正规 0x08 ────────────
+        man = torch.round(a * 512.0).to(torch.int64)      # torch.round = RNE
+        normal_mask = a >= 2.0 ** -6
+        code = torch.where(normal_mask, comp_n, man).clamp(0, 0x7E)
+        out = sign | code
+        # NaN → 0x7F（NaN 槽，与 torch fp8 cast 逐位一致——对拍抓到的最后 1 例）
+        return torch.where(torch.isnan(t),
+                           torch.full_like(out, 0x7F), out).to(torch.uint8)
 
     def _sp_gather(self, ht):
         """稀疏行内 gather：取每行 k 个 h 分量（(n_out,k)），供前向与更新共用。

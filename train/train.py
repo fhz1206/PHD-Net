@@ -913,14 +913,24 @@ def main() -> None:
             if _eff_dtype != str(cfg.readout_dtype):
                 _eff_note = (f"；⚠ 请求 {cfg.readout_dtype} → **实际落地 "
                              f"{_eff_dtype}**（降级链）")
+        # P191d（2026-10-07 服务器日志自相矛盾：警告说「降级 fp16」但
+        # 实际跑的是 **fp8 位模式存储**（P189 的 _fp8_bits 路径）——
+        # 摘要行必须显示真实落地模式，否则 A/B 判定全错（P162 同款教训）。
+        if getattr(_rd, "_fp8_bits", False):
+            _eff_dtype = "fp8-bits"
+            _eff_note = (f"；请求 {cfg.readout_dtype} → **fp8 e4m3fn 位模式"
+                         f"（uint8 承载）存储 + fp16 前向/迭代**（设备无原生"
+                         f" fp8 算子，P189）")
     except Exception:                                        # noqa: BLE001
         pass
 
-    if _eff_dtype in ("bf16", "fp16"):
+    if _eff_dtype in ("bf16", "fp16", "fp8", "fp8-bits"):
         # P147：fp8 已是 **fhz 明确指定的默认**（模型本体 fp8 / 其余 fp16），
         # 所以这里**不再叫它「生产别用」**，而是如实陈述代价 + 给出复核手段。
-        _isdef = (_eff_dtype == "fp8")
-        _tail = ("这是 fhz 2026-10-02 指定的默认（模型本体 fp8）。"
+        # P191d：fp8-bits（位模式存储 + fp16 前向/迭代）也归入本分支——
+        # 它落进 else 的「精确 p − t 规则」是错的（P110 代价照旧）。
+        _isdef = (_eff_dtype in ("fp8", "fp8-bits"))
+        _tail = ("这是 fhz 2026-10-07 指定的默认（模型本体 fp8，P189）。"
                  if _isdef else
                  "如需精确 p − t 规则请显式 --readout-dtype fp32。")
         print(f"[readout] compute precision = {_eff_dtype} (requested "
