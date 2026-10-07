@@ -1099,7 +1099,37 @@ class AccelReadout:
             # 服务器实测（2026-09-30 19:17）证明这条必需：fp8 能建张量但 matmul 无
             # 实现会崩在 `@`——只靠构造期探测不够。非 int8 模式无可回落 → 真错误照抛。
             if not self._int8:
-                raise
+                # P191c：fp8 **原生**模式的同款兜底——构造期探测可能假通过
+                # （小张量建得出来），真实规模 matmul 才炸
+                # （`addmv_impl_cpu not implemented for Float8_e4m3fn`，
+                #   2026-10-07 服务器/CPU 实测）。→ 永久转 **fp8_bits 模式**
+                # （uint8 位模式存储 + fp16 计算），**保持 fp8 请求语义**、
+                # 训练不中断；非 fp8/int8 模式无可回落 → 真错误照抛。
+                if not self._fp8_native:
+                    raise
+                self._fp8_native = False
+                self._fp8_bits = True
+                self.tdtype = torch.uint8
+                self._cdtype = torch.float16
+                self._int8 = False
+                self._int8_like = False
+                self._wscale = None
+                self._fp8_wscale = None
+                self._last_int8_scales = (1.0, 1.0)
+                # fp8 张量 → uint8 位模式（fp8 的值域就是位模式，零损转置）
+                self.W = self.W.view(torch.uint8) if self.W.dtype == \
+                    torch.float8_e4m3fn else self.W.to(torch.uint8)
+                import warnings
+                warnings.warn(
+                    f"fp8 原生前向在设备 {self.device} 上失败（{type(e).__name__}: "
+                    f"{str(e)[:80]}）→ 永久转 fp8 位模式存储 + fp16 计算"
+                    f"（P189 语义保持，训练不中断）", RuntimeWarning)
+                ht = self._staged_to_dev(h)
+                y = self._matmul(ht)
+                self._cache_h = np.ascontiguousarray(h, dtype=np.float32)
+                self._cache_ht = ht
+                self._cache_y = y
+                return y
             self._int8 = False
             _scale = self._wscale
             self._wscale = None
@@ -1270,25 +1300,6 @@ class AccelReadout:
             return nll_dev
         # P84：更新主副本是 fp16（低精度回落场景）→ dp/ht 必须同 dtype，否则
         # addmm_ 退回慢路径或直接报错。int8 模式已在上面提前返回，不会到这里。
-        if getattr(self, "_fp8_bits", False):
-            # P189（fhz「模型 fp8，迭代 fp16」）：fp8 位模式（uint8 承载）存储
-            # 的更新走 fp16 域：查表反量化 → fp16 addcmul_/addmm_（dp⊗h rank-1，
-            # 不物化临时张量）→ RNE cast 回 fp8 位模式写回。与 int8 的
-            # 「反量化→更新→重量化」同构；P110 代价照旧（非目标行更新大多
-            # 被舍入丢弃，目标行 |dp|~1 完整保留）。
-            _real = self._fp8_bits_to_real()              # fp16 (n_out,k)
-            if self._sparse:
-                _g = self._sp_gather(ht)
-                _real.addcmul_(dp.to(self._cdtype).reshape(-1, 1),
-                               _g.to(self._cdtype), value=-float(eta))
-            else:
-                _real.addmm_(dp.to(self._cdtype).reshape(-1, 1),
-                             ht.to(self._cdtype).reshape(1, -1),
-                             alpha=-float(eta))
-            if self.w_clip > 0.0:
-                _real.clamp_(-self.w_clip, self.w_clip)
-            self.W.copy_(self._real_to_fp8_bits(_real))
-            return nll_dev
         # ⚠⚠ **P149（fhz「模型原生 fp8，迭代 fp16」）**：`_upd_dtype` 原本在
         #   `W.dtype` 非 fp16 时直接取 `self.tdtype` —— 而 fp8 模式下 `tdtype`
         #   就是 fp8 → dp/ht 也被转成 fp8 → 算子全部崩
@@ -1310,6 +1321,27 @@ class AccelReadout:
             dp = (p - t).to(_upd_dtype)
         if ht.dtype != _upd_dtype:
             ht = ht.to(_upd_dtype)
+        if getattr(self, "_fp8_bits", False):
+            # P189（fhz「模型 fp8，迭代 fp16」）：fp8 位模式（uint8 承载）存储
+            # 的更新走 fp16 域：查表反量化 → fp16 addcmul_/addmm_（dp⊗h rank-1，
+            # 不物化临时张量）→ RNE cast 回 fp8 位模式写回。与 int8 的
+            # 「反量化→更新→重量化」同构；P110 代价照旧（非目标行更新大多
+            # 被舍入丢弃，目标行 |dp|~1 完整保留）。
+            # ⚠ 位置：必须在 dp/ht 计算之后（P191c 修正——首版插在 dp 前
+            #   → UnboundLocalError，2026-10-07 服务器实测炸过）。
+            _real = self._fp8_bits_to_real()              # fp16 (n_out,k)
+            if self._sparse:
+                _g = self._sp_gather(ht)
+                _real.addcmul_(dp.to(self._cdtype).reshape(-1, 1),
+                               _g.to(self._cdtype), value=-float(eta))
+            else:
+                _real.addmm_(dp.to(self._cdtype).reshape(-1, 1),
+                             ht.to(self._cdtype).reshape(1, -1),
+                             alpha=-float(eta))
+            if self.w_clip > 0.0:
+                _real.clamp_(-self.w_clip, self.w_clip)
+            self.W.copy_(self._real_to_fp8_bits(_real))
+            return nll_dev
         if self._sparse:
             # P111 稀疏 rank-1：W[i,j] -= η·dp[i]·h[Wi[i,j]]
             # `addmm_` 是稠密 (n_out,n_h) 的；稀疏下等价写法是 gather 后逐行
