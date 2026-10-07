@@ -12,6 +12,11 @@ license = "MIT"
 #   - 不依赖 tch/libtorch：那会把 PyTorch 的 dispatch 开销带回来，而我们要消除它
 #   - 不依赖 cudarc/半成品 CANN crate：ACL 的正确绑定必须自己写（见 acl.rs）
 [dependencies]
+# P191：PyO3 —— Rust↔Python 官方绑定层（此前用 ctypes 手写绑定）。
+# ⚠ 零依赖原则的历史口径见上——pyo3 是 fhz 2026-10-07 明示引入的例外；
+#   现有 extern "C" + ctypes 接口保持不动（向后兼容），新代码逐步迁移。
+# extension-module：产出的 cdylib 不链接 libpython（由解释器自身提供）。
+pyo3 = { version = "0.27", features = ["extension-module"] }
 
 [lib]
 name = "phdnet_rs"

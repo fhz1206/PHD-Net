@@ -33,12 +33,17 @@ struct ConvCtx {
 /// 单个 fp8 e4m3fn 位模式 → f32 值（与 Python `_e4m3_bits_to_f64` 同语义）。
 #[inline]
 fn e4m3_val(b: u8) -> f32 {
-    if b == 0xFF {
+    // P191 修正：NaN 槽 = exp=0b1111 且 man=0b111（**两个符号都有**：
+    // 0x7F 与 0xFF）——首版只判了 0xFF，正号 NaN 落进了规格化分支
+    // （exp=15 → 2^8×(1+7/8) = 480）。与 Python `_e4m3_bits_to_f64`
+    // 的判定对齐（同样查 exp/man 位，不只查字节值）。
+    let exp = (b >> 3) & 0x0F;
+    let man = b & 0x07;
+    if (exp == 0x0F) && (man == 0x07) {
         return 0.0; // NaN 槽位（本项目约定 → 0）
     }
     let sign = (b >> 7) & 0x01;
-    let exp = (b >> 3) & 0x0F;
-    let man = (b & 0x07) as f32;
+    let man = man as f32;
     let v = if exp == 0 {
         (man / 8.0) * (2.0f32.powi(-6))
     } else {
