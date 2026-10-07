@@ -217,6 +217,11 @@ class PHDNetConfig:
     # P84：fp8 forward 副本的重建间隔（步）——量化成本摊到 N 步；N 越大越省，
     # 但 forward 用的副本越旧（默认 8）。
     fp8_refresh: int = 8
+    # P189/P191：fp8 位模式 → int8 码本的 CPU 转换核（torch/nogil/rust）。
+    # ⚠ 必须是 PHDNetConfig 的正式字段：train.py 会动态设 cfg.fp8_conv，
+    #   word_lm.py 用 cfg.__dict__ 重建 config 时动态属性会变成意外关键字
+    #   → TypeError（2026-10-07 服务器实测炸过）。
+    fp8_conv: str = "torch"
 
     # O1-4：**皮层式权重初始化**（默认关闭）。脑对应：皮层突触强度呈对数正态/重尾
     # （少数强连接 + 大量弱连接，Song et al. 2005），且兴奋/抑制比 ~80/20（E/I 平衡）。
