@@ -114,6 +114,86 @@ pub unsafe extern "C" fn phdnet_m2_matvec(
     0
 }
 
+/// u16 压缩 idx 的 SpMV（P186）：y[i] = Σ val[p]·x[idx[p]]，idx 为 **u16**。
+///
+/// 列下标 ≤ 65535 时 idx 可 4B→2B（每突触 8B→6B，带宽受限负载理论上限 1.33×）。
+/// AVX2 路径逐位等于 i32 核（同一 gather 值集、同一累加顺序）；无 AVX2 走标量。
+/// ⚠ 调用方须保证 idx 内容 ≤ 65535（读出/主干的列数都满足；越界即未定义）。
+///
+/// # Safety
+/// `indptr` 须有 `n_rows+1` 个 i64；`idx`/`val` 须有 `indptr[n_rows]` 个元素；
+/// `x` 覆盖最大 idx +1；`y` 长度 ≥ n_rows。
+#[no_mangle]
+pub unsafe extern "C" fn phdnet_m2_matvec_u16(
+    indptr: *const i64,
+    idx: *const u16,
+    val: *const f32,
+    n_rows: usize,
+    x: *const f32,
+    y: *mut f32,
+    n_threads: usize,
+) -> i32 {
+    struct U16Ctx {
+        indptr: *const i64,
+        idx: *const u16,
+        val: *const f32,
+        x: *const f32,
+        y: *mut f32,
+        n_rows: usize,
+    }
+    unsafe fn u16_work(ctx: *mut u8, part: usize, n_parts: usize) {
+        let c = unsafe { &*(ctx as *const U16Ctx) };
+        let chunk = c.n_rows.div_ceil(n_parts);
+        let lo = part * chunk;
+        let hi = ((part + 1) * chunk).min(c.n_rows);
+        let use_simd = has_avx2();
+        for r in lo..hi {
+            let a = unsafe { *c.indptr.add(r) } as usize;
+            let b = unsafe { *c.indptr.add(r + 1) } as usize;
+            #[cfg(target_arch = "x86_64")]
+            let s = if use_simd && b - a >= 32 {
+                unsafe {
+                    crate::simd::csr_row_u16_avx2(
+                        c.idx.add(a), c.val.add(a), b - a, c.x)
+                }
+            } else {
+                unsafe {
+                    crate::simd::csr_row_u16_scalar(
+                        c.idx.add(a), c.val.add(a), b - a, c.x)
+                }
+            };
+            #[cfg(not(target_arch = "x86_64"))]
+            let s = unsafe {
+                crate::simd::csr_row_u16_scalar(
+                    c.idx.add(a), c.val.add(a), b - a, c.x)
+            };
+            unsafe { *c.y.add(r) = s };
+        }
+    }
+    let mut ctx = U16Ctx { indptr, idx, val, x, y, n_rows };
+    // P190：u16 核**单独的并行门限**（32k nnz）——u16 每突触 6B、带宽受限
+    // 更重，且实测本规模（131k nnz）numba prange 并行 0.046ms 胜串行 0.067ms；
+    // 沿用 i32 核的 262144 门限会把本规模压成串行（1/2/4 线程全同速即证据）。
+    // 派发成本由常驻池摊薄，32k nnz（~0.2ms 级工作量）已可覆盖。
+    let nt = if n_rows == 0 {
+        1
+    } else {
+        let nnz = unsafe { *indptr.add(n_rows) } as usize;
+        if nnz < 32 * 1024 { 1 } else { n_threads.clamp(1, n_rows.max(1)) }
+    };
+    if nt <= 1 {
+        unsafe { u16_work(&mut ctx as *mut U16Ctx as *mut u8, 0, 1) };
+    } else {
+        crate::pool::run(
+            u16_work,
+            &mut ctx as *mut U16Ctx as *mut u8,
+            nt,
+            n_threads,
+        );
+    }
+    0
+}
+
 /// 标量行内，**4 路累加器**（打断依赖链，但**不用 gather 指令**）。
 ///
 /// P178 诊断：AVX2 `vgatherdps` 在本机**不缩放**（微码共享执行端口），

@@ -57,7 +57,6 @@ phdnet/
   backends/
     accel_readout.py      加速器读出（M6 上设备）
     multi_device.py       多设备（模型并行）
-    torch_backend.py      torch 基础层
   telemetry.py            CPU/NPU/HBM/GC遥测（npu-smi 零同步查询）
   i18n.py                 终端输出语言（zh/en）
 train/
@@ -233,7 +232,8 @@ torch CPU 与 numpy BLAS 的**归约顺序不同**，fp32 下 `max|Δ| ≈ 4e-06
 （曾把 GEMV 内部改成 fp16，服务器直接崩，回滚。）
 
 **加速器上也不统一**：fp8/fp4 在昇腾 910B + CANN 8.5 全 ERR01007（能建张量不能乘）；
-int4 无矩阵乘单元。只有 int8 码本在加速后端是真实实现的。
+int4 无矩阵乘单元。P189 起 fp8 走**位模式（uint8 承载）存储绕行**（+ fp16 迭代 +
+可选 CPU 转换 int8 计算），显式 int 族请求仍禁（P163）。
 
 ---
 

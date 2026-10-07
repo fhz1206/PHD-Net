@@ -309,8 +309,10 @@ check("I4 M4a slots/strength 用 fp32",
 # M6 应保持 fp16（P163）
 from phdnet.backends.accel_readout import AccelReadout as _AR
 _ro = _AR(64, 64, None, device="cpu", dtype="fp16")
-check("I5 M6 读出计算域是 fp16（P163）",
-      str(_ro._cdtype) == "torch.float16", "_cdtype=%s" % _ro._cdtype)
+# P187：fp16/bf16 请求的读出权重**运行时提升为 fp32**（fhz 2026-10-06 指令
+# 「模型权重 fp16、迭代全 fp32」——fp16 写回丢失 73% 非目标行更新，P110）。
+check("I5 M6 读出计算域是 fp32（P187 覆盖 P163）",
+      str(_ro._cdtype) == "torch.float32", "_cdtype=%s" % _ro._cdtype)
 
 # ── J. 审计回归门禁（P174：4 个曾静默算错的 BUG）────────────────────
 print("[J] fail-fast 校验（P174 审计：缺校验会**静默算错**）")
@@ -397,13 +399,13 @@ try:
 except ValueError:
     check("J6 csr_spmm 的 idx 越界抛异常", True, "已拦下")
 
-# J7 idx dtype 不符（int32 → Rust 按 i64 读会错位）
+# J7 idx dtype（P178 起 i32/i64 均合法 → 合法输入**不应**抛异常）
 try:
     K.csr_spmm(_ip, _ix.astype(np.int32), _vf, _xv,
                np.zeros(_N, np.float32), 4)
-    check("J7 csr_spmm 的 idx非 int64 抛异常", False, "竟然没报错")
+    check("J7 csr_spmm 接受 int32 idx（P178）", True, "")
 except ValueError:
-    check("J7 csr_spmm 的 idx 非 int64 抛异常", True, "已拦下")
+    check("J7 csr_spmm 接受 int32 idx（P178）", False, "int32 被误拒")
 
 # J8 合法输入不被误伤（且 SIMD 与标量一致）
 _ok_s = np.zeros(_N, dtype=np.float32)

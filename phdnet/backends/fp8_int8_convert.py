@@ -255,8 +255,16 @@ def fp8_to_int8_codes(codes_u8, out_i8=None, conv: str = "torch"):
 
     `conv` = "torch"（**默认**，快 5.6×，多 76 MiB 中间张量）
            | "nogil"（慢 5.6×，**0 中间张量** + 释放 GIL）
-    两条路径都在 **CPU** 上执行（fhz 指令）。
+           | "rust"（P189：phdnet_rs 多核核；由调用方先确认可用再传）
+    两条 Python 路径都在 **CPU** 上执行（fhz 指令）。
     """
     if str(conv).lower() in ("nogil", "numba", "jit"):
         return fp8_to_int8_codes_nogil(codes_u8, out_i8)
     return fp8_bits_to_int8_torch(codes_u8, out_i8)
+
+
+# ── P189：fp8 位模式 → 实值 的 256 项查表────────────────────────────────
+# 「fp8 位模式（uint8 承载）存储」的运行时反量化用：index 即得实值，
+# 一次 numpy fancy-index 完成整张 W 的反量化（比逐位拆解快一个量级）。
+FP8_VAL_LUT = _e4m3_bits_to_f64(np.arange(256, dtype=np.uint8)).astype(
+    np.float32)

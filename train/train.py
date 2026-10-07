@@ -308,17 +308,15 @@ def main() -> None:
     ap.add_argument("--readout-powlaw-kmax", type=int, default=0,
                     help="P124：幂律分配的每行最多入边（0 = 不设上限 = n_h）")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
-    ap.add_argument("--readout-dtype", default="fp16",
-                    choices=["fp32", "fp16", "bf16"],
-                    help="读出计算精度。**默认 fp16**（P163，fhz 2026-10-03）。"
-                         "**int 族（int8/int16/int32/int4）已整体禁用**，"
-                         "fp8/fp4 亦不再可选（910B 实测 ERR01007；4-bit unpack"
-                         "开销抵消存储收益）。可用：fp32 / fp16 / bf16。"
-                         "依据：Ascend910B4 生产实测 fp8 与 int8 均不可用、"
-                         "降级链最终落到 **fp16**（即当前默认 = 唯一验证通过的"
-                         "那一条）；且 P156 实测 int8 路径在稀疏 gather-GEMV 下"
-                         "比 fp16 **慢 1.2×**。保留率代价见 "
-                         "tools/probe_readout_precision.py（P110）")
+    ap.add_argument("--readout-dtype", default="fp8",
+                    choices=["fp32", "fp16", "bf16", "fp8"],
+                    help="读出计算精度。**默认 fp8**（P189，fhz 2026-10-07："
+                         "「模型 fp8，迭代 fp16」）。设备有原生 fp8 算子时直接用；"
+                         "910B4 无 fp8 算子但有 int8 算子 → 自动走"
+                         "「fp8 位模式存储（uint8）+ 每步 CPU 转换 int8 计算」"
+                         "（P154/P155 路径，转换核可用 --fp8-conv 切换 rust/torch）。"
+                         "int 族显式请求仍禁用（P163）；fp4/int4 维持禁用（P152）。"
+                         "保留率代价见 tools/probe_readout_precision.py（P110）")
     ap.add_argument("--torch-compile", dest="torch_compile",
                     action="store_true", default=False,
                     help="P58（fhz 2026-09-29「图优化关了吧」）：默认 OFF——"
@@ -355,6 +353,12 @@ def main() -> None:
                     help="P84：读出 fp8 forward 副本的重建间隔（步）。"
                          "量化 1.6 亿元素是一次设备算子，摊到 N 步；N 越大越省，"
                          "但 forward 用的 fp8 副本越旧")
+    ap.add_argument("--fp8-conv", default="torch",
+                    choices=["torch", "nogil", "rust"],
+                    help="P189：fp8 位模式 → int8 码本的 CPU 转换核。"
+                         "torch=向量化（默认）；nogil=numba 标量（0 中间张量）；"
+                         "rust=phdnet_rs 多核核（数值逐位一致，"
+                         "不可用时回落 torch 并告警一次）")
     ap.add_argument("--ltm-imprint-amortize", type=int, default=1,
                     help="⚠ **已于 P122 移除，仅保留 1**（审计证明净负面："
                          "实测收益为 0——摊销只推迟 learn 时机不减少次数，"
@@ -670,6 +674,7 @@ def main() -> None:
     cfg.pc_fused_kernel = (False if args.m2_kernel == "plain"
                            else args.m2_kernel)        # P75/P99：M2 核选择
     cfg.fp8_refresh = max(1, int(args.fp8_refresh))   # P84：fp8 副本刷新间隔
+    cfg.fp8_conv = str(args.fp8_conv)                 # P189：fp8→int8 转换核
     cfg.accel_readout = args.accel                     # P19 读出设备（默认 auto）
     cfg.nll_sync_every = args.nll_sync_every           # P34 nll 同步周期（默认 1）
     cfg.step_profiling = args.step_profiling           # P35 step 分段计时（默认关）

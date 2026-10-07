@@ -60,6 +60,7 @@ pub mod dispatch;
 pub mod m2_csr;
 pub mod m2_fused;
 pub mod simd;
+pub mod fp8_conv;
 
 /// M2 判并行的工作量门限（**总非零数 nnz**）。
 ///
@@ -75,7 +76,12 @@ pub mod simd;
 /// ⚠ **1b 档 M2**：`big_ltm 2^24 × 60` 的 nnz 量级 ≫ 门限 → 仍并行，正确。
 /// ⚠ **本机（Windows 开发机）性能测量不可信**（同一 shape 串行耗时在不同时刻
 ///   差 7 倍：28.7 → 200.5 µs）→ 门限取**保守值**，需 Ascend 服务器复核。
-pub const MIN_PAR_NNZ: usize = 256 * 1024;
+///
+/// P190：262144 → **32768**。旧值是 `std::thread::scope` 时代的实测（每次调用
+/// 新起线程，派发 ~41.5µs）；M2 各核现走**常驻线程池**，派发成本大幅摊薄——
+/// 实测 131k nnz 裸核 2 线程 0.065ms **快于**串行 0.080ms（并行已能赚）。
+/// 32768 nnz ≈ 0.13MB val+idx 流量，约 20–40µs 工作量，仍够覆盖池派发。
+pub const MIN_PAR_NNZ: usize = 32 * 1024;
 
 /// 按「总工作量」决定分块数：nnz 太小就**串行**（省派发成本）。
 ///

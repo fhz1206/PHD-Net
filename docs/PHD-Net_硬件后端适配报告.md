@@ -3,7 +3,7 @@
 > **适用范围**：加速后端的**能力矩阵、精度能力、机制性代价、昇腾真机踩坑、迁移路径、诊断入口**。
 > **不写**：训练怎么跑（→ `../train/README.md`）、机制设计（→ `PHD-Net_架构设计.md`）、
 > 任何性能数字（**唯一出处 `PHD-Net_性能评估与迭代方案.md`**，本文只链接不复制）。
-> **数据截止：2026-10-02（P113）。**
+> **数据截止：2026-10-07（P189）。**
 >
 > **相关文档**：
 > 子包文件索引与每层设备归属 → `../phdnet/backends/README.md`；
@@ -134,30 +134,28 @@ M1 fp32（x86 快 1.80× / 昇腾慢约 70×）、M2 融合核、`OMP_PLACES=cor
 
 | 精度 | 加速后端 | 结论与依据 |
 |---|---|---|
-| **fp32** | ✅ 可用 | **默认可用**；P110 实测后 `--readout-dtype` 默认为 `fp32` |
-| **fp16** | ✅ 可用 | 位保留率 26.67%（§四）→ 显式 opt-in |
-| **bf16** | ✅ 可用 | 位保留率 5.79%（§四）→ 显式 opt-in |
-| **int8 码本** | ✅ 已实现 | 存储 int8 + 计算 fp16 + 更新走 fp32 域再重量化（P104/P105） |
-| **fp8** | ❌ **所有加速器已禁用** | 昇腾 910B + CANN 8.5 + torch_npu 2.9 全 ERR01007 |
-| **fp4** | ❌ **所有加速器已禁用** | fp4 的 MX 块缩放同样无算子 |
-| **int4** | ❌ 拒绝 | 910B **无 INT4 矩阵乘单元** |
+| **fp8** | ✅ **默认（P189）** | fp8 e4m3fn **位模式（uint8 承载）存储** + fp16 迭代计算；910B 无 fp8 matmul 算子（ERR01007）→ 前向可走每步 CPU 转换 int8 计算（P154/P155，`--fp8-conv` 选核）；有原生 fp8 算子的平台直接用 |
+| **fp16** / **bf16** | ✅ 可用 | 位保留率 26.67% / 5.79%（§四）；**请求后运行时提升 fp32**（P187，迭代全 fp32） |
+| **fp32** | ✅ 可用 | 显式 opt-in |
+| **int8 显式请求** | ❌ raise | P163：int 族显式请求整体禁用（fp8 降级路径自动用 int8 **算子**不受此限） |
+| **fp4** / **int4** | ❌ 拒绝 | unpack 开销抵消存储收益（P152）；910B 无 INT4 矩阵乘单元 |
 
-### 3.2 fp8 / fp4：实测证据
+### 3.2 fp8：硬件限制与软件绕行（P189 定案）
 
-`tools/probe_fp8.py` 在 Ascend910B4 / CANN 8.5 / torch_npu 2.9 上的结果
-（结论同时写在 `probe_npu_quant.py` 的 docstring 里）：
+910B4 / CANN 8.5 / torch_npu 2.9 实测：`float8_e4m3fn` 在 npu 上
+create / cast / matmul 全部 ERR01007，torch.ops 里零个 fp8 算子 ——
+**910B4 没有 FP8 矩阵乘单元**，这是硬件限制，不是软件 bug。
 
-- `float8_e4m3fn` 与 `float8_e5m2` 在 **npu 上 create / cast / matmul 全部 ERR01007**
-  （`Float8_e4m3fn has not been supported`）；
-- `torch.ops` 里**零个 fp8 专用算子**；
-- **CPU torch**：能创建 fp8 张量、能 cast 往返，但 **matmul 抛
-  `NotImplementedError: "addmv_impl_cpu" not implemented for 'Float8_e4m3fn'`** ——
-  本机（x86，torch 2.14.0+cpu）实测复现，与 910B 的失败点**同源**：
-  都没有 fp8 **矩阵乘**单元，只有张量与 cast。
+但 P189（fhz 2026-10-07）起**不再因此放弃 fp8 精度**：
+- **存储侧**：fp8 e4m3fn 位模式由 uint8 承载（纯字节，无需 fp8 算子）——
+  1 B/元素的访存收益完整保留；
+- **计算侧**：查表反量化 → fp16 GEMV/gather；或每步 CPU 转换 int8 码本走
+  **真实存在**的 int8 算子（P154/P155；转换核 `phdnet_rs/src/fp8_conv.rs`，
+  x86 实测量化 LUT 版比 torch 向量化快 8.44×）；
+- **迭代侧**：fp16 域 rank-1 更新 → RNE cast 回 fp8 位模式（fhz「迭代用 fp16」）。
 
-⚠ **910B4 本身没有 FP8 单元**（910C 部分支持、950 原生 MXFP8/MXFP4）。
-所以 ERR01007 是**硬件限制**，不是软件 bug —— 这也意味着 CANN 跟进不会翻回，
-要翻回必须换芯片。`probe_fp8.py` 的三档判定逻辑保留在源码里，换硬件时重跑即可。
+⚠ 换 910C/950（原生 MXFP8）或 ROCm gfx942 时，探测会自动命中原生 fp8
+路径，无需改代码（「真跑一次」原则）。
 
 ### 3.3 int8 码本路径（P104/P105）
 
@@ -179,9 +177,9 @@ M1 fp32（x86 快 1.80× / 昇腾慢约 70×）、M2 融合核、`OMP_PLACES=cor
 （verifier 用 fp16 参考对拍把关）。这是「int8 存储降 4× 访存」的代价，不是 bug。
 
 ⚠ **`fp8` 现在是 `int8` 的别名**（P100 正名：`fp8` 本来就是 1 字节码本）。
-`_DTYPE_ALIASES = {"fp8": "int8"}`，与 `phdnet/readout.py` 同口径。
-所以配置里写 `dtype="fp8"` **不会**被 `ValueError` 拒绝、也**不会**静默回落 ——
-它在加速后端走 int8 码本，在 numba CPU 走 P9/P12 位算法量化核。
+P147 起 fp8 **不是** int8 的别名：`_DTYPE_ALIASES = {"fp8": "float8_e4m3fn"}`，
+fp8 是独立精度档（P189 后为默认：位模式 uint8 存储 + fp16 迭代 + int8 计算
+可选）。numba CPU 路径走 P9/P12 位算法量化核。
 
 ### 3.4 稀疏读出锁定 fp32
 
@@ -243,7 +241,8 @@ updated  = _round(W0 + dp, dtype)
 ### 4.4 后果与现状
 
 `train/train.py` 启动日志按精度分叉（`:701-711`）：fp32 打印「精确 `p − t` 规则」，
-低精度打印警告并**点名实测保留率**。CLI 默认 `fp32`（P110，fhz 授权）；
+低精度打印警告并**点名实测保留率**。CLI 默认 `fp8`（P189，fhz 2026-10-07
+「模型 fp8，迭代 fp16」）；fp16/bf16 请求运行时提升 fp32（P187）。
 低精度降级为**显式 opt-in**。
 
 **教训**：**半 ULP 的数量级估算不能替代实测**。P105 曾认定「fp16 半 ULP 比 bf16
@@ -263,7 +262,7 @@ updated  = _round(W0 + dp, dtype)
 | 1 | NPU 首次真跑生产训练即崩 `FakeTensor - None` @ `accel_readout.py` | P45 把「`target_idx` 路径就地改 p」只实现在 **eager 分支**，`torch.compile` 融合核仍是 `dp = p - t32`，`t32=None` 时崩 dynamo。既有验证只走 target 数组路径 → 恰好漏掉崩的那条 | 两条路径**逐行等价**（`p − onehot` ≡ `p[c] −= 1`，数值也等价）；新增 `verify_accel_readout_p55.py` **2×2 矩阵**（target 数组/`target_idx` × eager/compiled） | **会**。任何新增的 eager 分支都可能漏改融合核。门禁 A4 接口扫描只查属性存在性，查不到分支等价性 → 必须靠 2×2 矩阵 |
 | 2 | `torch.compile()` **只在首次调用才编译**，构造期 try/except 是假护栏 → 编译失败崩生产 | inductor **惰性编译**：构造期 `torch.compile()` 只是包装、不会失败，**首次调用**才真正编译 | 捕获点放在**首次执行**处；首次失败即 `self._compiled = False` **永久回落 eager** + `RuntimeWarning`。`--torch-compile` **默认关** | **会**。Windows 无 `cl`、NPU 上 inductor 异常都可能发生 |
 | 3 | `torch.compile` + `reduce-overhead` 与「W 原地 mutate」本质冲突 | cudagraphs 捕获的张量不允许被后续 kernel mutate → 每次调用打印 `skipping cudagraphs due to mutated inputs` 并**静默退回**无 graph 模式 | **锁 `torch_compile_mode="default"`**（只融合 kernel，不启用 cudagraphs）。改成非原地重新分配会让流量翻倍，更不可接受 | **会**（只要有人传 `--torch-compile-mode reduce-overhead`）。功能正确，只是拿不到 graph 收益 |
-| 4 | 设备探针只测**张量创建**→ fp8 能建不能乘，假通过后炸在 matmul | 第一版探针只测 `torch.zeros(..., dtype=fp8)`。CPU 能分配 fp8 → 判「可用」 | 探针必须试**真实算子**：`tools/accel_doctor.py` 试分配**真实规模**张量（默认 73,958×3,072 fp32）+ 一次前向 matvec。`probe_fp8.py` 三档（create / roundtrip / **matmul**）分开报 | **会**。新增 dtype 或新平台时必须重跑三档 |
+| 4 | 设备探针只测**张量创建**→ fp8 能建不能乘，假通过后炸在 matmul | 第一版探针只测 `torch.zeros(..., dtype=fp8)`。CPU 能分配 fp8 → 判「可用」 | 探针必须试**真实算子**：`tools/accel_doctor.py` 试分配**真实规模**张量（默认 73,958×3,072 fp32）+ 一次前向 matvec。fp8 探测须 create / roundtrip / **matmul** 三档分开报（原 `tools/probe_fp8.py` 已删，逻辑并入 `_probe`） | **会**。新增 dtype 或新平台时必须重跑三档 |
 | 5 | `torch.npu.utilization()` 同步设备流，破坏被观测的流水 | 它内部会同步设备流 —— 每 `log_every` 采样一次就在训练热路径上砍一刀全局同步，与「CPU 预计算提前 / NPU 流水」直接冲突 | AI Core% 改走 **`npu-smi` 子进程**（外部查询，**零同步**）；`memory_allocated` 是 host 侧计数器，保留 | **会**。任何新增的 torch 侧设备指标都要先问「它同步吗」 |
 | 6 | `npu-smi` 不在 PATH → AI Core% 恒 `--` | 训练是**直接 `python train.py` 启动**、没 source Ascend 的 `set_env.sh`（能跑 `watch npu-smi` 的那个 shell 是交互式） | **三级路径解析**：环境变量 `$NPU_SMI_PATH` → `shutil.which("npu-smi")` → 常见安装路径候选表。只提示一次；首次成功打印实际路径 | **会**（换机器/换安装方式）。三级解析已覆盖主要情况 |
 | 7 | `npu-smi` 输出**没有 Bus-Id 列** → 路径已定位但仍恒 `--` | 解析器找「含 `0x` 总线号的数据行」启发式，**该机输出没有这一列** → 所有数据行被跳过 | 改为**按表头定位列**：找含 `AICore` 的表头行（回退小写 `aicore`）→ 切列得 AICore / HBM-Usage 列序 → 按列号取值。**与型号无关** | **不会**（表头定位与型号解耦）。但门禁只能测**合成布局** —— 真实格式仍靠人读那 14 行原始输出 |
@@ -325,7 +324,7 @@ updated  = _round(W0 + dp, dtype)
 | P28 | NPU 带宽根因：`torch.outer` 物化同尺寸临时张量 → `addmm_` rank-1 AXPY；设备侧 (h, y) 缓存；硬同步 3 → 1 |
 | P29 / P30 | 基准工具三 bug 修正（**修复前的加速器数字一律不可信**）/ **旧 torch 栈整体删除**（约 1,400 行） |
 | P36–P52 | 训练步设备直通（`forward_dev` + `target_idx`）、融合步核、`_is_accel` 显式标识 |
-| P84 / P92 | fp8 前进副本 → 因昇腾不支持，**fp8/fp4 从加速后端整体禁用** |
+| P84 / P92 | fp8 前进副本 → 曾因昇腾无 fp8 算子从加速后端整体禁用（**P189 已推翻**：fp8 位模式存储 + fp16 迭代 + int8 计算可选，现为默认） |
 | P104 / P105 | int8 存储 + fp16 计算码本；fp8 正名为 int8 别名 |
 | P110 / P111 | 精度实测推翻半 ULP 估算 → 默认回 fp32 / 稀疏读出上加速后端（gather-GEMV） |
 
@@ -389,10 +388,8 @@ torch 栈恒用稀疏 CSR 语义（`TorchSparsePC` 只实现 CSR 边表示）；
 |---|---|---|
 | `tools/backend_probe.py` | 各平台 ok / count / name | 探测层 |
 | `tools/accel_doctor.py` | 设备**真的能算**吗 | ① 环境矩阵（torch / torch_npu / **CANN 版本** + 配对警告）② `resolve_devices` 结果 ③ **试分配真实规模张量 + 前向 matvec**（默认 73,958×3,072 fp32 ≈ 908 MB）④ 性能对照（设备 torch / CPU torch / numba 基线）⑤ 结论。`--no-bench` 只诊断 |
-| `tools/probe_fp8.py` | fp8 卡在**芯片**还是**框架** | 三档分开测：`create` / `roundtrip` / **`matmul`**。`--json` 机器可读 |
-| `tools/probe_npu_quant.py` | 昇腾**量化矩阵乘 API** 能不能用 | 定向探测 `npu_weight_quant_batchmatmul` / `npu_quant_matmul` / `npu_dynamic_quant` 等候选，各用 fp32/fp16/bf16 真调一次。同时记录 `torch.__config__`（排查构建不匹配） |
 | `tools/probe_readout_precision.py` | 低精度**是否丢弃学习更新** | 纯测量，不改生产代码（§四） |
-| **`tools/diag_readout_npu.py`**<br>（P113 新增） | **读出热路径还有没有设备同步点？时间花在带宽还是算子？** | 两个子问题：① **同步点静态扫描**（扫 `torch.equal` / `.item()` / `.cpu()` / `bool(tensor)` 等显式同步原语）；② **字节流量拆解**（分idx / val / 临时张量 `g` / `dp` 四项）。产出与性能文档 §3.5 同口径的字节数与「实测 ÷ 估算下界」倍数。⚠ **带宽下界是估算值不是实测**（依赖假设带宽），工具 docstring 已显式警告——**把下界当实测是本项目反复踩过的坑**（`BUGS.md` A8/B12） |
+| **`tools/diag_readout_npu.py`**<br>（P113 新增，**已删**——结论沉淀在性能文档 §3.5） | **读出热路径还有没有设备同步点？时间花在带宽还是算子？** | 两个子问题：① **同步点静态扫描**（扫 `torch.equal` / `.item()` / `.cpu()` / `bool(tensor)` 等显式同步原语）；② **字节流量拆解**（分idx / val / 临时张量 `g` / `dp` 四项）。⚠ **带宽下界是估算值不是实测**（依赖假设带宽）——**把下界当实测是本项目反复踩过的坑**（`BUGS.md` A8/B12） |
 | `tools/bench_accel.py` | 读出热路径基准 + **等效带宽 GB/s** | 默认 V=73,958 / H=3,072（1B 真实词表规模），fp32/fp16/bf16 **三档都跑**。读出是 GEMV，**受带宽限制而非算力** → 等效带宽（3×|W| / 耗时）是**唯一可跨平台比较的指标** |
 | `multi_device.capability_report()` | 后端 × 设备能力矩阵 + 本机探测 + 行动建议 | `verbose=True` 打印 |
 

@@ -61,14 +61,16 @@ def main() -> int:
     for req in ("fp8", "fp16"):          # P163: 不再测 int8（已禁用）
         ch = candidate_order(req)
         # ⚠ P163：原断言「fp32 必须在 int 族之后」**已过时**（int 族被禁）。
-        #   改为：**链上不得出现任何 int / fp8 / fp4**（禁用本身即被测契约）。
+        #   P189（fhz 2026-10-07）：**fp8 放回候选链**（显式请求 fp8 时链首，
+        #   由探测决定落地；910B 无 fp8 算子 → fp8-bits 存储模式）。
+        #   → 链上不得出现的只剩 **int 族 / fp4 / int4**。
         leaked = [x for x in ch if x in ("int8", "int16", "int32",
-                                         "int4", "fp8", "fp4")]
+                                         "int4", "fp4")]
         if leaked:
             print("  [FAIL] %s 的链里泄漏了禁用项：%s" % (ch, leaked))
-            check("P163 %s 链不含禁用项" % ch, False, str(leaked))
+            check("P189 %s 链不含禁用项（int/fp4 仍禁）" % ch, False, str(leaked))
         else:
-            check("P163 %s 链不含禁用项" % ch, True)
+            check("P189 %s 链不含禁用项（int/fp4 仍禁；fp8 已放行）" % ch, True)
         # ⚠ P163：int 族禁用 + fp8/fp4 移出候选后，**fp32 可能不在链上**
         #   （例如 fp16 → bf16）。改为「不在链上就跳过」。
         if "fp32" not in ch:
@@ -76,8 +78,10 @@ def main() -> int:
             i_fp32 = -1
         # ⚠ P163：int 族已禁用 → **fp32 不再是链尾**（链尾是 bf16/fp16），
         #   原「fp32 排在 int 族之后」的契约已作废。
+        #   P189：fp8 回到链上后，**fp8 请求的链尾是 bf16**、fp16 请求的
+        #   链尾是 fp8（同族兄弟）—— 白名单补 fp8。
         check(f"A1 {req} 的链尾在 fp 族内（无 int 兜底）",
-              ch[-1] in ("fp32", "fp16", "bf16"),
+              ch[-1] in ("fp32", "fp16", "bf16", "fp8"),
               f"链={ch}")
     check("A2 链里无重复项",
           all(len(candidate_order(r)) == len(set(candidate_order(r)))

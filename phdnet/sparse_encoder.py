@@ -225,7 +225,12 @@ class SparseEncoder:
             u = np.empty(self.n_sdr, dtype=W32.dtype)
             _kern(W32, x_cast, self.b.astype(W32.dtype), u)
         else:
-            u = W32 @ x_cast + self.b
+            # P188：偏置 b 须跟随 W.dtype——BLAS/numba 两路原本就不一致：
+            # numba 路径有 `self.b.astype(W32.dtype)`，BLAS 路径漏了 →
+            # fp64 的 b 把 u 拉回 float64，s0 连带 float64 一路漏到
+            # Rust 校验层（m2_add_outer 炸「v1 必须是 fp32」），
+            # 且 M1 输出走 fp64 违背 P107 编码器 fp32 定案。
+            u = W32 @ x_cast + self.b.astype(W32.dtype)
         idx = np.argpartition(-u, self.k - 1)[: self.k]      # k-WTA 竞争（侧抑制的抽象）
         s = np.zeros_like(u)
         win = u[idx]

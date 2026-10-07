@@ -258,7 +258,11 @@ class PHDNet:
         默认（readonly=False, learn_scale=1.0, recur_cue=None）行为逐位不变。
         """
         self._prof_step()          # P115：滑窗分母计「一个训练步」
-        x = np.asarray(x)
+        # P188：入口统一 fp32——下游 numba/Rust 核（m2_add_outer 等）按 fp32
+        # 校验（P173 定案 M2 全 fp32），float64 输入会一路漏到 Rust 校验层炸出
+        # 「v1 必须是 fp32」。编码器精度本就是 fp32（P107），此处 cast 只是
+        # 把隐式约定提前到系统边界显式化，不改变语义。
+        x = np.asarray(x, dtype=np.float32)
         if x.shape[0] != self.cfg.n_input:
             raise ValueError(
                 f"step(x) 输入维度不符：期望 cfg.n_input={self.cfg.n_input}，"

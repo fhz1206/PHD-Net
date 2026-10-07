@@ -710,6 +710,100 @@ pub unsafe extern "C" fn phdnet_idx_range_i32(
     0
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// P186：uint16 压缩 idx 的 SpMV 内部核（stepfun 报告方向：idx 4B→2B）。
+//
+// 动机：M2 SpMV 每突触流量 = val 4B + idx 4B = 8B（P178 已把 idx 从 i64 压到
+// i32）。列下标 ≤ 65535 时 idx 可再压成 **u16（2B）** → 6B/突触（-25%）。
+// 读出是带宽受限 → 理论上限 1.33×。AVX2 gather 需要 i32 索引 →
+// `_mm256_cvtepu16_epi32` 零扩展（1 条 uop，比 i64→i32 便宜得多）。
+// ⚠ 数值与 i32 核**逐位相同**（同一 gather 值集、同一累加顺序）。
+// ══════════════════════════════════════════════════════════════════════════
+
+/// u16 idx 行内标量（逐位 = i32 核）。
+/// # Safety
+/// `idx_p` 须指向 ≥ `nnz` 个 u16；`x` 须覆盖最大 idx +1。
+pub unsafe fn csr_row_u16_scalar(
+    idx_p: *const u16,
+    val_p: *const f32,
+    nnz: usize,
+    x: *const f32,
+) -> f32 {
+    let mut acc = 0.0f32;
+    for p in 0..nnz {
+        acc += *val_p.add(p) * *x.add(*idx_p.add(p) as usize);
+    }
+    acc
+}
+
+/// u16 idx 行内 AVX2 gather（8 路零扩展 + 8 累加器，与 `csr_row_avx2` 同构）。
+/// # Safety
+/// 同 `csr_row_u16_scalar`；须 AVX2（调用方先 `has_avx2()`）。
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[inline(never)]
+pub unsafe fn csr_row_u16_avx2(
+    idx_p: *const u16,
+    val_p: *const f32,
+    nnz: usize,
+    x: *const f32,
+) -> f32 {
+    use core::arch::x86_64::{
+        __m128i, __m256, _mm256_add_ps, _mm256_cvtepu16_epi32, _mm256_fmadd_ps,
+        _mm256_i32gather_ps, _mm256_loadu_ps, _mm256_setzero_ps, _mm_loadu_si128,
+    };
+    unsafe {
+        let mut a0 = _mm256_setzero_ps(); let mut a1 = _mm256_setzero_ps();
+        let mut a2 = _mm256_setzero_ps(); let mut a3 = _mm256_setzero_ps();
+        let mut a4 = _mm256_setzero_ps(); let mut a5 = _mm256_setzero_ps();
+        let mut a6 = _mm256_setzero_ps(); let mut a7 = _mm256_setzero_ps();
+        let n64 = nnz / 64 * 64;
+        let mut p = 0usize;
+        while p < n64 {
+            let b0 = p;          let b1 = p + 8;  let b2 = p + 16; let b3 = p + 24;
+            let b4 = p + 32;     let b5 = p + 40; let b6 = p + 48; let b7 = p + 56;
+            // u16×8 = 128 bit load → 零扩展成 i32×8 → gather
+            let g0 = _mm256_i32gather_ps::<4>(x,
+                _mm256_cvtepu16_epi32(_mm_loadu_si128(idx_p.add(b0) as *const __m128i)));
+            a0 = _mm256_fmadd_ps(_mm256_loadu_ps(val_p.add(b0)), g0, a0);
+            let g1 = _mm256_i32gather_ps::<4>(x,
+                _mm256_cvtepu16_epi32(_mm_loadu_si128(idx_p.add(b1) as *const __m128i)));
+            a1 = _mm256_fmadd_ps(_mm256_loadu_ps(val_p.add(b1)), g1, a1);
+            let g2 = _mm256_i32gather_ps::<4>(x,
+                _mm256_cvtepu16_epi32(_mm_loadu_si128(idx_p.add(b2) as *const __m128i)));
+            a2 = _mm256_fmadd_ps(_mm256_loadu_ps(val_p.add(b2)), g2, a2);
+            let g3 = _mm256_i32gather_ps::<4>(x,
+                _mm256_cvtepu16_epi32(_mm_loadu_si128(idx_p.add(b3) as *const __m128i)));
+            a3 = _mm256_fmadd_ps(_mm256_loadu_ps(val_p.add(b3)), g3, a3);
+            let g4 = _mm256_i32gather_ps::<4>(x,
+                _mm256_cvtepu16_epi32(_mm_loadu_si128(idx_p.add(b4) as *const __m128i)));
+            a4 = _mm256_fmadd_ps(_mm256_loadu_ps(val_p.add(b4)), g4, a4);
+            let g5 = _mm256_i32gather_ps::<4>(x,
+                _mm256_cvtepu16_epi32(_mm_loadu_si128(idx_p.add(b5) as *const __m128i)));
+            a5 = _mm256_fmadd_ps(_mm256_loadu_ps(val_p.add(b5)), g5, a5);
+            let g6 = _mm256_i32gather_ps::<4>(x,
+                _mm256_cvtepu16_epi32(_mm_loadu_si128(idx_p.add(b6) as *const __m128i)));
+            a6 = _mm256_fmadd_ps(_mm256_loadu_ps(val_p.add(b6)), g6, a6);
+            let g7 = _mm256_i32gather_ps::<4>(x,
+                _mm256_cvtepu16_epi32(_mm_loadu_si128(idx_p.add(b7) as *const __m128i)));
+            a7 = _mm256_fmadd_ps(_mm256_loadu_ps(val_p.add(b7)), g7, a7);
+            p += 64;
+        }
+        let s01 = _mm256_add_ps(a0, a1); let s23 = _mm256_add_ps(a2, a3);
+        let s45 = _mm256_add_ps(a4, a5); let s67 = _mm256_add_ps(a6, a7);
+        let s = _mm256_add_ps(_mm256_add_ps(s01, s23), _mm256_add_ps(s45, s67));
+        let mut lanes = [0.0f32; 8];
+        core::ptr::copy_nonoverlapping((&s as *const __m256).cast::<f32>(),
+                                       lanes.as_mut_ptr(), 8);
+        let mut acc = lanes.iter().sum::<f32>();
+        while p < nnz {
+            acc += *val_p.add(p) * *x.add(*idx_p.add(p) as usize);
+            p += 1;
+        }
+        acc
+    }
+}
+
 #[cfg(test)]
 mod tests_scan {
     use super::*;

@@ -195,6 +195,7 @@ class AccelReadout:
                  csr=None, lognormal_init: bool = False, exc_ratio: float = 0.8,
                  gather_impl: str = "index", gather_dtype: str = "fp32",
                  int8_compute: str = "auto",
+                 fp8_conv: str = "torch",
                  sparse_fwd_kernel: str = "mulsum"):
         if torch is None:
             raise RuntimeError("未安装 torch，加速读出不可用")
@@ -219,9 +220,10 @@ class AccelReadout:
         self._int8_compute_scale = None
         self._int8_out_scale = 1.0
         # P154：fp8 → int8 的**位数转换在 CPU 上做**（fhz 指令），走哪条路径：
-        #   "torch"（**默认**，实测快 5.1×：27 vs 137 ms @1b 档），多 76 MiB 中间张量
+        #   "torch"（默认，实测快 5.1×：27 vs 137 ms @1b 档），多 76 MiB 中间张量
         #   "nogil"（0 中间张量 + 释放 GIL，慢 5.1×）
-        self._fp8_conv = "torch"
+        #   "rust"（P189：phdnet_rs 转换核，多核并行；不可用时回落 torch）
+        self._fp8_conv = str(fp8_conv or "torch").lower()
         dtype = _DTYPE_ALIASES.get(str(dtype), str(dtype))
         if dtype not in _DT:
             raise ValueError(f"不支持 dtype={dtype!r}；可用 {sorted(_DT)}")
@@ -360,6 +362,21 @@ class AccelReadout:
         self._fp8_native = (_res["dtype"] == "fp8")
         self._fp8_fallback_to_int8 = (_res["requested"] == "fp8"
                                       and _res["dtype"] == "int8")
+        # ════════════════════════════════════════════════════════════════
+        # **P189（fhz 2026-10-07 指令「模型 fp8，迭代 fp16」）**────────────
+        # 显式请求 fp8 且设备**无原生 fp8 算子**时：**保持 fp8 请求语义**，
+        # 走「fp8 位模式（uint8）存储 + 每步 CPU 转换 int8 计算」——
+        #   · 存储 1 B/元素 = fp8 的访存收益完整保留（vs fp16 降级的 2 B）；
+        #   · 计算走 910B **真实存在**的 int8 算子（P154/P155 的 W8A8 路径）；
+        #   · 迭代（dp⊗ht 更新）走 fp16 域：int8 码本反量化 → fp16 addcmul_
+        #     → 重量化写回 uint8 位模式（fhz：「迭代用 fp16」）。
+        # ⚠ 仅此一条降级路恢复 int8 算子的使用；**显式请求 int8 仍被
+        #   `candidate_order` 直接 raise**（P163 禁令不动）。
+        # ⚠ 与 P163「落到 fp16」旧口径的区别：fp16 降级丢掉一半访存收益，
+        #   而本路径访存与原生 fp8 完全相同（都 1 B）。
+        # ════════════════════════════════════════════════════════════════
+        self._fp8_bits = bool(_req == "fp8" and _res["dtype"] in ("fp8", "fp16")
+                              and _res["dtype"] != "fp8")
         if dtype == "int8":
             self.tdtype = torch.int8
             self._cdtype = _INT8_CDTYPE
@@ -376,6 +393,17 @@ class AccelReadout:
         else:
             self.tdtype = getattr(torch, _DT[dtype])
             self._cdtype = self.tdtype
+        if self._fp8_bits:
+            # P189：存储域 = fp8 e4m3fn 位模式（**uint8 承载**——910B 连 fp8
+            # 张量都建不出来（P86 ERR01007），只能用 uint8 存位模式）；
+            # 计算域 fp16（fhz「迭代用 fp16」）；前向走 int8 算子（见 _matmul）。
+            self.tdtype = torch.uint8
+            self._cdtype = torch.float16
+            self._int8 = False
+            self._int8_like = False
+            self._wscale = None
+            self._fp8_wscale = None
+            self._last_int8_scales = (1.0, 1.0)
         # int8 模式不走 torch.compile 融合核：_train_step_core 未覆盖反量化/
         # 重量化路径，融合会产出另一套计算图——宁可放弃融合收益（正确性优先）。
         if dtype == "int8" and compile:
@@ -532,8 +560,16 @@ class AccelReadout:
                 self.W = torch.tensor(_q, device=self.device,
                                       dtype=torch.int8)
             else:
-                self.W = torch.tensor(_val, device=self.device,
-                                      dtype=self.tdtype)
+                if self._fp8_bits:
+                    # P189：实值 → fp8 e4m3fn 位模式（uint8 承载）。
+                    # cast 在 CPU 做（910B 无 fp8 算子，设备 cast 会 ERR01007）；
+                    # RNE 舍入与 torch fp8 cast 同。
+                    _t8 = torch.from_numpy(np.ascontiguousarray(
+                        _val, dtype=np.float32)).to(torch.float8_e4m3fn)
+                    self.W = _t8.view(torch.uint8).to(self.device)
+                else:
+                    self.W = torch.tensor(_val, device=self.device,
+                                          dtype=self.tdtype)
             # 融合核走的是稠密 addmm_，稀疏不适用 → 永久eager（P38/P55 纪律）。
             self._compiled = False
             self._fused = None
@@ -617,6 +653,10 @@ class AccelReadout:
                 self.W = torch.clamp(
                     torch.round(_init_t / self._wscale),
                     -_INT8_QMAX, _INT8_QMAX).to(torch.int8)
+            elif self._fp8_bits:
+                # P189：实值 → fp8 e4m3fn 位模式（uint8 承载），cast 在 CPU
+                _t8 = _init_t.cpu().to(torch.float8_e4m3fn)
+                self.W = _t8.view(torch.uint8).to(self.device)
             else:
                 self.W = _init_t.to(self.tdtype)
         # P28：设备侧 (h, y) 缓存，供 forward → learn_softmax 的热路径复用
@@ -651,6 +691,27 @@ class AccelReadout:
         #   但 2e-4 的相对误差是否会侵蚀学习效果，**只有 PPL 能回答**。
         self._gather_dtype = str(gather_dtype or "fp32").lower()
         self._csr_val_host = None                           # P111：_csr 导出缓存
+        # ── P187（fhz 2026-10-06 指令）：**模型权重 fp16、迭代全 fp32** ──────
+        # fp16/bf16 请求的读出权重**统一提升为 fp32 常驻**。理由（P110 实测）：
+        #   更新写回落在 W 的存储精度上——fp16 下非目标行更新保留率仅 26.67%，
+        #   「迭代全 fp32」要求 W 本身是 fp32，否则每次 addcmul_ 的 fp32 结果
+        #   写回 fp16 时就被舍入丢弃（半 ULP ~6e-5 ≫ |dp|~1e-6）。
+        #   检查点存储仍是 fp16（--ckpt-dtype 默认，P107b）→「模型权重 fp16」
+        #   在存储层成立，运行时为保精度驻留 fp32。
+        # ⚠ 仅作用于 fp16/bf16 显式请求；int8/int4/fp8 码本路径保持各自语义
+        #   （反量化→更新→重量化），不动。
+        if (self.W is not None
+                and getattr(self, "tdtype", None) in (torch.float16,
+                                                      torch.bfloat16)):
+            self.W = self.W.to(torch.float32)
+            self.tdtype = torch.float32
+            self._cdtype = torch.float32
+            self._int8 = False
+            import warnings as _w187
+            _w187.warn(
+                "[precision] 读出权重 fp16/bf16 请求 → 运行时提升为 fp32"
+                "（迭代全 fp32，fhz 2026-10-06 决策；P110：fp16 写回丢失 73%"
+                " 非目标行更新。检查点存储仍为 fp16）", RuntimeWarning)
 
     # ---------- 前向 ----------
     def _matmul(self, ht):
@@ -803,6 +864,10 @@ class AccelReadout:
         if self._int8:
             Wq = (self.W.to(torch.float32) * self._wscale).to(ht.dtype)
             return Wq @ ht
+        if self._fp8_bits:
+            # P189：uint8 位模式存储 → 查表反量化到 fp16 → fp16 GEMV
+            # （910B 无 fp8 算子；fp16 matmul 是设备上真实可用的路径）
+            return self._fp8_bits_to_real() @ ht
         return self.W @ ht
 
     def _fp8_to_int8_cpu(self, w_fp8):
@@ -814,17 +879,78 @@ class AccelReadout:
 
         ⚠ **D2H/H2D 是同步点**（每步 2 次，6.34 MiB）。msprof 里应能看到
         这两笔；昇腾上它们可能比转换本身还贵 → **待实测**。
+
+        P189：`--fp8-conv rust` 走 phdnet_rs 多核转换核（数值逐位一致），
+        Rust 不可用时回落 torch 路径并告警一次（不静默）。
         """
         from .fp8_int8_convert import fp8_to_int8_codes
-        _bits = (w_fp8.view(torch.uint8) if w_fp8.dtype
-                 == torch.float8_e4m3fn else w_fp8.to(torch.uint8))
+        if w_fp8.dtype == torch.float8_e4m3fn:
+            _bits = w_fp8.view(torch.uint8)
+        elif w_fp8.dtype == torch.uint8:
+            _bits = w_fp8                       # P189：fp8-bits 模式原样
+        else:
+            _bits = w_fp8.to(torch.uint8)
         _host = _bits.cpu().numpy().reshape(-1)
         # conv 路径：torch（默认，快 5.1x）| nogil（0 中间张量 + 释放 GIL）
+        #           | rust（P189：多核并行，见 fp8_conv.rs）
         _conv = str(getattr(self, "_fp8_conv", "torch"))
+        if _conv == "rust":
+            try:
+                # P189：按 sparse_pc.py 的同款模式导入——先把 phdnet_rs/ 目录
+                # 插到 sys.path 首位，让 `phdnet_rs` 解析到 **phdnet_rs.py
+                # 绑定模块**（否则目录被当作 namespace package，load 拿不到）。
+                import os as _os, sys as _sys
+                _rs_dir = _os.path.join(
+                    _os.path.dirname(_os.path.dirname(
+                        _os.path.abspath(__file__))), os.pardir, "phdnet_rs")
+                _rs_dir = _os.path.abspath(_rs_dir)
+                if _rs_dir not in _sys.path:
+                    _sys.path.insert(0, _rs_dir)
+                from phdnet_rs import load as _rs_load
+                _k, _why = _rs_load()
+                if _k is not None and getattr(_k, "_has_fp8_conv", False):
+                    _codes = np.empty(_host.size, dtype=np.int8)
+                    _sc = np.zeros(1, dtype=np.float32)
+                    _part = np.zeros(64, dtype=np.float32)   # ≥ n_parts 即可
+                    _k.fp8_to_int8(_host, _codes, _sc, _part, 8)
+                    self._last_int8_scales = (float(_sc[0]), 1.0)
+                    return torch.from_numpy(_codes).to(self.device).reshape(
+                        w_fp8.shape)
+            except Exception:                        # noqa: BLE001
+                pass
+            import warnings as _wr
+            if not getattr(self, "_fp8_conv_rust_warned", False):
+                _wr.warn("[fp8-conv] rust 转换核不可用 → 回落 torch 路径"
+                         "（--fp8-conv rust 未生效；phdnet_rs 未加载或缺"
+                         " phdnet_fp8_to_int8 符号）", RuntimeWarning)
+                self._fp8_conv_rust_warned = True
         _codes, _sc = fp8_to_int8_codes(_host, conv=_conv)
         self._last_int8_scales = (_sc, 1.0)
         return torch.from_numpy(_codes).to(self.device).reshape(
             w_fp8.shape)
+
+    def _fp8_bits_to_real(self):
+        """P189：uint8 位模式存储的 W → 实值 fp16 设备张量（256 项查表）。
+
+        用于迭代（learn）与前向稠密臂的反量化。fp8 的值域由 dtype 语义
+        决定（无 per-tensor scale），查表即精确反量化。
+        """
+        from .fp8_int8_convert import FP8_VAL_LUT
+        _host = self.W.detach().cpu().numpy().reshape(-1)
+        _real = FP8_VAL_LUT[_host]                    # (N,) fp32 精确值
+        return torch.from_numpy(_real).to(self.device).reshape(
+            self.W.shape).to(self._cdtype)
+
+    def _real_to_fp8_bits(self, t_real):
+        """P189：实值张量 → fp8 e4m3fn 位模式（uint8）写回存储。
+
+        torch 的 fp8 cast 舍入 = RNE（与构造期 `_val.to(fp8)` 同）。
+        在 CPU 上 cast（910B 无 fp8 算子，设备侧 cast 可能 ERR01007），
+        再以 uint8 位模式回设备。
+        """
+        _bits = (t_real.detach().float().cpu().to(torch.float8_e4m3fn)
+                 .view(torch.uint8))
+        return _bits.to(self.device)
 
     def _sp_gather(self, ht):
         """稀疏行内 gather：取每行 k 个 h 分量（(n_out,k)），供前向与更新共用。
@@ -878,15 +1004,23 @@ class AccelReadout:
         #   （**慢 1.78×**），而 P145 的原意是省流量。
         #   → 现在把 cast **移到 gather 之前**（对 `ht` 做，而不是对 `g`）。
         if self._gather_dtype == "fp32":
-            g = ht[self.Wi]                              # (n_out, k) fp32
+            if self._gather_impl == "take":
+                # P186：`_gather_impl` 此前**只存不用**（P134 接线断了）——
+                # 热路径永远走下面的 `ht[self.Wi]`。这里补上真正的 take 路径：
+                # `torch.take(ht, Wi)` 数值与 `ht[Wi]` **逐位相同**（P134 本机
+                # x86 实测快 1.7×，昇腾待实测——可用 --readout-gather-impl A/B）。
+                g = torch.take(ht, self.Wi)              # (n_out, k) fp32
+            else:
+                g = ht[self.Wi]                          # (n_out, k) fp32
         else:
             # 先把 **h 本身**（n_h 个数，极小）降到目标精度，**再 gather**
             # → `Index` 的**写出量**直接减半/减四，这是真正的省流量。
             _dt = {"fp16": torch.float16,
                    "bf16": torch.bfloat16}[self._gather_dtype]
-            # ⚠ 下游（`_matmul` 的 einsum / `addcmul_`）都按 W 的 dtype 走，
-            #   故这里产出目标精度即可，**不做往返 cast**（那才是负优化）。
-            g = ht.to(_dt)[self.Wi]
+            _ht_l = ht.to(_dt)
+            # P186：take 路径对 fp16 gather 同样适用（数值逐位相同）
+            g = (torch.take(_ht_l, self.Wi) if self._gather_impl == "take"
+                 else _ht_l[self.Wi])
         self._cache_g = g
         self._cache_g_src = ht                # 记住张量**对象**（P143）
         self._cache_g_epoch = self._ht_epoch  # 保留供诊断
@@ -1094,15 +1228,14 @@ class AccelReadout:
         """
         p = torch.softmax(y32, dim=0)
         # nll 先取（必须在改 p 之前）
-        cp = getattr(self, "_correct_pinned", None)
-        if cp is None:
-            cp = torch.zeros(1, dtype=torch.long,
-                             pin_memory=(ht.device.type == "npu"))
-            self._correct_pinned = cp
-        cp.fill_(correct)
-        _ct = cp.to(y32.device, non_blocking=True)
-        nll_dev = torch.nn.functional.cross_entropy(
-            y32.reshape(1, -1), _ct).reshape(())
+        # P188：`correct` 本来就在主机侧（target_idx 是 int / target 是 host 数组
+        # 的 argmax）——旧实现却把它 `fill_` 进 pinned 张量再 H2D 上传，
+        # 每步多付 2 次 kernel 交互（fill + copy）+ 1 次 H2D，正是 msprof
+        # 「NPU 空转等 CPU」的 launch 开销成分。改用 CE 的恒等展开
+        #   cross_entropy(y, c) = logsumexp(y) − y[c]
+        # 纯设备内标量运算、零主机交互，数值恒等（同 fp32 域）。
+        nll_dev = (torch.logsumexp(y32, dim=0)
+                   - y32[int(correct)]).reshape(())
         if self._int8:
             # P105：int8 模式的更新走 **fp32 域** dp⊗ht + 重量化写回（精度约束
             # 与知情取舍见 _int8_update 的 docstring）。p 已用完（nll 先取），
@@ -1137,6 +1270,25 @@ class AccelReadout:
             return nll_dev
         # P84：更新主副本是 fp16（低精度回落场景）→ dp/ht 必须同 dtype，否则
         # addmm_ 退回慢路径或直接报错。int8 模式已在上面提前返回，不会到这里。
+        if getattr(self, "_fp8_bits", False):
+            # P189（fhz「模型 fp8，迭代 fp16」）：fp8 位模式（uint8 承载）存储
+            # 的更新走 fp16 域：查表反量化 → fp16 addcmul_/addmm_（dp⊗h rank-1，
+            # 不物化临时张量）→ RNE cast 回 fp8 位模式写回。与 int8 的
+            # 「反量化→更新→重量化」同构；P110 代价照旧（非目标行更新大多
+            # 被舍入丢弃，目标行 |dp|~1 完整保留）。
+            _real = self._fp8_bits_to_real()              # fp16 (n_out,k)
+            if self._sparse:
+                _g = self._sp_gather(ht)
+                _real.addcmul_(dp.to(self._cdtype).reshape(-1, 1),
+                               _g.to(self._cdtype), value=-float(eta))
+            else:
+                _real.addmm_(dp.to(self._cdtype).reshape(-1, 1),
+                             ht.to(self._cdtype).reshape(1, -1),
+                             alpha=-float(eta))
+            if self.w_clip > 0.0:
+                _real.clamp_(-self.w_clip, self.w_clip)
+            self.W.copy_(self._real_to_fp8_bits(_real))
+            return nll_dev
         # ⚠⚠ **P149（fhz「模型原生 fp8，迭代 fp16」）**：`_upd_dtype` 原本在
         #   `W.dtype` 非 fp16 时直接取 `self.tdtype` —— 而 fp8 模式下 `tdtype`
         #   就是 fp8 → dp/ht 也被转成 fp8 → 算子全部崩
@@ -1358,7 +1510,14 @@ class AccelReadout:
         # （原地写这个 numpy 数组），随后才调`sync_csr_from_host()`。
         # 若 sync 里重新 D2H 取一份新拷贝，写入就落在无人引用的临时数组上，
         # 设备权重从未被更新——恢复「成功」但权重还是旧值（B3 抓到的就是这个）。
-        val = self.W.detach().float().cpu().numpy().astype(np.float64).ravel()
+        # P189：fp8-bits 模式下 uint8 是位模式 → 查表反量化成实值再导出。
+        if getattr(self, "_fp8_bits", False):
+            from .fp8_int8_convert import FP8_VAL_LUT
+            val = FP8_VAL_LUT[self.W.detach().cpu().numpy().reshape(
+                -1)].astype(np.float64)
+        else:
+            val = self.W.detach().float().cpu().numpy().astype(
+                np.float64).ravel()
         self._csr_val_host = val
         return indptr, idx, val
 
@@ -1377,6 +1536,15 @@ class AccelReadout:
             raise RuntimeError(
                 "sync_csr_from_host() 在 _csr 之前被调用；请先取 _csr、写入 "
                 "val[:]，再调用本方法（ckpt_1b 的稀疏恢复分支已按此顺序接入）")
+        if getattr(self, "_fp8_bits", False):
+            # P189：实值 → fp8 位模式（uint8）写回
+            _t8 = torch.as_tensor(
+                np.ascontiguousarray(val, dtype=np.float32).reshape(
+                    self.n_out, self.conn_k),
+                device="cpu", dtype=torch.float32).to(torch.float8_e4m3fn)
+            self.W.copy_(_t8.view(torch.uint8).to(self.device))
+            self._csr_val_host = None
+            return
         self.W.copy_(torch.tensor(
             np.ascontiguousarray(val, dtype=np.float32).reshape(
                 self.n_out, self.conn_k),
@@ -1395,6 +1563,8 @@ class AccelReadout:
 
     @property
     def dtype_name(self) -> str:
+        if getattr(self, "_fp8_bits", False):
+            return "fp8"           # P189：位模式存储，口径报请求的 fp8
         if self._int8:
             return "int8"          # 存储口径（回落 fp16 后 _int8=False → 走下面）
         return {torch.float32: "fp32", torch.float16: "fp16",
@@ -1427,6 +1597,13 @@ class AccelReadout:
         W = self.W.detach().float()
         if self._int8:
             W = W * self._wscale   # 码本值 × scale = 实值（否则 ckpt 全是码）
+        elif getattr(self, "_fp8_bits", False):
+            # P189：uint8 是 fp8 位模式，不是实值 → 查表反量化成实值
+            # （否则 ckpt 存的是位模式整数，恢复/统计全错）
+            from .fp8_int8_convert import FP8_VAL_LUT
+            _bits = self.W.detach().cpu().numpy().reshape(-1)
+            W = torch.from_numpy(FP8_VAL_LUT[_bits].reshape(
+                self.W.shape))
         return W.cpu().numpy()
 
     def load_W(self, arr: np.ndarray) -> None:
@@ -1437,6 +1614,12 @@ class AccelReadout:
             if a.shape != (self.n_out, self.conn_k):
                 raise ValueError(f"稀疏形状不符：期望 {(self.n_out, self.conn_k)}，"
                                  f"收到 {a.shape}")
+            if getattr(self, "_fp8_bits", False):
+                # P189：实值 → fp8 位模式（uint8）写回
+                _t8 = torch.as_tensor(a, device="cpu",
+                                      dtype=torch.float32).to(torch.float8_e4m3fn)
+                self.W.copy_(_t8.view(torch.uint8).to(self.device))
+                return
             self.W.copy_(torch.as_tensor(a, device=self.device,
                                          dtype=torch.float32))
             return
@@ -1652,6 +1835,7 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
                              int8_compute=str(
                                  getattr(cfg, "readout_int8_compute",
                                          "auto")),
+                             fp8_conv=str(getattr(cfg, "fp8_conv", "torch")),
                              nll_sync_every=int(getattr(cfg, "nll_sync_every", 1)),
                              compile=bool(getattr(cfg, "torch_compile", False)),
                              compile_mode=str(getattr(cfg,

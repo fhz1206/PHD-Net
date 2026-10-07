@@ -223,8 +223,8 @@
       <div class="tags">
         <span class="tag">无自注意力 / 位置编码 / 无堆叠层</span>
         <span class="tag">逐 token 流式</span>
-        <span class="tag">Python + numba + PyTorch/昇腾 NPU</span>
-        <span class="tag">总容量 ≈ 1.37e9</span>
+        <span class="tag">Python + numba + Rust 算子库 / 昇腾 NPU</span>
+        <span class="tag">总容量 ≈ 1.217e9（生产 conn_k=128 口径）</span>
       </div>
     </div>
     <nav class="nav" id="nav">
@@ -344,7 +344,7 @@
   <section id="capacity">
     <div class="sec-kick">Capacity Ledger</div>
     <h2 class="sec-title">容量账（1B 档，<code>--preset 1b</code>，width=1024）</h2>
-    <p class="sec-lead">「1B」= <b>总突触参数容量 ≥ 1.0×10⁹</b>（容量上限口径，非已用量）。启动时由 <code>train_1b/config_1b.py::capacity_report()</code> 打印验算表。</p>
+    <p class="sec-lead">「1B」= <b>总突触参数容量 ≥ 1.0×10⁹</b>（容量上限口径，非已用量）。启动时由 <code>train/config_1b.py::capacity_report()</code> 打印验算表。</p>
     <div class="card" style="--ac:var(--m4b); padding:8px 18px 14px">
       <table>
         <thead><tr><th>组成</th><th>规模</th><th>占比</th><th style="width:32%">容量条</th></tr></thead>
@@ -391,10 +391,10 @@
     <p class="sec-lead">这个项目对精度的取舍理由几乎都与「学习」而非「省显存」有关，而且随硬件平台变化——x86 与昇腾的加速方向常常相反，不可混用。</p>
     <div class="grid g2">
       <div class="card" style="--ac:var(--m6)">
-        <h3>读出：<b>fp32</b>（默认）—— 低精度会破坏学习规则</h3>
-        <p>取舍理由是<b>学习正确性</b>，不是访存收益。感知器 <code>p − t</code> 的<b>非目标行</b>更新量 ≈1e-6，被低精度舍入吞掉后学习规则退化为「只提升目标行」的<b>纯 Hebbian</b>。实测非目标行更新保留率（<code>tools/probe_readout_precision.py</code>，|W|~1e-2 / |dp|~1e-6 档，判据=同精度舍入后元素是否真的变了）：</p>
-        <div class="meta"><span><b>fp32 99.95%</b>（精确 p − t）｜<b>fp16 26.67%</b>｜<b>bf16 5.79%</b>；目标行三者都 100%（目标更新 ~1e-2 ≫ 半 ULP）→ 低精度下「只有目标行被提升」正是纯 Hebbian 的定义。故默认 fp32，低精度降级为显式 opt-in。<b>低精度不是免费的速度收益。</b></span></div>
-        <div class="meta"><span><b>fp8 / fp4 在所有加速器已禁用</b>（昇腾 Ascend 910B + CANN 8.5 实测 ERR01007：能建张量不能乘）。仅 <code>--accel cpu</code> 走 numba 的位算法量化核——那是量化码本路径，不是加速能力</span></div>
+        <h3>读出：<b>fp8</b>（默认，P189）—— 位模式存储 + fp16 迭代</h3>
+        <p>fhz 2026-10-07 决策「模型 fp8，迭代 fp16」：W 以 <b>fp8 e4m3fn 位模式（uint8 承载）存储</b>（1 B/元素，访存收益完整保留），迭代走 fp16 域 rank-1 更新后 RNE cast 回位模式。感知器 <code>p − t</code> 的<b>非目标行</b>更新量 ≈1e-6 会被粗步长舍入吞掉（学习部分退化为纯 Hebbian），这是知情取舍，验收靠 probe_PPL。实测非目标行更新保留率（<code>tools/probe_readout_precision.py</code>，|W|~1e-2 / |dp|~1e-6 档）：</p>
+        <div class="meta"><span>fp32 99.95%（精确 p − t）｜fp16 26.67%｜bf16 5.79%；目标行全部 100%（目标更新 ~1e-2 ≫ 半 ULP）。fp8 步长比 fp16 粗约 4 倍 → 保留率更低。<b>低精度不是免费的速度收益。</b></span></div>
+        <div class="meta"><span>910B 无 fp8 matmul 算子（ERR01007）→ 前向可选每步 CPU 转换 int8 码本走 int8 算子（<code>--fp8-conv</code> 选 torch/nogil/rust；x86 实测 rust 量化 LUT 核快 8.44×）。int 族显式请求仍禁用（P163）；fp4/int4 仍禁用（P152）</span></div>
       </div>
       <div class="card" style="--ac:var(--m1)">
         <h3>编码器与分词</h3>
@@ -402,12 +402,8 @@
         <div class="meta"><span><b>检查点</b> 低精度存位模式（uint16/uint8），加载侧按 meta["ckpt_dtype"] 无损解码；词表快照自包含，无需外部词表</span></div>
       </div>
       <div class="card" style="--ac:var(--m5)">
-        <h3>fp8 / fp4 在加速器上被禁用</h3>
-        <p>实测昇腾 Ascend910B4 + CANN 8.5 + torch_npu 2.9 对 float8_e4m3fn/e5m2 的建张量 / cast / matmul 全部报错，<code>torch.ops</code> 零个 fp8 算子；CPU torch 能建张量但无 fp8 addmv。<b>numba CPU 路径仍可用量化码本</b>（<code>--accel cpu --readout-dtype fp8</code>）。</p>
-      </div>
-      <div class="card" style="--ac:var(--m3)">
-        <h3>fp4 MX 核心（实验线）</h3>
-        <p>e2m1 半字节打包 + MX 块缩放（K=16）+ 确定性随机舍入（SR）：e2m1 块内动态范围仅 12×，RNE 下小更新恒被吞导致训练中期漂移，SR 期望无偏且跨运行逐位可复现。端到端 4K ppl 较 fp32 锚点 +1.15%。</p>
+        <h3>fp8 的硬件限制与软件绕行（P189）</h3>
+        <p>实测昇腾 Ascend910B4 + CANN 8.5 + torch_npu 2.9 对 float8_e4m3fn/e5m2 的建张量 / cast / matmul 全部报错，<code>torch.ops</code> 零个 fp8 算子——910B4 没有 FP8 矩阵乘单元。P189 起不因此放弃 fp8 精度：<b>位模式（uint8 承载）存储绕行</b>，访存与原生 fp8 相同；换 910C/950 或 ROCm gfx942 时探测自动命中原生 fp8 路径。</p>
       </div>
     </div>
   </section>
@@ -434,25 +430,25 @@
   <section id="quickstart">
     <div class="sec-kick">Quick Start</div>
     <h2 class="sec-title">跑起来</h2>
-    <p class="sec-lead">唯一生产训练入口是 <code>train_1b/train.py</code>。全部开关、默认值与「为什么是这个值」见 <code>train_1b/README.md</code>。</p>
+    <p class="sec-lead">唯一生产训练入口是 <code>train/train.py</code>。全部开关、默认值与「为什么是这个值」见 <code>train/README.md</code>。</p>
     <pre><span class="c"># 安装（numpy/numba/psutil/pyarrow 必装，torch 可选段）</span>
 <span class="c"># 注意：numpy 需 &lt; 2.3（新版与 numba 不兼容），numba ≥ 0.61</span>
 pip install -r requirements.txt
 
 <span class="c"># 最小可跑（冒烟，分钟级，只验管线）</span>
-python train_1b/train.py <span class="k">--preset</span> smoke <span class="k">--data</span> sft <span class="k">--tokens</span> 2000
+python train/train.py <span class="k">--preset</span> smoke <span class="k">--data</span> sft <span class="k">--tokens</span> 2000
 
 <span class="c"># 门禁：fast 9/9 零回归</span>
 python tests/run_tests.py fast
 
 <span class="c"># 标准 1B 档训练（本地 datasets/ 入口）</span>
-python train_1b/train.py <span class="k">--preset</span> 1b <span class="k">--data</span> pretrain <span class="k">--tokens</span> 1000000
+python train/train.py <span class="k">--preset</span> 1b <span class="k">--data</span> pretrain <span class="k">--tokens</span> 1000000
 
 <span class="c"># ModelScope 远程流式入口（HTTP Range，零本地落盘）</span>
-python train_1b/train.py <span class="k">--preset</span> 1b <span class="k">--data</span> pretrain <span class="k">--remote-data</span>
+python train/train.py <span class="k">--preset</span> 1b <span class="k">--data</span> pretrain <span class="k">--remote-data</span>
 
 <span class="c"># 推理 / 对话</span>
-python train_1b/infer.py <span class="k">--model</span> outputs/models/phdnet1b_1b_pretrain_final.npz <span class="k">--chat</span>
+python train/infer.py <span class="k">--model</span> outputs/models/phdnet1b_1b_pretrain_final.npz <span class="k">--chat</span>
 <span class="c"># 终端 TUI（ANSI 轻量界面，word 与 1B 双后端，可 --selftest）</span>
 python chat/tui.py</pre>
     <p class="sec-lead" style="margin-top:14px">训练数据两入口：本地 <code>datasets/</code>（gitignore 的独立仓库，由 <code>tools/</code> 转换脚本生成）；<code>--remote-data</code> 走 ModelScope HTTP Range 流式直读，零落盘。</p>
@@ -462,7 +458,7 @@ python chat/tui.py</pre>
     <div class="sec-kick">Code Map</div>
     <h2 class="sec-title">目录结构</h2>
     <pre>train/
-├── <span class="k">train_1b/</span>               1B 生产训练子项目（唯一训练入口）
+├── <span class="k">train/</span>               1B 生产训练子项目（唯一训练入口）
 │   ├── train.py            生产训练主入口（流式 / SFT / 续训 / 远程数据）
 │   ├── config_1b.py        1B 档预设与容量验算 capacity_report()
 │   ├── corpus_stream.py    字符流 → token 流、SFT 掩码状态机
@@ -510,7 +506,7 @@ python chat/tui.py</pre>
           <tr><td><b>容量 vs 已用量</b></td><td>容量是突触上限（<code>--report</code> / <code>[big-ltm]</code> 日志查利用率），已用量是已生长数。</td></tr>
           <tr><td><b>稠密 / 稀疏连接率</b></td><td>不存在的突触<b>不存储、不计算</b>。</td></tr>
           <tr><td><b>ms/tok</b></td><td>单 token 毫秒数，必带平台与档位。x86 与昇腾的加速方向常常相反，不可混用。</td></tr>
-          <tr><td><b>终端语言</b></td><td><code>--lang zh</code>（默认）全中文、<code>--lang en</code> 全英文，只影响文案不影响数据。</td></tr>
+          <tr><td><b>终端语言</b></td><td><code>--lang en</code>（默认）全英文、<code>--lang zh</code> 全中文，只影响文案不影响数据。</td></tr>
         </tbody>
       </table>
     </div>
@@ -590,7 +586,7 @@ try{
 const MODULES = {
   input:{ key:'input', name:'输入 token 流', short:'字符流 / SFT 掩码', color:'#9fb4d8', hex:0x9fb4d8,
     cog:'字符流 → token 流 · SFT 掩码状态机',
-    impl:'train_1b/corpus_stream.py · tokenizer_core.py',
+    impl:'train/corpus_stream.py · tokenizer_core.py',
     scale:'逐 token：一次前向只有一个 token',
     desc:'语料以字符流进入，经分词核心转成 token 流；onehot 缓冲用 fp16（值只有 0/1，无损）。SFT 数据由掩码状态机标注。状态跨 token / 分片 / epoch 连续演化，因此本架构不允许批处理。' },
 
@@ -638,9 +634,9 @@ const MODULES = {
 
   output:{ key:'output', name:'输出 token', short:'下一 token 分布', color:'#ffffff', hex:0xffffff,
     cog:'感知器输出 / softmax',
-    impl:'phdnet/readout.py · train_1b/infer.py · chat/tui.py',
+    impl:'phdnet/readout.py · train/infer.py · chat/tui.py',
     scale:'推理 / 对话入口',
-    desc:'M6 给出下一 token 分布。推理与对话走 train_1b/infer.py --chat；聊天前端 chat/tui.py 是 ANSI 轻量 TUI（状态栏 / 分色对话区 / 斜杠命令），word 与 1B 双后端。' }
+    desc:'M6 给出下一 token 分布。推理与对话走 train/infer.py --chat；聊天前端 chat/tui.py 是 ANSI 轻量 TUI（状态栏 / 分色对话区 / 斜杠命令），word 与 1B 双后端。' }
 };
 
 /* ============================================================

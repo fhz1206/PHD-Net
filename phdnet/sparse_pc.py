@@ -566,6 +566,11 @@ class SparsePCStack:
         ip, ix, vl = csr
         if self._rs is None:
             return _csr_add_outer(ip, ix, vl, a, b, eta)
+        # P188：Rust 核按 f32 读写向量；上游 s0/e0p 可能是 fp64（编码器权重
+        # fp64 → s0 fp64 → e0p = s0 − mv(fp32) 升为 fp64）。cast 在边界做，
+        # 与 Python 回落核的 fp32 累加语义一致。
+        a = np.ascontiguousarray(a, dtype=np.float32)
+        b = np.ascontiguousarray(b, dtype=np.float32)
         return self._rs.m2_add_outer(ip, ix, vl, a, b, eta, self.rs_threads)
 
     def _oja(self, csr, post, pre, eta):
@@ -573,6 +578,8 @@ class SparsePCStack:
         ip, ix, vl = csr
         if self._rs is None:
             return _csr_oja_up(ip, ix, vl, post, pre, eta)
+        post = np.ascontiguousarray(post, dtype=np.float32)
+        pre = np.ascontiguousarray(pre, dtype=np.float32)
         return self._rs.m2_oja_up(ip, ix, vl, post, pre, eta, self.rs_threads)
 
     def _clip(self, val, w_max):

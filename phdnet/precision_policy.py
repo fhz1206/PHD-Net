@@ -145,24 +145,16 @@ def candidate_order(requested: str) -> list[str]:
                 f"且 P156 实测 int8 路径在 gather-GEMV 下比 fp16 慢 1.2×。")
         out = [x for x in out if FAMILIES.get(x, {}).get("family") != "int"]
     # ══════════════════════════════════════════════════════════════════════
-    # **P167：fp8 的可用性改成「按平台」而非「全局剔除」**
+    # **P167→P189：fp8 的可用性交给「真跑一次」的探测，不再静态剔除**──────
     # ══════════════════════════════════════════════════════════════════════
-    # P163 是**照着 Ascend910B4 一台机器**把 fp8 从链里静态剔除的。但：
-    #   · 910B 上 fp8 建不出张量（P86 ERR01007，P158 复核）→ 在那台机器上剔除是对的；
-    #   · 而 **AMD gfx942（MI300X/MI325X）原生支持 fp8** → 全局剔除等于让
-    #     ROCm 白买 2× 存储与带宽收益。
-    # 且这与本模块自己写的原则**自相矛盾**（:14-18「支持的判据= **真跑一次**
-    # （不是查表）」）—— 探测机制还在，但候选名单先被静态砍掉了。
-    # → 改为**按平台开关**：`FP8_ENABLED_BY_PLATFORM`。默认与P163 一致
-    #   （保守），但可用环境变量 `PHD_FP8=1` 打开（恢复候选 → 由 `_probe`
-    #   真跑决定，不保证成功 —— **这才是「真跑一次」的本意**）。
-    if not _fp8_candidate_enabled():
-        out = [x for x in out if x not in ("fp8", "fp4", "int4")]
-    else:
-        # 开启时保留 fp8，但**要求它是候选链的首位**（请求 fp8 时才试）
-        out = [x for x in out if x not in ("fp4", "int4")]
-        if req.lower() == "fp8" and "fp8" not in out:
-            out = ["fp8"] + out
+    # P189（fhz 2026-10-07 指令「精度改为 fp8，迭代用 fp16」）：显式请求 fp8
+    # 时**必须把 fp8 放回链首**——910B 无 fp8 算子时由 `_probe` 探测失败后
+    # 走「fp8 位模式存储 + int8 算子计算」的降级（见 AccelReadout 的
+    # `_fp8_bits` 模式），而不是静默落 fp16（那是 P163 的旧口径，已废）。
+    # fp4/int4 仍剔除（P152 定案：unpack 开销抵消存储收益）。
+    out = [x for x in out if x not in ("fp4", "int4")]
+    if req.lower() == "fp8" and "fp8" not in out:
+        out = ["fp8"] + out
     # 去掉裸 fp32 中间项（若已被排除则只剩 fp16/bf16）
     if out and out[0] != "fp32" and "fp32" in out[1:]:
         out = [out[0]] + [x for x in out[1:] if x != "fp32"]

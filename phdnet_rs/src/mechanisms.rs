@@ -87,6 +87,16 @@ impl<'a> F32<'a> {
 /// 行级 `std::thread::scope` + 静态分块。**不用 rayon**（零依赖原则）。
 /// ⚠ 但要诚实：**线程数 ≥ 物理核时收益会平**（读出是带宽受限，
 /// 见 MEMORY「读出是 GEMV，受带宽限制」）。默认取 `min(8, 可用核)`。
+/// `m1_gemv` 并行上下文（裸指针传给线程池工作函数）。
+struct M1Ctx {
+    w_ptr: *const f32,
+    x_ptr: *const f32,
+    b_ptr: *const f32,
+    out_ptr: *mut f32,
+    n: usize,
+    cols: usize,
+}
+
 pub fn m1_gemv(
     w: &F32<'_>,
     x: &[f32],
@@ -132,38 +142,43 @@ pub fn m1_gemv(
         return;
     }
 
-    // 每线程连续的块（**分块而非交错** → 访存局部性更好）
-    let chunk = n.div_ceil(nt);
-    // ⚠ 闭包里传**裸指针 + 长度**而不是 `&[f32]`：引用不是 `Send`
-    //   （因为 Rust 无法证明它不指向可重定位的栈，而我们的用法是安全的
-    //   —— 只读+ 不重排 + 不跨线程返回）。
-    let x_ptr = x.as_ptr() as usize;
-    let b_ptr = b.as_ptr() as usize;
-    let cols = w.cols;
-    std::thread::scope(|s| {
-        for row_lo in (0..nt).map(|t| t * chunk) {
-            let row_hi = core::cmp::min(row_lo + chunk, n);
-            if row_lo >= row_hi {
-                continue;
-            }
-            // SAFETY: 各线程写`out[row_lo..row_hi]` —— **互不重叠**；
-            //   只读 `w` / `x` / `b` → 无竞态（对齐：这是我们敢这么用的唯一理由）。
-            // ⚠ 指针以 `usize` 传递：`*mut f32` 不是 `Send`，而整数是。
-            //   转换在闭包内完成，语义等价且更明确。
-            let out_ptr = unsafe { out.as_mut_ptr().add(row_lo) } as usize;
-            let out_len = row_hi - row_lo;
-            s.spawn(move || {
-                // SAFETY: 指针与长度在调用方保证有效；分块互不重叠。
-                let out_ptr = out_ptr as *mut f32;
-                let sub = unsafe { core::slice::from_raw_parts_mut(out_ptr, out_len) };
-                let xs = unsafe { core::slice::from_raw_parts(x_ptr as *const f32, cols) };
-                let bs = unsafe { core::slice::from_raw_parts(b_ptr as *const f32, n) };
-                for (i, o) in sub.iter_mut().enumerate() {
-                    gemv_row(w, row_lo + i, xs, bs[row_lo + i], o);
-                }
-            });
-        }
-    });
+    // 每线程连续的块（**分块而非交错** → 访存局部性更好）。
+    // P190：改走**常驻线程池** `pool::run`（与 `simd::gemv_avx2` 同款）——
+    // 原实现每次调用 `std::thread::scope` 新起 nt 个线程，8 线程的
+    // spawn/join 固定开销把 AVX2 行核的收益吃掉大半
+    // （1024×2048 实测：scope 版 0.71ms vs 池版 simd 绑定 0.124ms）。
+    let ctx = M1Ctx {
+        w_ptr: w.ptr,
+        x_ptr: x.as_ptr(),
+        b_ptr: b.as_ptr(),
+        out_ptr: out.as_mut_ptr(),
+        n,
+        cols: w.cols,
+    };
+    crate::pool::run(
+        m1_work,
+        &ctx as *const M1Ctx as *mut u8,
+        nt,
+        nt,
+    );
+}
+
+/// `m1_gemv` 并行工作函数：处理自己分到的连续行块。
+unsafe fn m1_work(ctx: *mut u8, part: usize, n_parts: usize) {
+    let c = unsafe { &*(ctx as *const M1Ctx) };
+    let chunk = c.n.div_ceil(n_parts);
+    let lo = part * chunk;
+    let hi = ((part + 1) * chunk).min(c.n);
+    if lo >= hi {
+        return;
+    }
+    for r in lo..hi {
+        let row = unsafe { c.w_ptr.add(r * c.cols) };
+        let bv = unsafe { *c.b_ptr.add(r) };
+        // SAFETY: 各线程写自己行块的 out —— 互不重叠；w/x/b 只读。
+        let s = unsafe { crate::simd::gemv_row_avx2(row, c.x_ptr, c.cols) };
+        unsafe { *c.out_ptr.add(r) = s + bv };
+    }
 }
 
 /// 单行 GEMV。**行内列序累加** → 与 Python 版逐位一致。
@@ -171,6 +186,18 @@ pub fn m1_gemv(
 fn gemv_row(w: &F32<'_>, r: usize, x: &[f32], b: f32, out: &mut f32) {
     let row = w.row(r);
     let cols = w.cols;
+    // P190：行内改走 **AVX2**（4 路 FMA 累加器）——标量逐列累加是本核
+    // 落后 numba 的主因（1024×2048 实测标量 0.87ms vs AVX2 0.124ms）。
+    // 与 `m1_gemv_simd` 用**同一个** `simd::gemv_row_avx2`，两条入口结果一致；
+    // 求和顺序与标量不同 → 对拍容差 1e-5（与既有 simd 门禁同口径）。
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::simd::has_avx2() && cols >= 32 {
+            let s = unsafe { crate::simd::gemv_row_avx2(row, x.as_ptr(), cols) };
+            *out = s + b;
+            return;
+        }
+    }
     let mut acc: f32 = 0.0;
     // SAFETY: row 指向 `w` 的第 r 行，长度 cols（由 F32 的不变式保证）。
     unsafe {

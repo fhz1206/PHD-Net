@@ -51,12 +51,20 @@ def _fast_idx_range(lib, idx) -> tuple:
     Rust 侧 `phdnet_idx_range_i32`（AVX2 一次比 8 个 i32 + 常驻池 8 线程）
     实测 ≈0.3-0.6ms。**语义相同（仍全检），只是快~20×。**
 
+    P190：**模块级缓存**（键 = (id(idx), size)）——idx 的内容在生产热路径
+    不变（拓扑只在重建时替换数组对象），首次全扫后命中即零开销；
+    数组被替换（id 变）自动失效。校验语义不降级：仍是「每个新数组全检一次」。
+
     ⚠ 旧 DLL 无该符号 / 调用失败 → 回落 numpy（**不静默失效**）。
     """
     try:
-        p = idx.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
-    except (AttributeError, TypeError, ValueError):
-        return int(idx.min()), int(idx.max())
+        _key = (id(idx), idx.size)
+        _hit = _IDX_RANGE_CACHE.get(_key)
+        if _hit is not None:
+            return _hit
+    except TypeError:
+        _key = None
+    p = idx.ctypes.data_as(ctypes.POINTER(ctypes.c_int))
     mn = ctypes.c_int(0)
     mx = ctypes.c_int(0)
     fn = getattr(lib, "phdnet_idx_range_i32", None)
@@ -65,12 +73,20 @@ def _fast_idx_range(lib, idx) -> tuple:
     if fn(p, ctypes.c_size_t(idx.size),
           ctypes.byref(mn), ctypes.byref(mx), ctypes.c_size_t(8)) != 0:
         return int(idx.min()), int(idx.max())
-    return int(mn.value), int(mx.value)
+    _res = (int(mn.value), int(mx.value))
+    if _key is not None:
+        if len(_IDX_RANGE_CACHE) >= 64:
+            _IDX_RANGE_CACHE.clear()
+        _IDX_RANGE_CACHE[_key] = _res
+    return _res
 
 
 # 最近的 `RustKernels` 实例（供@staticmethod 的校验器复用其 lib 句柄）。
 # ⚠ 单例假设与本模块的用法一致：进程内只load 一个库。
 _LIB_HOLDER: list = [None]
+
+# P190：`_fast_idx_range` 的模块级缓存（键 = (id(idx), size)）。
+_IDX_RANGE_CACHE: dict = {}
 
 
 class RustKernels:
@@ -82,6 +98,15 @@ class RustKernels:
         # P179：供 @staticmethod 的校验器复用 lib 句柄（走 Rust 侧快速 idx 扫描）
         if _LIB_HOLDER[0] is None:
             _LIB_HOLDER[0] = self
+        # P190：**绑定层 int32 idx 缓存**——生产热路径每步把同一批 CSR idx
+        # 反复传进来，`_idx_i32` 的 int64→int32 转换实测 0.052ms/次
+        # （比 Rust 裸核 0.055ms 还贵，是 Rust 落后 numba 的主因）。
+        # 键 = (id(idx), size)：数组被替换（id 变）自动失效；val 数组共享
+        # 同一对象（sparse_pc 的 CSR 三元组结构不变）→ 与 sparse_pc.py
+        # 的 `_csr_i32_cache`（P179）同口径。
+        self._idx_i32_cache = {}
+        # P190：u16 副本缓存（m2_matvec 自动路由 u16 核时用）
+        self._idx_u16_cache = {}
 
     def _bind(self) -> None:
         L = self.lib
@@ -92,6 +117,15 @@ class RustKernels:
         L.phdnet_m1_gemv.restype = ctypes.c_int
         L.phdnet_m1_gemv.argtypes = [f32p, ctypes.c_size_t, ctypes.c_size_t,
                                      f32p, f32p, f32p, ctypes.c_size_t]
+        # P189：fp8(e4m3fn 位模式 uint8) → int8 码本 + per-tensor scale
+        # （「fp8 存储 + int8 计算」每步的位数转换，CPU 多核；见 fp8_conv.rs）
+        self._has_fp8_conv = hasattr(L, "phdnet_fp8_to_int8")
+        if self._has_fp8_conv:
+            u8p = ctypes.POINTER(ctypes.c_uint8)
+            i8p = ctypes.POINTER(ctypes.c_int8)
+            L.phdnet_fp8_to_int8.restype = ctypes.c_int
+            L.phdnet_fp8_to_int8.argtypes = [u8p, ctypes.c_size_t, i8p,
+                                             f32p, f32p, ctypes.c_size_t]
         L.phdnet_m1_kwta.restype = ctypes.c_int
         L.phdnet_m1_kwta.argtypes = [f32p, ctypes.c_size_t, ctypes.c_size_t,
                                      f32p, i32p]
@@ -99,6 +133,14 @@ class RustKernels:
         L.phdnet_m2_matvec.restype = ctypes.c_int
         L.phdnet_m2_matvec.argtypes = [i64p, i32p, f32p, ctypes.c_size_t,
                                        f32p, f32p, ctypes.c_size_t]
+        # P186：u16 压缩 idx 的 SpMV（列数 ≤65535 时 idx 4B→2B，带宽 -25%）
+        self._has_matvec_u16 = hasattr(L, "phdnet_m2_matvec_u16")
+        if self._has_matvec_u16:
+            u16p = ctypes.POINTER(ctypes.c_uint16)
+            L.phdnet_m2_matvec_u16.restype = ctypes.c_int
+            L.phdnet_m2_matvec_u16.argtypes = [i64p, u16p, f32p,
+                                               ctypes.c_size_t,
+                                               f32p, f32p, ctypes.c_size_t]
         L.phdnet_m2_add_outer.restype = ctypes.c_int
         L.phdnet_m2_add_outer.argtypes = [i64p, i32p, f32p, ctypes.c_size_t,
                                           f32p, f32p, ctypes.c_float,
@@ -425,12 +467,13 @@ class RustKernels:
     #⚠ 每个都先过 `_check_csr`（dtype/连续/形状/越界）——
     #   P174 审计发现这些校验缺失会导致**静默算错**。
 
-    @staticmethod
-    def _idx_i32(idx):
+    def _idx_i32(self, idx):
         """把 CSR 的 `idx` 转成 Rust 核要的 **int32**（P178 原生 i32 落地）。
 
         · 已是 int32 → 零拷贝视图（若非连续则 `ascontiguousarray`）。
-        · int64 → 副本转换（一次，调用方应缓存以避免热路径重复分配）。
+        · int64 → **P190：走实例级缓存**（键 = (id(idx), size)）——生产热路径
+          每步重复转换同一批 idx 实测 0.052ms/次，比 Rust 裸核还贵；
+          命中即零转换。数组被替换（id 变）自动失效。
         · 其余 dtype → 直接报错（不静默降级，P161 纪律）。
         """
         dt = _np.dtype(idx.dtype)
@@ -438,10 +481,49 @@ class RustKernels:
             return _np.ascontiguousarray(idx) if not idx.flags["C_CONTIGUOUS"] \
                 else idx
         if dt == _np.int64:
-            return _np.ascontiguousarray(idx, dtype=_np.int32)
+            key = (id(idx), idx.size)
+            hit = self._idx_i32_cache.get(key)
+            if hit is not None:
+                return hit
+            out = _np.ascontiguousarray(idx, dtype=_np.int32)
+            # 缓存上限护栏：异常多的不同 idx 数组时清空（防内存增长）
+            if len(self._idx_i32_cache) >= 64:
+                self._idx_i32_cache.clear()
+            self._idx_i32_cache[key] = out
+            return out
         raise ValueError(
             "CSR idx 的 dtype=%s 不支持；Rust 核只接受 int64/int32（P178）"
             % dt)
+
+    def _idx_u16(self, idx):
+        """P190：int64 idx → uint16 副本（仅当已确认 max<65536 时调用），
+        走 (id, size) 实例缓存（与 `_idx_i32` 同口径）。"""
+        key = (id(idx), idx.size)
+        hit = self._idx_u16_cache.get(key)
+        if hit is not None:
+            return hit
+        out = _np.ascontiguousarray(idx, dtype=_np.uint16)
+        if len(self._idx_u16_cache) >= 64:
+            self._idx_u16_cache.clear()
+        self._idx_u16_cache[key] = out
+        return out
+
+    def m2_matvec_u16(self, indptr, idx_u16, val, x, out,
+                      n_threads: int = 8) -> None:
+        """P186：u16 压缩 idx 的 SpMV（列数 ≤65535 时每突触 6B vs 8B）。
+
+        ⚠ 调用方须保证 idx 内容 ≤65535（越界即未定义——Rust 侧零扩展 gather）。
+        数值与 i32 核逐位一致（同一 gather 值集、同一累加顺序）。
+        """
+        n = indptr.size - 1
+        self.lib.phdnet_m2_matvec_u16(
+            indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+            idx_u16.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)),
+            val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(n),
+            x.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(n_threads))
 
     def m2_matvec(self, indptr, idx, val, x, out, n_threads: int = 8) -> None:
         """`out[i] = Σ val[p]·x[idx[p]]`（M2 推理 SpMV，行宽≥32 走 AVX2）。
@@ -449,9 +531,26 @@ class RustKernels:
         ⚠ **不与Python 逐位**（SIMD 改求和顺序）→ 门禁用容差 1e-5。
         ⚠ idx 经边界转 **int32**（P178 原生 i32 落地；列下标在 vocab 范围内
           ≤ 65535，int32 无损；已是 int32 则零拷贝）。
+        P190：列上界 ≤65535 时**自动路由 u16 核**（idx 4B→2B，每突触 6B vs 8B，
+        带宽受限负载实测再快 ~1.4×）——范围用 `_idx_range` 的缓存结果判定
+        （校验层本来就全扫，零额外开销），u16 副本同样走 (id, size) 缓存。
         """
         self._check_csr(indptr, idx, val, x, out)
         n = indptr.size - 1
+        _k = _LIB_HOLDER[0]
+        hi = (_k._idx_range(idx)[1] if _k is not None else int(idx.max())) \
+            if idx.size else 0
+        if (hi < 65536 and getattr(self, "_has_matvec_u16", False)):
+            idx16 = self._idx_u16(idx)
+            self.lib.phdnet_m2_matvec_u16(
+                indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
+                idx16.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)),
+                val.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                ctypes.c_size_t(n),
+                x.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                ctypes.c_size_t(n_threads))
+            return
         idx32 = self._idx_i32(idx)
         self.lib.phdnet_m2_matvec(
             indptr.ctypes.data_as(ctypes.POINTER(ctypes.c_longlong)),
@@ -460,6 +559,23 @@ class RustKernels:
             ctypes.c_size_t(n),
             x.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_size_t(n_threads))
+
+    def fp8_to_int8(self, bits, codes, scale, partial,
+                    n_threads: int = 8) -> None:
+        """fp8(e4m3fn) 位模式 → int8 码本 + per-tensor scale（P189）。
+
+        `bits` uint8 (N,)；`codes` int8 (N,)（就地写）；`scale` f32[1]（就地写）；
+        `partial` f32 (n_threads,) 工作缓冲。数值与
+        `fp8_int8_convert.fp8_to_int8_codes` **逐位一致**（RNE + clamp ±127）。
+        """
+        n = bits.size
+        self.lib.phdnet_fp8_to_int8(
+            bits.ctypes.data_as(ctypes.POINTER(ctypes.c_uint8)),
+            ctypes.c_size_t(n),
+            codes.ctypes.data_as(ctypes.POINTER(ctypes.c_int8)),
+            scale.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            partial.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             ctypes.c_size_t(n_threads))
 
     def m2_add_outer(self, indptr, idx, val, a, b, eta: float,
