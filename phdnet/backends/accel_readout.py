@@ -1171,13 +1171,23 @@ class AccelReadout:
                     else torch.npu.graph(g, stream=stream):
                 self._graph_ht = torch.zeros(self.n_h, device=self.device,
                                              dtype=self._cdtype)
+                # P192：correct / eta 用**设备标量**承载（运行期 fill_ 切换）
+                self._graph_correct_t = torch.zeros((), device=self.device,
+                                                    dtype=torch.int64)
+                self._graph_eta_t = torch.zeros((), device=self.device,
+                                                dtype=torch.float32)
                 y = self._matmul(self._graph_ht)
                 self._graph_out = y
-                p = torch.softmax(y.float(), dim=0)
+                y32 = y.float()
+                # CE 恒等展开：logsumexp(y) − y[correct]（P188 同款，零主机交互）
+                self._graph_nll = (torch.logsumexp(y32, dim=0)
+                                   - y32[self._graph_correct_t]).reshape(())
+                p = torch.softmax(y32, dim=0)
                 dp = p.to(self._cdtype)
-                dp[0] -= 1.0
+                dp[self._graph_correct_t] -= 1.0
                 self.W.addmm_(dp.reshape(-1, 1),
-                              self._graph_ht.reshape(1, -1), alpha=-0.01)
+                              self._graph_ht.reshape(1, -1),
+                              alpha=self._graph_eta_t.neg())
                 if self.w_clip > 0.0:
                     self.W.clamp_(-self.w_clip, self.w_clip)
         except Exception:
@@ -1202,6 +1212,25 @@ class AccelReadout:
         self._cache_ht = self._graph_ht
         self._cache_y = y
         return y
+
+    def _learn_step_graph(self, y32, ht, correct: int, eta: float):
+        """Graph replay 版学习步（P192 --beta）。
+
+        捕获期把 softmax/logsumexp/sub/addmm_/clip 五个 kernel 固化成一张图；
+        运行期只做两件事：
+          ① 把 `correct`（target 索引）与 `eta`（学习率）写进**设备标量**
+             （两次 H2D 标量拷贝，~µs 级）；
+          ② `self._npu_graph.replay()` —— 单次提交，消除 4 次 launch 的
+             Python 下发开销（msprof：launch/queue 是 NPU 空转主因）。
+
+        ⚠ correct 是**设备索引张量**（捕获期 `dp[graph_correct_t] -= 1` 固化了
+        索引引用），运行期更新该张量的值即可切换目标行。
+        ⚠ nll 返回的是设备标量张量（`_graph_nll`），sync_every>1 时照常累积。
+        """
+        self._graph_correct_t.fill_(float(correct))
+        self._graph_eta_t.fill_(float(eta))
+        self._npu_graph.replay()
+        return self._graph_nll
 
     def _train_step_core(self, y32, ht, t32, correct: int, eta: float):
         """读出更新一体步（softmax→nll→addmm_），供 `torch.compile` 融合。
@@ -1321,7 +1350,12 @@ class AccelReadout:
         P80：nll 改用 `cross_entropy` 单 kernel（替代 `softmax + log + 索引`
         的多 kernel 组合，并去掉 1e-12 加项）。数学等价：CE(logits, c) =
         logsumexp(y) − y[c] = −log(softmax(y)[c])。dp 仍由同一份 softmax 得出。
+
+        P192 (--beta)：`_npu_graph_ready` 时走 `_learn_step_graph`（一次 replay
+        完成 softmax→nll→addmm_→clip，消除 4 次 launch 的 Python 下发开销）。
         """
+        if self._npu_graph_ready:
+            return self._learn_step_graph(y32, ht, correct, eta)
         p = torch.softmax(y32, dim=0)
         # nll 先取（必须在改 p 之前）
         # P188：`correct` 本来就在主机侧（target_idx 是 int / target 是 host 数组
@@ -1487,6 +1521,9 @@ class AccelReadout:
     def _lookup_ht(self, h):
         """复用缓存的设备 h（`forward` 刚上传过同一个 h 时省一次 H2D）。
 
+        P192 (--beta)：graph 模式下 ht 固定为 `_graph_ht`（replay 输入），
+        跳过逐元素比较（正确性由 `forward_dev` 每步 `copy_` 保证）。
+
         返回 (设备张量, 是否命中缓存)。h 很小（n_h 个 fp32），逐元素比较成本
         可忽略，换来的是每步少一次 H2D + 一次分配。
 
@@ -1508,6 +1545,10 @@ class AccelReadout:
         修法：用 `_ht_epoch_at_cache` 记录「当前 `_cache_ht` 上传时的 epoch」，
         命中时把 `_ht_epoch` 置回它—— 这样 `_sp_gather` 的判据重新成立。
         """
+        if self._npu_graph_ready:
+            # graph 模式：ht 固定为 `_graph_ht`（`forward_dev` 每步已 copy_）。
+            # 缓存语义由调用方保证（`_cache_h` 与 h 一致），跳过 array_equal。
+            return self._cache_ht, True
         if self._cache_ht is not None and self._cache_h is not None:
             ha = np.ascontiguousarray(h, dtype=np.float32)
             if ha.shape == self._cache_h.shape and np.array_equal(ha, self._cache_h):
