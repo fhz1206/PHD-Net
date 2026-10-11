@@ -426,12 +426,16 @@ def main() -> None:
                          "｜P62 默认 8：服务器实测（2026-09-29 读出 12.9 ms/tok、"
                          "CPU 仅 1.3-3.2/191 核、CS/s 250 万+ = 线程空转等同步）"
                          "确认每步 .item() 是主要暴露点")
+    ap.add_argument("--omp-threads", type=int, default=0,
+                    help="OpenMP线程数（0=自动=min(CPU核数, 32)）。用于BLAS/MKL/OpenMP并行区域。"
+                         "191核建议 16-32；配合numba-threads使用，总并行度不超过物理核数")
+    ap.add_argument("--enable-cpu-parallel", action="store_true", default=False,
+                    help="启用CPU侧更激进的并行（M1-M4b并行、LTM多线程）。"
+                         "需配合 --numba-threads --omp-threads 使用；仅CPU/NPU混合模式有效")
     # ── P192：CPU/NPU 重叠三开关（全部默认关闭，铁律④）─────────────────────
-    ap.add_argument("--cython-kernels", default="off",
+    ap.add_argument("--cython-kernels", default="auto",
                     choices=["off", "auto", "force"],
-                    help="P192：Cython nogil 计算核（默认 off = 现行 numba 路径"
-                         "逐位不变）。auto=加载已编译扩展、否则就地构建，失败"
-                         "静默回落 numba；force=同 auto 但失败 raise（门禁用）。"
+                    help="P192：Cython nogil 计算核（默认 auto = 加载已编译扩展、否则就地构建，失败静默回落 numba；off = 现行 numba 路径逐位不变；force=同 auto 但失败 raise（门禁用）。"
                          "构建：python setup_cython.py build_ext --inplace。"
                          "⚠ 本机无昇腾，收益无昇腾实测；且 Cython(/O2 严格"
                          "IEEE) 与 numba(fastmath=True) 差 ~1 ulp/累加 → 开后"
@@ -746,8 +750,8 @@ def main() -> None:
     cfg.step_profiling = args.step_profiling           # P35 step 分段计时（默认关）
     cfg.torch_compile = args.torch_compile             # P38 kernel 融合（默认开）
     cfg.torch_compile_mode = args.torch_compile_mode   # P44 模式（default=无 cudagraph）
-    # ── P192：CPU/NPU 重叠三开关（默认全关，铁律④）───────────────────────
-    cfg.cython_kernels = args.cython_kernels         # off(默认) | auto | force
+    # P192：CPU/NPU 重叠三开关（默认全关，铁律④）───────────────────────
+    cfg.cython_kernels = args.cython_kernels         # off | auto | force
     cfg.readout_pipeline = args.readout_pipeline     # 读出流水（P192：保留位，未接线）
     if cfg.readout_pipeline:
         # ⚠ fail-fast 而非静默接受：额外流水未实现、NPU 收益未测。
@@ -762,6 +766,9 @@ def main() -> None:
             "docs/PHD-Net_性能评估与迭代方案.md §8.3。"
             "\n真正相关的开关是 --cython-kernels 与 --cann-dispatch。")
     cfg.cann_dispatch = args.cann_dispatch           # CANN 下发流水（默认关）
+    cfg.enable_cpu_parallel = args.enable_cpu_parallel  # CPU侧并行增强
+    cfg.numba_threads = args.numba_threads          # numba并行线程数
+    cfg.omp_threads = args.omp_threads              # OpenMP线程数
     # --beta 解析：逗号或短横线分隔 -> set
     _beta = set(filter(None, args.beta.replace("-", ",").split(",")))
     cfg.beta = _beta                               # NPU 实验性优化阶段集合

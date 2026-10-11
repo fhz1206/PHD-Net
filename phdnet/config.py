@@ -468,6 +468,18 @@ class PHDNetConfig:
     #   → NPU 每步有 4.26 ms 在等 CPU，CPU 每步有 7.83 ms 在等 NPU。
     # 三个开关分别对应三段可并行的工作，**互不重叠、可单独 A/B**：
 
+    # ⑤ CPU 侧并行增强（M1-M4b多线程、LTM多线程、OpenMP/BLAS线程控制）
+    enable_cpu_parallel: bool = True
+    #   `--enable-cpu-parallel` 开启后：M1-M4b并行、LTM多线程（需配合 --numba-threads --omp-threads）。
+    #   仅CPU/NPU混合模式有效；纯CPU路径下仅打印提示。
+    numba_threads: int = 0
+    #   `--numba-threads` numba并行线程数（0=自动=min(CPU核数, 32)；>0指定数值）。
+    #   191核建议 16-32；CPU密集型建议核数×0.5。
+    omp_threads: int = 0
+    #   `--omp-threads` OpenMP线程数（0=自动=min(CPU核数, 32)）。
+    #   用于BLAS/MKL/OpenMP并行区域。191核建议 16-32。
+    #   配合numba-threads使用，总并行度不超过物理核数。
+
     # ① Cython 核（CPU 侧自身提速 + 真放 GIL）
     cython_kernels: str = "auto"        # off | auto(默认) | force
     #   `off` = 完全不碰 Cython，走现行 numba/BLAS 路径（铁律④逐位不变）。

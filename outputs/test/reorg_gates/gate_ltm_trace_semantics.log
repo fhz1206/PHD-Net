@@ -1,11 +1,11 @@
 
 === (a) 惰性迹 vs 急切参考（NUMBA_LTM=True） ===
-  ✗ (a) dict: max|ΔW|<=1e-9 且键集一致  [max|ΔW|=8.832e-02 ratio=0.939770 edges=371]
-  ✗ (a) dict: 未补偿（修复前）可被识别  [ratio_pre=0.8149 max|ΔW|_pre=0.1820]
-  ✗ (a) csr_py: max|ΔW|<=1e-9 且键集一致  [max|ΔW|=8.832e-02 ratio=0.939770 edges=371]
-  ✗ (a) csr_py: 未补偿（修复前）可被识别  [ratio_pre=0.8149 max|ΔW|_pre=0.1820]
-  ✗ (a) csr_batch: max|ΔW|<=1e-9 且键集一致  [max|ΔW|=8.832e-02 ratio=0.939770 edges=371]
-  ✗ (a) csr_batch: 未补偿（修复前）可被识别  [ratio_pre=0.8149 max|ΔW|_pre=0.1820]
+  ✗ (a) dict: max|ΔW|<=1e-9 且键集一致  [max|ΔW|=3.374e-01 ratio=0.811464 edges=371]
+  ✗ (a) dict: 未补偿（修复前）可被识别  [ratio_pre=0.8115 max|ΔW|_pre=0.3374]
+  ✓ (a) csr_py: max|ΔW|<=1e-9 且键集一致  [max|ΔW|=0.000e+00 ratio=1.000000 edges=371]
+  ✗ (a) csr_py: 未补偿（修复前）可被识别  [ratio_pre=1.0000 max|ΔW|_pre=0.0000]
+  ✓ (a) csr_batch: max|ΔW|<=1e-9 且键集一致  [max|ΔW|=0.000e+00 ratio=1.000000 edges=371]
+  ✗ (a) csr_batch: 未补偿（修复前）可被识别  [ratio_pre=1.0000 max|ΔW|_pre=0.0000]
 
 === (b) compact_csr 快照保真 ===
   ✓ (b) dict/float: data 逐位保真且 scale=1.0  [lossy_old_path=True]
@@ -39,12 +39,10 @@
   ✓ (d) forget=150 越界被 fail-fast 拒绝  [ValueError（防止 float 路径权重变负）]
   ✓ (d) forget=200 越界被 fail-fast 拒绝  [ValueError（防止 float 路径权重变负）]
 
-FAIL: 26/32 项通过
+FAIL: 28/32 项通过
   x (a) dict: max|ΔW|<=1e-9 且键集一致
   x (a) dict: 未补偿（修复前）可被识别
-  x (a) csr_py: max|ΔW|<=1e-9 且键集一致
   x (a) csr_py: 未补偿（修复前）可被识别
-  x (a) csr_batch: max|ΔW|<=1e-9 且键集一致
   x (a) csr_batch: 未补偿（修复前）可被识别
 
   [!] 失败**全部集中在 (a) 组** —— 惰性迹 vs 急切参考的对齐问题，

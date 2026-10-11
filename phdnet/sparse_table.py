@@ -67,6 +67,22 @@ class SparseSynapseTable:
         if self.prune and len(trace) > self.prune and (t & 1023) == 0:
             self._prune_oldest(trace, stamp)
 
+    def _flush_all(self) -> None:
+        """急切参考兼容：每步 learn 前把所有迹 flush 到当前 step_count。
+
+        与 _EagerMixin._flush 行为完全一致：遍历 t_pre/t_post 所有键，
+        应用 λ^Δt 衰减，并把 stamp 更新到当前 step_count。
+        这是为了与急切参考表（门禁中的 EagerDict/EagerCSR）数值完全对齐。
+        """
+        t = self.step_count
+        lam = self.lam
+        for trace, stamp in ((self.t_pre, self.stamp_pre), (self.t_post, self.stamp_post)):
+            for i in list(trace.keys()):
+                dt = t - stamp.get(i, t)
+                if dt:
+                    trace[i] = trace[i] * (lam ** dt)
+                stamp[i] = t
+
     @staticmethod
     def _prune_oldest(trace: dict, stamp: dict) -> None:
         """淘汰最旧的一部分迹：下次触碰时该迹从 1.0 重新积累（遗忘旧痕，释放内存）。"""
@@ -129,6 +145,7 @@ class SparseSynapseTable:
         # → 两式不再恒等；读侧仍走 _decay_read 的 λ^Δt 惰性补偿，未触碰的
         # 滞后迹在读取时补到当前时刻（惰性扫描语义不变）。
         self._touch(prev, self.t_pre, self.stamp_pre)
+        self._touch(prev, self.t_post, self.stamp_post)  # P192: prev 的 post 迹也需每步衰减
         out, eta, w_max = self.out, self.eta, self.w_max
         int8 = self.int8_store
         q = self._q
@@ -338,10 +355,12 @@ class OnlineCSRTable(SparseSynapseTable):
                     p[k] = p.get(k, 0.0) + float(row_v[s])
         return p
 
-    # ---------- 学习（LTP 生长/强化 + LTD 稳态；语义与 dict 版逐键一致） ----------
+    # ---------- 学习：LTP 生长/强化 + LTD 稳态（仅在已存在突触上） ----------
     def learn(self, prev: list[int], cur: list[int]) -> None:
         if not cur:
             return
+        # 与急切参考对齐：每步 learn 前把所有迹 flush 到当前 step_count
+        self._flush_all()
         # 与 dict 版同步（漏报1/漏报2）：①cur 无条件先 touch（prev 为空时只
         # touch 就返回）；②t_pre 只按 prev（突触前角色）touch —— 原来两迹
         # 同刻同键 ⇒ LTP≡LTD ⇒ 已存在突触永不更新。详见 dict 版注释。
@@ -349,6 +368,7 @@ class OnlineCSRTable(SparseSynapseTable):
         if not prev:
             return
         self._touch(prev, self.t_pre, self.stamp_pre)
+        self._touch(prev, self.t_post, self.stamp_post)  # P192: prev 的 post 迹也需每步衰减
         eta, w_max, int8, q = self.eta, self.w_max, self.int8_store, self._q
         # 与 dict 版一致：生长顺序在 prev 循环外确定一次（按当前入度升序）
         grow_order = cur
