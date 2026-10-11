@@ -1,6 +1,6 @@
 """全局超参配置 —— 对应架构文档 §8 超参数表。"""
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 
 
 @dataclass
@@ -502,12 +502,13 @@ class PHDNetConfig:
     #   ⚠ **本项目无实测**：这是「官方文档推荐 + 默认无害」，不是结论。
 
     # ④ NPU 实验性优化（Graph Capture + 异步 H2D/D2H + 双缓冲流水线）
-    beta: bool = False
-    #   `--beta` 开启后：稠密/均匀 k 稀疏读出走 NPU Graph Capture（消除 launch 开销）；
+    beta: set[str] = field(default_factory=set)
+    #   `--beta p0,p1` 开启后：稠密/均匀 k 稀疏读出走 NPU Graph Capture（消除 launch 开销）；
     #   双流异步 H2D/D2D（预取下一步 h，后台传输）；双缓冲流水线（CPU 算 M1-M5 与 NPU 算读出并行）。
     #   仅在 --accel npu/cuda/rocm 且 --cython-kernels auto 时生效；CPU 路径不受影响。
     #   ⚠ **实验性功能**：需服务器实测验收（msprof 对比 kernel 数、NPU 利用率、端到端 ms/tok）。
     #   仅保留配置位，具体实现在 accel_readout.py / train.py 中。
+    #   可用值：p0=Graph Capture, p1=Forward+Learn Graph Fusion, p2=Async H2D/D2H, p3=双缓冲流水线
 
 
     def __post_init__(self):

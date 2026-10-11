@@ -37,8 +37,8 @@
 [F] 包装器与性能
   PASS  F1 writelines 也被翻译（修前绕过）  ['training finished\nfinal PPL 123.4\n']
   PASS  F2 install_stream_filter 幂等
-  PASS  F3 纯 ASCII 快速通道 < 10µs（修前 27.97µs）  [0.93µs]
-  PASS  F4 中文行 < 60µs  [11.35µs]
+  PASS  F3 纯 ASCII 快速通道 < 10µs（修前 27.97µs）  [0.45µs]
+  PASS  F4 中文行 < 60µs  [8.14µs]
 
 [G] set_lang 边界
   PASS  G1 默认 en  [en]

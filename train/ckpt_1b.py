@@ -324,7 +324,7 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None,
         "csr_online": bool(getattr(net.ltm.table, "csr_online", False)),
         "int8_store": bool(getattr(net.ltm.table, "int8_store", False)),
         "vocab_size": int(len(lm.tok)), "when": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "cfg": asdict(cfg),
+        "cfg": _cfg_to_jsonable(asdict(cfg)),
         "ckpt_dtype": str(ckpt_dtype or ""),   # P46：位模式压缩的 dtype（加载侧据此解码）
         # 2026-10-07 修复（审计 3）：实际被压缩的数组键——加载侧**逐键**解码，
         # 不再靠 dtype 猜（避免误解 int 索引数组），也覆盖后加入的 ro_W/pc_*。
@@ -342,6 +342,19 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None,
 
 
 # ────────────────────────────── 恢复 ──────────────────────────────
+def _cfg_to_jsonable(d: dict) -> dict:
+    """把 asdict(cfg) 的 set/tuple 字段转成 JSON 可序列化类型（P192 beta）。"""
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, set):
+            out[k] = sorted(v)
+        elif isinstance(v, tuple):
+            out[k] = list(v)
+        else:
+            out[k] = v
+    return out
+
+
 def _decode_bits(name: str, a: np.ndarray, cd: str) -> np.ndarray:
     """按 ckpt_dtype 把存盘位模式无损解回数值。2026-10-07 修复（审计 1）：
     原 load 只对 ro_W 做 view 解码、其余直接数值 cast（fp8 读回 uint8=166、

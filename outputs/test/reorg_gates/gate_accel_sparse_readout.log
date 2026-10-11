@@ -45,7 +45,7 @@ P111 稀疏加速读出对拍：n_h=64 n_out=40 k=8 device=cpu(torch)
 [C4e] 稀疏更新不物化（P138：P28 禁令的稀疏臂漏改）
   PASS  C4e1 稀疏更新不用 `add_(dp*g)`（会物化 25.4 MiB 临时张量）  [已改为 addcmul_]
   PASS  C4e2 用 `addcmul_`（rank-1 AXPY，不物化）
-  PASS  C4e3 addcmul_ 与物化式**容差内一致**（fp32 1 ulp，非逐位）  [max|Δ|=2.384e-07 相对=5.307e-08]
+  PASS  C4e3 addcmul_ 与物化式**容差内一致**（fp32 1 ulp，非逐位）  [max|Δ|=2.384e-07 相对=5.365e-08]
 
 [C4f] gather 精度开关与死代码检查（P145）
   PASS  C4f1 config 里 readout_gather_impl **只定义一次**（P145 清掉 3 份重试残留）  [实际 1 次]
@@ -64,57 +64,57 @@ P111 稀疏加速读出对拍：n_h=64 n_out=40 k=8 device=cpu(torch)
 ==============================================================================
 
 [stderr]
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0] failed while attempting to run meta for aten.addmm_.default
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0] Traceback (most recent call last):
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_subclasses\fake_tensor.py", line 3086, in _dispatch_impl
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     r = func(*args, **kwargs)
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_ops.py", line 875, in __call__
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     return self._op(*args, **kwargs)
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]            ~~~~~~~~^^^^^^^^^^^^^^^^^
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_decomp\decompositions.py", line 5846, in inplace_op
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     out = outplace_op(*args, **kwargs)
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_ops.py", line 1279, in __call__
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     return self._op(*args, **kwargs)
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]            ~~~~~~~~^^^^^^^^^^^^^^^^^
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_prims_common\wrappers.py", line 313, in _fn
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     result = fn(*args, **kwargs)
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_decomp\decompositions.py", line 91, in inner
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     r = f(*tree_map(increase_prec, args), **tree_map(increase_prec, kwargs))
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_decomp\decompositions.py", line 1646, in addmm
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     return out + beta * self
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]            ~~~~^~~~~~~~~~~~~
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_prims_common\wrappers.py", line 313, in _fn
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     result = fn(*args, **kwargs)
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_compile.py", line 54, in inner
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     return disable_fn(*args, **kwargs)
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_dynamo\eval_frame.py", line 1446, in _fn
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     return fn(*args, **kwargs)
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_prims_common\wrappers.py", line 151, in _fn
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     result = fn(**bound.arguments)
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_refs\__init__.py", line 1218, in add
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     a, b = _maybe_broadcast(a, b)
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]            ~~~~~~~~~~~~~~~~^^^^^^
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_refs\__init__.py", line 475, in _maybe_broadcast
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     common_shape = _broadcast_shapes(
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]         *(t.shape if isinstance(t, TensorLike) else None for t in args)
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     )
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_refs\__init__.py", line 463, in _broadcast_shapes
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     torch._check(
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     ~~~~~~~~~~~~^
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]         common_shape[idx] == shape[idx],
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     ...<2 lines>...
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]         f"should be broadcastable to {common_shape}",
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     )
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     ^
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\__init__.py", line 1768, in _check
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     _check_with(RuntimeError, cond, message)  # pyrefly: ignore [bad-argument-type]
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\__init__.py", line 1750, in _check_with
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     raise error_type(message_evaluated)
-E1011 21:58:25.551000 9528 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0] RuntimeError: Attempting to broadcast a dimension of length 8 at -1! Mismatching argument at index 1 had torch.Size([40, 8]); but expected shape should be broadcastable to [40, 64]
-D:\AiModel\train\phdnet\backends\accel_readout.py:1328: RuntimeWarning: torch.compile 融合核执行失败，永久回落 eager（原因：TorchRuntimeError: RuntimeError when making fake tensor call
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0] failed while attempting to run meta for aten.addmm_.default
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0] Traceback (most recent call last):
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_subclasses\fake_tensor.py", line 3086, in _dispatch_impl
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     r = func(*args, **kwargs)
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_ops.py", line 875, in __call__
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     return self._op(*args, **kwargs)
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]            ~~~~~~~~^^^^^^^^^^^^^^^^^
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_decomp\decompositions.py", line 5846, in inplace_op
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     out = outplace_op(*args, **kwargs)
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_ops.py", line 1279, in __call__
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     return self._op(*args, **kwargs)
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]            ~~~~~~~~^^^^^^^^^^^^^^^^^
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_prims_common\wrappers.py", line 313, in _fn
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     result = fn(*args, **kwargs)
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_decomp\decompositions.py", line 91, in inner
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     r = f(*tree_map(increase_prec, args), **tree_map(increase_prec, kwargs))
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_decomp\decompositions.py", line 1646, in addmm
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     return out + beta * self
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]            ~~~~^~~~~~~~~~~~~
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_prims_common\wrappers.py", line 313, in _fn
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     result = fn(*args, **kwargs)
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_compile.py", line 54, in inner
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     return disable_fn(*args, **kwargs)
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_dynamo\eval_frame.py", line 1446, in _fn
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     return fn(*args, **kwargs)
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_prims_common\wrappers.py", line 151, in _fn
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     result = fn(**bound.arguments)
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_refs\__init__.py", line 1218, in add
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     a, b = _maybe_broadcast(a, b)
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]            ~~~~~~~~~~~~~~~~^^^^^^
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_refs\__init__.py", line 475, in _maybe_broadcast
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     common_shape = _broadcast_shapes(
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]         *(t.shape if isinstance(t, TensorLike) else None for t in args)
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     )
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_refs\__init__.py", line 463, in _broadcast_shapes
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     torch._check(
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     ~~~~~~~~~~~~^
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]         common_shape[idx] == shape[idx],
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     ...<2 lines>...
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]         f"should be broadcastable to {common_shape}",
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     )
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     ^
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\__init__.py", line 1768, in _check
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     _check_with(RuntimeError, cond, message)  # pyrefly: ignore [bad-argument-type]
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\__init__.py", line 1750, in _check_with
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     raise error_type(message_evaluated)
+E1011 22:25:11.416000 16048 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0] RuntimeError: Attempting to broadcast a dimension of length 8 at -1! Mismatching argument at index 1 had torch.Size([40, 8]); but expected shape should be broadcastable to [40, 64]
+D:\AiModel\train\phdnet\backends\accel_readout.py:1341: RuntimeWarning: torch.compile 融合核执行失败，永久回落 eager（原因：TorchRuntimeError: RuntimeError when making fake tensor call
   Explanation: Dynamo failed to run FX node with fake tensors: call_method addmm_(*(FakeTensor(..., size=(40, 8)), FakeTensor(..., size=(40, 1)), FakeTensor(..., size=(1, 64))), **{'alpha': -0.15}): got RuntimeError('Attempting to broadcast a dimension of length 8 at -1! Mismatching argument at index 1 had torch.Size([40, 8]); but expected shape should be broadcastable to [40, 64]')
   Hint: Your code may result in an error when running in eager. Please double check that your code doesn't contain a similar error when actually running eager/uncompiled. You can do this by removing the `torch.compile` call, or by using `torch.compiler.set_stance("force_eager")`. 
 
@@ -123,7 +123,7 @@ D:\AiModel\train\phdnet\backends\accel_readout.py:1328: RuntimeWarning: torch.co
  For more details about this graph break, please visit: https://meta-pytorch.github.io/compile-graph-break-site/gb/gb4315.html
 
 from user code:
-   File "D:\AiModel\train\phdnet\backends\accel_readout.py", line 1254, in _train_step_core
+   File "D:\AiModel\train\phdnet\backends\accel_readout.py", line 1267, in _train_step_core
     self.W.addmm_(dp.reshape(-1, 1), ht.reshape(1, -1), alpha=-float(eta))
     ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

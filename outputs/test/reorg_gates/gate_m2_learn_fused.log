@@ -11,7 +11,7 @@ P59：M2 学习侧融合核 —— 逐位对拍 + 计时
   ✓ learn_predictive 逐位一致: up0/up1/dn0/dn1
   ✓ learn_predictive 逐位一致: up0/up1/dn0/dn1
   ✓ learn_predictive 逐位一致: up0/up1/dn0/dn1
-    learn           8 核   0.433 ms | 融合 1 核   0.365 ms | 1.19×
+    learn           8 核   0.439 ms | 融合 1 核   0.352 ms | 1.25×
 
 通过 12/12（另附 learn 多规模计时）
 

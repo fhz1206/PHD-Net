@@ -524,10 +524,11 @@ def main() -> None:
                     help="每 N token 存一次检查点（P36：默认 50,000；"
                          "每次保存含 867 MiB 读出权重 D2H + 写盘，约数秒）")
     ap.add_argument("--log-every", type=int, default=500)
-    ap.add_argument("--beta", action="store_true", default=False,
-                    help="启用 NPU 实验性优化（Graph Capture + 异步 H2D/D2H + 双缓冲流水线）。"
-                         "仅在 --accel npu/cuda/rocm 时生效；CPU 路径不受影响。"
-                         "实验性功能，需配合 --cython-kernels auto 使用。")
+    ap.add_argument("--beta", type=str, default="",
+                    help="启用 NPU 实验性优化阶段（逗号分隔：p0=Graph Capture, "
+                         "p1=Forward+Learn Graph Fusion, p2=Async H2D/D2H, p3=双缓冲流水线）。"
+                         "例：--beta p0,p1 或 --beta p0-p1-p2-p3。仅在 --accel npu/cuda/rocm 时生效；"
+                         "CPU 路径不受影响。实验性功能，需配合 --cython-kernels auto 使用。")
     ap.add_argument("--resume", action="store_true",
                     help="从 models/ 检查点续训（快进至断点，状态由检查点恢复）")
     ap.add_argument("--save-dir", type=Path, default=SAVE_DIR)
@@ -761,7 +762,9 @@ def main() -> None:
             "docs/PHD-Net_性能评估与迭代方案.md §8.3。"
             "\n真正相关的开关是 --cython-kernels 与 --cann-dispatch。")
     cfg.cann_dispatch = args.cann_dispatch           # CANN 下发流水（默认关）
-    cfg.beta = args.beta                               # NPU 实验性优化
+    # --beta 解析：逗号或短横线分隔 -> set
+    _beta = set(filter(None, args.beta.replace("-", ",").split(",")))
+    cfg.beta = _beta                               # NPU 实验性优化阶段集合
 
     # P192 启动自检：**三开关的生效状态必须打进日志**，否则事后无法区分
     # 「开了没效果」与「根本没开」。Cython 走 `phdnet.cykernels` 的唯一入口。
@@ -994,12 +997,13 @@ def main() -> None:
           f" | vocab workers={vw} | data prefetch=multiproc×{dl_w}{'+zh filter' if args.data == 'pretrain_zh' else ''}"
           f" | build time {time.perf_counter() - t0:.1f}s")
     _rb = getattr(lm.net, "_readout_backend", "numba-cpu")
-    # P192 --beta：NPU Graph Capture（仅加速读出 + 稠密/fp32 主路径适用）
-    if getattr(cfg, "beta", False):
+    # P192 --beta：NPU 实验性优化阶段（p0=Graph Capture, p1=Forward+Learn Graph Fusion,
+    # p2=Async H2D/D2H, p3=双缓冲流水线）
+    if cfg.beta:
         _ro = getattr(lm.net, "readout", None)
         if getattr(_ro, "_is_accel", False):
             try:
-                _ok = _ro.enable_npu_graph()
+                _ok = _ro.enable_npu_graph(cfg.beta)
                 print(f"[beta] npu-graph={'ON' if _ok else 'OFF (fallback eager)'} "
                       f"device={getattr(_ro, 'device', '?')}", flush=True)
             except Exception as _e:                          # noqa: BLE001

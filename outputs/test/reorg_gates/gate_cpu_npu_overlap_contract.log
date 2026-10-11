@@ -25,7 +25,7 @@ P192 CPU/NPU overlap contract gate
        （--cython-kernels），两者都不动时序语义。
   PASS G1 readout_pipeline 保留为配置项但**未接线**（显式留白，非半实现）  [config 有字段、model 未消费]
   PASS G2 传 --readout-pipeline 会 fail-fast（不静默接受）  [raise SystemExit → 退出码 1，不假装生效]
-  PASS G3 fail-fast 发生在模型构造之前（无副作用）  [报错行 39182 < 建模行 1000000000]
+  PASS G3 fail-fast 发生在模型构造之前（无副作用）  [报错行 39280 < 建模行 1000000000]
   PASS I1 推理步走 readout(h) 硬 D2H（learn=False → _dev_readout 恒 False）  [model.py:391 判定含 learn → 推理不取设备直通]
   PASS I2 AccelReadout.forward 末尾是硬 D2H（推理的同步点）  [accel_readout.py:1089]
   PASS I3 forward_dev 是零同步版本，且只被训练步调用  [forward_dev 返回设备张量，仅 _dev_readout 分支用]

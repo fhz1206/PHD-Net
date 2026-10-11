@@ -1143,7 +1143,7 @@ class AccelReadout:
     # ════════════════════════════════════════════════════════════════════
     # P192：NPU Graph Capture（--beta 实验性优化；仅稠密路径，稀疏不适用）
     # ════════════════════════════════════════════════════════════════════
-    def enable_npu_graph(self) -> bool:
+    def enable_npu_graph(self, beta: set[str] | None = None) -> bool:
         """尝试捕获 NPU/CUDA 计算图（稠密 + fp32 主路径）。成功返回 True。
 
         ⚠ **仅稠密（`_sparse=False`）适用**：稀疏 gather 的 idx/val 是动态视图，
@@ -1152,7 +1152,19 @@ class AccelReadout:
         ⚠ fp8/int8 码本路径的反量化每步都变 → Graph 固化**会算错**，仅当
         W 是原生浮点（fp32/fp16/bf16）时启用。
         ⚠ torch.npu/cuda 的 graph API 名称不同 → 探测式尝试，失败静默回落。
+
+        beta 阶段控制：
+          p0 = Graph Capture（forward + learn 基础图）
+          p1 = Forward+Learn Graph Fusion（合并为单图 replay）
+          p2 = Async H2D/D2H（预留，后续实现）
+          p3 = 双缓冲流水线（预留，后续实现）
         """
+        # 解析 beta 阶段集合
+        beta = beta or set()
+        do_p0 = "p0" in beta
+        do_p1 = "p1" in beta
+        if not do_p0:
+            return False
         if self._sparse or self._int8 or self._int8_like or \
                 getattr(self, "_fp8_bits", False) or self._fp8_native:
             return False
@@ -1196,6 +1208,7 @@ class AccelReadout:
         self._graph_eta = -0.01
         self._graph_correct = 0
         self._npu_graph_ready = True
+        self._beta_stages = beta  # 记录启用的阶段
         return True
 
     def _forward_dev_graph(self, h):
