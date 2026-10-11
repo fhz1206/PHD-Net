@@ -1,0 +1,49 @@
+==============================================================================
+P120 门禁：CANN 环境治理 + NPU 带宽遥测
+==============================================================================
+
+[A] CANN 环境变量治理
+  PASS  A1a TASK_QUEUE_ENABLE 默认=2（官方训练建议 Level 2，默认为 1）  [实际='2']
+  PASS  A1b COMBINED_ENABLE 默认=1（默认为 0）  [实际='1']
+  PASS  A1c PYTORCH_NPU_ALLOC_CONF 默认 expandable_segments:True  [实际='expandable_segments:True']
+  PASS  A1d MULTI_STREAM_MEMORY_REUSE 默认=1  [实际='1']
+  PASS  A2 CPU_AFFINITY_CONF 默认不设（CPU 非瓶颈，且与 OMP_PROC_BIND 可能打架）  [实际=None]
+  PASS  A3 用户显式设的 TASK_QUEUE_ENABLE=0 **不被覆盖**  [apply 返回 '0'，os.environ 实际 '0']
+  PASS  A3b COMBINED_ENABLE=0 同样不被覆盖  [os.environ 实际 '0']
+  PASS  A4 幂等：重复调用结果一致（第二进程同样得2）
+
+[B] npu-smi -t usages 带宽遥测解析
+  PASS  B1a 解析 Aicore Usage Rate  [=99.0]
+  PASS  B1b **解析 Memory Bandwidth Usage Rate（此前完全缺失的字段）**  [=4.0%]
+  PASS  B1c 解析 Aicpu Usage Rate  [=12.0]
+  PASS  B1d 解析 Ctrlcpu Usage Rate  [=3.0]
+  PASS  B2 合成数据呈现「高 AICore + 低带宽」→ 判读为下发瓶颈  [AICore 99.0% / 带宽 4.0% → host-bound=True]
+  PASS  B3 异常输入不崩（空串）  [→ {}]
+  PASS  B3 异常输入不崩（无冒号）  [→ {}]
+  PASS  B3 异常输入不崩（值非数字）  [→ {}]
+  PASS  B4 `npu-smi info` 表格式**不会**被误解析成带宽利用率  [→ {}]
+
+[C] 遥测日志行包含带宽字段
+  PASS  C1 fmt 打出带宽利用率  [| CPU 2%  proc 1.1核  RAM 2%/2.9GB  NPU/GPU 99%  HBM 0.1/29GB  HBM-bw 4%/vec 2%/aicpu 1%]
+  PASS  C2 缺该字段时不打印空标签（不产生 `HBM-bw --%`）  [| CPU 2%  proc 1.1核  RAM 2%/2.9GB  NPU/GPU 99%  HBM 0.1/29GB]
+
+[D] 零数值影响：这些环境变量不改变训练结果
+  PASS  D1 两种 CANN 环境下逐步 NLL **逐位相同**  [59 步，首步 8.278577]
+  PASS  D2 读出权重指纹逐位相同  [[66040983, 66.04098387897805]]
+
+[E] usages 子命令的调用形态（P127）
+  PASS  E1 usages 带 `-i <id>`（不带则 910B 上 HBM-bw 恒空）
+  PASS  E2 取不到设备号时**打印提示**（不再静默）
+  PASS  E2b usages 带 `-c <chip_id>`（官方样例均为 `-i 0 -c 0`）
+  PASS  E2c 支持 PHD_NPU_ID / PHD_NPU_CHIP_ID 环境变量显式指定
+  PASS  E2d `npu-smi info -l` 解析认 Key-Value 两种格式（`NPU ID : 0` / `NPU : 0`）
+  PASS  E2e 后端串无编号时（accel:auto@npu）假定 card 0 并提示
+  PASS  E3 usages 解析失败时**报一次原始输出**（不再静默失效）
+  PASS  E4 训练入口把设备号传给遥测（`_tel._accel_device`）
+  PASS  E5 设备串→ 数字设备号解析（npu:N / cuda:N）
+
+==============================================================================
+结果：30/30 通过 | 失败 0
+==============================================================================
+
+[stderr]

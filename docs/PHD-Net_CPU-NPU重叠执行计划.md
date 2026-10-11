@@ -1,6 +1,33 @@
 # P114 计划：CPU / NPU 重叠执行
 
-> **状态**：待fhz 拍板后执行。本文是计划，不是已实现的描述。
+> ## ⚠ 状态更新（2026-10-08 / P192）：本文的核心前提**已被代码核对推翻**
+>
+> **本文计划做什么**：在 `step()` 内把「token t 的读出入队」与「token t+1 的 CPU 侧」
+> 跨 token 重叠，把端到端从 12.09 压向 `max(4.26, 7.83) = 7.83 ms`（**理论上限，非实测**）。
+>
+> **P192 核对发现**：训练步的设备路径**本来就没有阻塞式同步** ——
+> `phdnet/model.py:391-395` 走 `forward_dev`（返回**设备张量、零同步**），
+> 训练步把 `y` 置 `None`；`step()` 内唯一的显式 D2H 是 `nll_dev.item()`
+> （`accel_readout.py:1231`），被 `nll_sync_every=8` 门控（P34/P62）。
+> 这正是本文 §方案 A（P117 已实现）在做的事。
+>
+> **因此**：
+> ① 本文设想的跨 token 流水会是**「在已有异步之上叠第二层异步」**，
+>    **收益未测，不能由静态代码断言为零**；
+> ② 「12.09 = 4.26 + 7.83 完全串行」若真存在，成因是**运行时下发/队列背压**
+>    （与 msprof P144 的 `aclnnIndex` 89.3% / `aicore_time=0` / `wait` 6.8× 同源），
+>    **不是**代码里的显式同步 —— 要证实需服务器 msprof，**本机无法验证**；
+> ③ 唯一真跨 token 的 `y` 依赖是 `readout_recurrence`（默认 **False**），
+>    一旦打开它，流水会让 `recur_cue` 拿到**上一步**的 y —— **静默的语义错误**。
+>
+> **结论**：`--readout-pipeline` 已实现为开关但**强制 fail-fast**（传了直接报错退出）。
+> 本文保留作为**决策记录**（说明当初为什么想做、以及为什么现在判定不做），
+> **不再作为待执行计划**。证据：`tests/verifiers/verify_overlap_contract.py`（19/19）。
+> 仍待实测的相邻候选见 `PHD-Net_性能评估与迭代方案.md` §8.3（候选 1/6/7）。
+>
+> ---
+>
+> **原文状态**：待 fhz 拍板后执行。本文是计划，不是已实现的描述。
 > **数据截止**：2026-10-01。全部数字来自 `train_1b_1b_pretrain_20261001-182721.log`
 > （1b 档，昇腾 191 核 + CANN 8.5 + NPU，vocab 51,962，`--readout-conn-k 128`，
 > `--m2-kernel plain`，56k token 稳态）。
@@ -169,7 +196,7 @@ M4b 的 imprint 是**写**（事件驱动），recall 是**读**。当前每步�
 **收益估计**：若能把 7.83 压到 3 ms，端到端 → ~7.3 ms（1.65×），
 **比方案 A 的 1.53×还好，且不碰训练主循环**。
 
-**门禁**：`tools/bench_accel.py`（三档 + 等效带宽 GB/s）+ `verify_accel_sparse` 22 例。
+**门禁**：`tools/bench_accel.py`（三档 + 等效带宽 GB/s）+ `verify_accel_sparse` 39 例。
 
 ---
 
@@ -344,9 +371,11 @@ segments(win): M2_infer 1.28  M1_encode 1.03 ... ms/tok  [500 steps]  ← 区间
 2. 昇腾 gather 对 uint16 索引的支持需实测（可能触发类型转换反而更慢）。
 按当前实测流量 229.15 MiB估算，仅压索引 → 约 179 MiB（省 22%），**不是它说的 96×**。
 
-> **P186 进展**：CPU 侧 u16 压缩 idx 的 Rust SpMV 核**已实现**
-> （`phdnet_rs/src/m2_csr.rs::phdnet_m2_matvec_u16`，AVX2 零扩展 gather，
-> 数值与 i32 核逐位一致，每突触 8B→6B 理论上限 1.33×）；昇腾侧仍待实测。
+> 🔴 **P186 进展【已删除臂历史，不可复现】**：当时 CPU 侧 u16 压缩 idx 的 Rust SpMV 核
+> **已实现**（`phdnet_rs/src/m2_csr.rs::phdnet_m2_matvec_u16`，AVX2 零扩展 gather，
+> 数值与 i32 核逐位一致，每突触 8B→6B 理论上限 1.33×）。
+> **该文件已随 `phdnet_rs/` 于 P188 整体删除** —— u16 压缩 idx 的 CPU 侧实现**当前不存在**，
+> 昇腾侧也一直未实测。⚠ 若要重做 u16 索引，只能在现存 numba /（可选 Cython）核上实现。
 
 ### 5.5 ✅ 值得跟进：数据集 `unk 47%`
 
@@ -373,8 +402,9 @@ P110 已实测）、加 `OMP_PLACES`（已实测慢 8×）、继续调prange 线
 |---|---|---|
 | **C** 读出算子效率 | **开关已就绪，未定论** | `--sparse-fwd-kernel mulsum\|einsum`（P116）。einsum 不物化 (n_out,k) 临时张量（1b 档 **25.37 MiB× 2 = 总流量 22%**），本机 x86 快 ~21% 但**非逐位**且**昇腾未实测** → 默认仍 mulsum，**待服务器 A/B** |
 | **B** M4b imprint 摊销 |❌ **已撤销** | P122 审计证明收益恰为 **0**（learn 调用数 23/22/21/20 是**推迟**不是省；缓冲区尾部对永不 flush）且 **N≥2 污染权重**（dt=0 → 迹不衰减，生产尺寸 max\|Δw\| 达 7~12）。`amortize>1` 现 fail-fast |
-| **A** CPU/NPU 重叠 | ❌ **决定不做** | P117 依赖链核实后收益从 1.53× 降到 **~1.09×**（只有 M1(t+1) 可安全重叠），而前移 learn 段会改**时序学习规则** —— 不值这个风险 |
-| **新增** P120 CANN 环境 | ✅ 已接入 | `TASK_QUEUE_ENABLE=2` 等四项，见 `phdnet/backends/cann_env.py`。P122 修了「import 链导致 numpy/torch 先被导入」的问题 |
+| **A** CPU/NPU 重叠 | ❌ **不做（P192 复核后加强）** | P117 依赖链核实后收益从 1.53× 降到 **~1.09×**（只有 M1(t+1) 可安全重叠），而前移 learn 段会改**时序学习规则** —— 不值这个风险。**⚠ P192 进一步发现：P117 的「纯异步」已让训练步设备路径零同步**，额外流水尚无保持语义的实现或 NPU 收益实测（详见本文开头状态框）。开关 `--readout-pipeline` 已实现为 **fail-fast**（传了报错退出） |
+| **新增** P120 CANN 环境 | ✅ 已接入 | `TASK_QUEUE_ENABLE=2` 等四项，见 `phdnet/backends/cann_env.py`。P122 修了「import 链导致 numpy/torch 先被导入」的问题。**P192 补** `--cann-dispatch`：核对这四项是否真生效（官方列了两个静默失效条件且都不打日志） |
+| **新增** P192 Cython nogil 核 | ✅ 已接入（默认关） | `phdnet/_cykernels.pyx` + `phdnet/cykernels.py`；`--cython-kernels auto`。⚠ 有 fp32 级漂移（~1 ulp）；**昇腾收益无实测** |
 | **新增** P120 带宽遥测 | ✅ 已接入 | `npu-smi info -t usages` →日志 `HBM-bw xx%`。**这是验证「瓶颈在 kernel 下发」这个判断的前提** |
 | **新增** P123 nogil | ⚠ 待 A/B | 20 个 parallel 核全加了 nogil，**本机 x86 实测负收益**（单次慢 7.8%），去留由服务器定 |
 
@@ -396,7 +426,7 @@ P110 已实测）、加 `OMP_PLACES`（已实测慢 8×）、继续调prange 线
 | `HBM-bw` | 含义 | 下一步该做什么 |
 |---|---|---|
 | **低（<30%）** | 瓶颈在 **kernel 下发/调度**（P120 的判断成立） | 继续挖下发开销：`torch.compile` 融合稀疏路径、评估 CANN 自定义融合算子（Ascend C / opbase） |
-| **高（>70%）** | 真 memory-bound（P120 判断**错了**） | 只能降流量：uint16 列索引（**P186 已实现 Rust 核**，昇腾待实测；值不能降 bf16，P110）、分块累加避免临时张量 |
+| **高（>70%）** | 真 memory-bound（P120 判断**错了**） | 只能降流量：uint16 列索引（🔴 **P186 当时的 Rust 核已随 `phdnet_rs/` 于 P188 删除，现无任何实现**；昇腾侧也一直未实测 —— 要做需在 numba/Cython 核上重做）、分块累加避免临时张量（值不能降 bf16，P110） |
 | AICore 反而低 | 算子没跑满 | 查残余同步点（`tools/diag_readout_npu.py` 的静态扫描只覆盖热路径） |
 
 ⚠ **本节所有收益数字都是估算**（基于实测分段耗时 + 理想重叠），**没有任何一条来自实测的重叠实验**。

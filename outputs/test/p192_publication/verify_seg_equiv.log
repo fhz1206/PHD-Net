@@ -1,0 +1,13 @@
+=== O4 正确性对拍（语料 = 前 6000 字符）===
+[OK ] params={'max_len': 6, 'min_count': 5, 'min_entropy': 1.0} | vocab: ref=78 new=78 equal=True | tokenize: len(ref)=5124 len(new)=5124 equal=True
+[OK ] params={'max_len': 4, 'min_count': 3, 'min_entropy': 0.5} | vocab: ref=332 new=332 equal=True | tokenize: len(ref)=4424 len(new)=4424 equal=True
+[OK ] params={'max_len': 6, 'min_count': 8, 'min_entropy': 1.5} | vocab: ref=24 new=24 equal=True | tokenize: len(ref)=5582 len(new)=5582 equal=True
+
+=== O4 加速比实测（语料 = 全文 23504 字符，各 1 次）===
+旧实现构建耗时: 14772.5 ms
+新实现构建耗时: 636.6 ms
+加速比: 23.2×  （目标 ≥ 5×）
+
+对拍结论: 全部一致 ✅
+
+[stderr]

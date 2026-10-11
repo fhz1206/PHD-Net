@@ -1,12 +1,12 @@
 # PHD-Net
 
 **预测编码 × Hebbian/STDP × 双记忆**：一个完全不依赖自注意力的类脑模型架构，逐 token 流式训练，
-Python + numba + PyTorch/昇腾 NPU。
+Python + numba + Cython + PyTorch/昇腾 NPU。
 
 学习规则全部局部化（无反向传播），计算事件驱动稀疏（只触碰活跃通路）。
 **唯一生产训练入口是 `train/train.py`。**
 
-适用范围：仓库根入口文档。数据截止 **2026-10-02**。
+适用范围：仓库根入口文档。数据截止 **2026-10-11（P192 发布复核）**。
 文档分工见 `docs/文档写作规范.md`；本文件不写详细性能数字与历史。
 
 ---
@@ -92,34 +92,39 @@ M4b 突触**不是构建即存在**，而是随经验生长（"fire together, wi
 | 写文档要遵守的规则 | `docs/文档写作规范.md` | — |
 
 **冻结评测基准在 `eval_corpus/`**（仓库根）：`internal_corpus.txt` **27,034 字符**（实测原文长度）、
-`ood_wiki.txt` 远域探针。`docs/*.md` 是文档，**不是数据集**。
+`ood_wiki.txt` 远域探针。`docs/*.md` 不是默认基准语料；本轮按要求另做当前项目文档 PPL 探索测试，
+该结果不与冻结基准混用。协议和完整测量见《性能评估与迭代方案》§10.1。
+
+> **P192 发布边界**：Cython 默认关闭；修复首次构建死锁、跨模型开关泄漏及 force 错误传播。
+> 审计 STDP η 修正改变学习行为，当前 PPL 质量下降已如实记录，历史锚点不覆盖。
+> 本机无 NPU，不宣称昇腾端到端加速；既有 LTM 迹门禁失败仍保留，不能称全部验证/CI 全绿。
 
 ---
 
-## 4. 当前状态摘要（2026-09-30）
+## 4. 当前状态摘要（P192 发布复核）
 
 ### 精度口径
 
-- 读出 `--readout-dtype` 默认 **fp16**。动机是**学习精度**不是访存收益：bf16 半 ULP≈2e-4
-  ≫ 非目标行更新 |dp|≈1e-6 → 更新被舍 → **退化为纯 Hebbian**；fp16 保住更新。
-- **fp8/fp4 在所有加速器上已禁用**：实测昇腾 Ascend910B4 + CANN 8.5 + torch_npu 2.9 对
-  float8_e4m3fn/e5m2 的建张量/cast/matmul 全部 ERR01007，`torch.ops` 零个 fp8 算子；
-  CPU torch 能建张量但无 fp8 addmv → **numba CPU 路径仍可用量化码本**（`--accel cpu --readout-dtype fp8`）。
-- M1 编码器 `--encoder-dtype` 默认 **fp64**（昇腾 aarch64 的 numpy GEMV 病态慢 → 平台自适应走
-  自写 numba 核；x86 走 BLAS）。
+- 读出 `--readout-dtype` 默认 **fp8**（P189，fhz 2026-10-07）：fp8 e4m3fn **位模式（uint8 承载）存储**（1 B/元素，访存收益完整保留）+ fp16 迭代计算。代价是**学习精度**：非目标行更新 |dp|≈1e-6 被粗步长舍掉（fp16 也只剩 26.67% 保留率），这是决策而非缺陷。
+- 动机记录（历史口径，现已被 P189 覆盖）：bf16 半 ULP≈2e-4 ≫ |dp|≈1e-6 → 更新被舍 → **退化为纯 Hebbian**。
+- **910B4 无原生 fp8 算子**：实测昇腾 Ascend910B4 + CANN 8.5 + torch_npu 2.9 对 float8_e4m3fn/e5m2 的建张量/cast/matmul 全部 ERR01007，`torch.ops` 零个 fp8 算子。故 fp8 默认走「位模式存储 + fp16 前向」，需要时可每步 CPU 转 int8 码本走真实 int8 算子（`--fp8-conv`）。
+- M1 编码器：生产 CLI `--encoder-dtype` 默认 **fp32**；库 config 默认 fp64，两个入口需区分。
+  昇腾 aarch64 平台自适应走 numba 核；x86 走 BLAS。
 - 分词 onehot 缓冲 fp16（无损，1B 词表 208→104 KB/步）。
 - 检查点对低精度**存位模式**（uint16/uint8），加载侧按 `meta["ckpt_dtype"]` 无损解码。
 
 ### 性能区间（1B 档，昇腾 191 核 + NPU）
 
-- **20–110 ms/tok**；读出 5.5–7 ms/tok，**访存受限**（960 MB/步 = 读 320 + 读 320 + 写 320，
-  反算有效带宽 137–175 GB/s ≈ HBM 的 9–11%）。
-- **191 核用不满是架构性的**：逐 token 串行 + 每步可并行工作量太小（核内 1→6 线程仅 1.16×）。
+- **20–110 ms/tok**是历史区间（1B 档，昇腾 191 核 + NPU）；现行锚点是 P113 的 **12.09 ms/tok**。
+- 读出**不是访存受限**（旧口径已推翻）：稀疏臂每步触达 229.15 MiB，按 ~800 GB/s 算下界 0.300 ms，
+  实测 7.83 ms 是下界的 **26.1×** → 瓶颈在算子效率与 launch，不在带宽。
+- **191 核用不满是架构性的 + 配置性各半**：逐 token 语义禁止数据并行（架构性）；M2 曾跑单核 6.92 ms
+  （配置性，已由 `--m2-kernel plain` 解决 → 1.28 ms，5.41×）。
 - 完整数字与平台差异铁律见 `docs/PHD-Net_性能评估与迭代方案.md`。
 
 ### 门禁与 CI
 
-- `python tests/run_tests.py fast` = **9/9**（零回归门槛）；专项 verifier **18** 个（`tests/verifiers/`）。
+- `python tests/run_tests.py fast` = **9/9**（零回归门槛）；专项 verifier 见 `ls tests/verifiers/*.py`（**别处别再写死数字**，历史文档已出现 18/22/23/26 四个互相矛盾的值）。
 - 语法门禁：`verify_ms_stream` 会对改动文件 `py_compile` 并真跑 `train.py --help`。
 - CI **两套**：`.gitcode/workflows/ci.yml`、`.github/workflows/ci.yml`（镜像）。
   仓库**没有 Jenkinsfile**。GitHub 侧当前仍红（无日志权限，待 traceback）。
@@ -135,7 +140,9 @@ M4b 突触**不是构建即存在**，而是随经验生长（"fire together, wi
 
 M4b 复测归因 / fp16 下 PPL 是否下降 / 数据集语种（远程分片实测中文仅 2%、unk 47% **是代码问题**，
 与旧记录矛盾）/ 检查点 `compact_csr` 向量化后仍 3.9 s/10 万行 /
-**M6 幂律的真实词频来源**（P124 已接入但用代理值，两阶段方案未实现） / GitHub Actions 仍红。
+**M6 幂律的真实词频来源**（P124 已接入但用代理值，两阶段方案未实现）/
+CPU 侧与 NPU 的空转重叠（方案 A/B/C 已撤销，P122/P125；现行方向见
+`docs/PHD-Net_CPU-NPU重叠执行计划.md` §6）/ GitHub Actions 仍红。
 
 ---
 

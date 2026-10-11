@@ -1,0 +1,16 @@
+P55：learn_softmax target_idx × compiled 2×2 矩阵
+  ✓ target_idx + compiled=False 不崩且返回 float
+  ✓ target_idx + compiled=True 不崩且返回 float
+  ✓ eager：target_idx ≡ onehot 数组（nll 一致）
+  ✓ eager：target_idx ≡ onehot 数组（W 一致）
+  ✓ compiled ≡ eager（target_idx，W 更新一致）
+  ✓ compiled ≡ eager（target_idx，nll 一致）
+  ✓ compiled ≡ eager（target 数组，W 更新一致）
+  ✓ compiled ≡ eager（target 数组，nll 一致）
+  ✓ compiled 连续 10 步多 target 烟测（nll 有限）
+
+通过 9/9
+
+[stderr]
+D:\AiModel\train\phdnet\backends\accel_readout.py:514: RuntimeWarning: torch.compile 不可用，回落 eager：'gbk' codec can't decode byte 0x94 in position 618: illegal multibyte sequence
+  warnings.warn(f"torch.compile 不可用，回落 eager：{e}",

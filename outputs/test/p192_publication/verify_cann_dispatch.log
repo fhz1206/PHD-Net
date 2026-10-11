@@ -1,0 +1,14 @@
+PASS binary/unset effective= True
+PASS explicit zero effective= True
+PASS both zeros effective= True
+PASS JIT enabled effective= False
+PASS JIT unavailable effective= None
+PASS JIT unknown effective= None
+PASS blocking one effective= False
+PASS runtime zero cannot mask blocking one effective= False
+PASS runtime one effective= False
+PASS unknown blocking value effective= None
+PASS known failure plus unknown JIT effective= False
+cann dispatch gate: 11/11 passed (mocked status only)
+
+[stderr]

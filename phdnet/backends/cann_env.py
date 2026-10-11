@@ -197,6 +197,119 @@ def describe_rocm() -> str:
                     for k in _ROCM_VARS)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# **P192：`--cann-dispatch` 的下发流水**核对器
+# ══════════════════════════════════════════════════════════════════════════
+# ⚠⚠ **先说清楚这个开关「不是」什么**，否则它会被误当成一项新优化：
+#
+#   `TASK_QUEUE_ENABLE=2` 与 `COMBINED_ENABLE=1` **P120 起就已经默认开启**
+#   （见上面的 `_CANN_VARS`）。所以 `--cann-dispatch` **不新增任何行为** ——
+#   它做的是把「官方推荐的这两项到底有没有真的生效、有没有被别的设置
+#   作废」**核对出来并打印**。
+#
+# 为什么这件事值得一个开关：
+#   CANN 官方文档明确写了两个会让它**静默失效**的条件，而这两个条件
+#   **都不在环境变量里、也不会打任何日志**：
+#     ① `TASK_QUEUE_ENABLE` **仅在二进制场景生效**（需
+#        `torch_npu.npu.set_compile_mode(jit_compile=False)`）→ 我们若走
+#        JIT 编译路径，它**根本没在起作用**；
+#     ② `ASCEND_LAUNCH_BLOCKING=1`（CANN runtime 层）会**强制关闭**
+#        task_queue → 设了 `TASK_QUEUE_ENABLE=2` 也白设。
+#   注意 ① 与另一个环境变量 `ASCEND_LAUNCH_BLOCKING`（**torch_npu 层**，
+#   同名不同层）是两回事 —— 这正是「设了但没生效」（BUGS A8 族）的典型。
+#   故本函数把它们**逐条核对**出来，而不是假定「设了 = 生效了」。
+
+def verify_dispatch(report: bool = True) -> dict:
+    """核对下发流水相关设置的真实有效性，返回核对结果。
+
+    返回字典：
+      `{"effective": bool|None, "checks": [(名, 通过?, 说明)], "notes": [..]}`
+      · `effective` 为 `None` 表示非昇腾环境，或关键状态未知（不宣称已生效）。
+      · `checks` 里每一项都带说明，供日志直接打印。
+
+    ⚠ 本函数**不修改任何环境变量**（调用点必须早于 `apply_cann_env`，
+      或仅用于事后诊断），因此可以在训练中途安全调用。
+    """
+    checks: list[tuple[str, bool | None, str]] = []
+    notes: list[str] = []
+
+    # 只有在真的能 import torch_npu 时才谈得上「昇腾场景」
+    try:
+        import torch  # noqa: F401
+        _has_torch = True
+    except Exception as e:                            # noqa: BLE001
+        _has_torch = False
+        notes.append(f"torch 不可用（{type(e).__name__}）→ 本项不适用")
+
+    npu_present = any(
+        os.environ.get(k) is not None for k in ("ASCEND_RT_VISIBLE_DEVICES",)
+    ) or os.environ.get("PHDNET_NPU") is not None
+    if not _has_torch:
+        return {"effective": None, "checks": checks, "notes": notes}
+    try:
+        import torch_npu  # noqa: F401
+        _is_npu = True
+    except Exception:                                  # noqa: BLE001
+        _is_npu = False
+
+    if not _is_npu:
+        notes.append("非 torch_npu 环境（无昇腾）→ 下发流水不适用，"
+                     "本项不算失败")
+        return {"effective": None, "checks": checks, "notes": notes}
+
+    # ① task_queue 等级
+    tq = os.environ.get("TASK_QUEUE_ENABLE")
+    checks.append(("TASK_QUEUE_ENABLE", tq == "2",
+                   f"={tq or '(unset)'}（Level 2 = workspace 任务也迁入二级流水；"
+                   f"默认 CANN 值是 1）"))
+
+    # ② **失效条件 1**：ASCEND_LAUNCH_BLOCKING（CANN runtime 层）
+    blocking = {k: os.environ.get(k) for k in
+                ("ASCEND_RT_LAUNCH_BLOCKING", "ASCEND_LAUNCH_BLOCKING")}
+    # Explicit zero is nonblocking; either layer set to one disables queuing.
+    blocked = any(v == "1" for v in blocking.values())
+    known = all(v in (None, "0", "1") for v in blocking.values())
+    nonblocking = False if blocked else (True if known else None)
+    checks.append(("ASCEND_LAUNCH_BLOCKING 非阻塞", nonblocking,
+                   f"{blocking}；置 1 会强制关闭 task_queue；0/未设置不阻塞"))
+
+    # ③ **失效条件 2**：JIT 编译路径（task_queue 仅二进制场景生效）
+    jit_mode = None
+    try:
+        from torch_npu.npu import npuConfig
+        jit_mode = npuConfig.is_jit_compile_false()
+    except Exception as e:                            # noqa: BLE001
+        notes.append(f"无法读取 jit_compile 状态（{type(e).__name__}: {e}）")
+    binary_mode = None if jit_mode is None else bool(jit_mode)
+    checks.append(("二进制场景（jit_compile=False）", binary_mode,
+                   f"is_jit_compile_false()={jit_mode}；官方文档："
+                   f"TASK_QUEUE_ENABLE **仅在二进制场景生效**"))
+
+    # ④ 算子合并下发
+    comb = os.environ.get("COMBINED_ENABLE")
+    checks.append(("COMBINED_ENABLE", comb == "1",
+                   f"={comb or '(unset)'}（非连续算子组合下发，默认 CANN 值 0）"))
+
+    if any(ok is False for _, ok, _ in checks):
+        effective = False
+    elif checks and all(ok is True for _, ok, _ in checks):
+        effective = True
+    else:
+        effective = None
+    if report:
+        print("[cann-dispatch] 下发流水生效核对（不修改任何变量）:",
+              flush=True)
+        for nm, ok, why in checks:
+            flag = 'UNKNOWN' if ok is None else ('OK' if ok else 'WARN')
+            print(f"  {flag} {nm}: {why}", flush=True)
+        for nt in notes:
+            print(f"  -- {nt}", flush=True)
+        print(f"  => effective={effective}"
+              + ("（⚠ 有项未满足，task_queue 可能未真正生效）"
+                 if effective is False else ""), flush=True)
+    return {"effective": effective, "checks": checks, "notes": notes}
+
+
 if __name__ == "__main__":  # pragma: no cover
     apply_cann_env()
     print(describe())

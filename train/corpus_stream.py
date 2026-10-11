@@ -166,7 +166,11 @@ class PrefetchChars:
         # 解码核在 W 个进程间分摊：W × decode_threads ≈ cpu（避免超订）
         self._decode_threads = max(1, cpu // w)
 
-        self._q: "mp.Queue" = mp.Queue(maxsize=depth)
+        # 2026-10-07 修复（审计 4）：depth<=0（如 train.py 缺省 0）原本建出
+        # maxsize=0 的**无界**队列，与日志「depth=8192」不符 → 钳到 8192，
+        # 队列永远有界（背压成立，不会无界吃内存）。
+        self._depth = int(depth) if depth and int(depth) > 0 else 8192
+        self._q: "mp.Queue" = mp.Queue(maxsize=self._depth)
         self._procs = []
         bounds = [self._n_files * i // w for i in range(w + 1)]   # 连续均分
         for i in range(w):
@@ -250,7 +254,8 @@ class StreamingTokenizer:
     """
 
     def __init__(self, seg, chunks: Iterable[str],
-                 assistant_marker: str | None = None):
+                 assistant_marker: str | None = None,
+                 user_marker: str = "用户："):
         """`assistant_marker`（P26，如 "助手："）：启用 **SFT 回复掩码**。
 
         开启后 `__next__` 返回 `(token, trainable)`：
@@ -267,10 +272,16 @@ class StreamingTokenizer:
         self.buf = ""             # 分词缓冲
         self.src_done = False     # 源耗尽标志
         self.assistant_marker = assistant_marker
-        # P26：用户侧标记（多轮对话里用于**退出**可训练段）
-        self.user_marker = "用户："
+        # 2026-10-07 修复（审计 2）：原 :271 硬编码「用户：」→ 参数化 user_marker
+        # （默认值不变；英文语料可传 "User: "，多语言数据不再被中文标记绑死）。
+        self.user_marker = user_marker or "用户："
         self._mode = False         # 当前是否处于助手回复段（计损失）
-        self._pending = 0          # 正在匹配的 marker 剩余字符数
+        # 2026-10-07 修复（审计 2）：pending 原来只存「剩余字符数」并对 token
+        # 无条件减法 → marker 长于 seg.max_len 时越减越负（实测 -20）、
+        # :318 失配分支不可达、算术凑 0 会误切模式（marker 未出现却开学习）。
+        # 现在存「已消费字符数 + 所属 marker」，消费前按 marker 实际前缀校验。
+        self._pending = 0          # 已消费的 marker 字符数，钳制在 [0, len(marker)]
+        self._pending_mk: str | None = None   # 正在匹配哪个 marker（None=未在匹配）
         self._pending_mode = False # 该 marker 匹配完成后的模式
 
     def _ensure(self, need: int) -> bool:
@@ -308,26 +319,65 @@ class StreamingTokenizer:
             return tok
         buf = self.buf
         # ① 正处于某个 marker 的字符序列中（marker 跨 token 边界）
+        # 2026-10-07 修复（审计 2）：改按 marker 的**实际前缀内容**校验——原实现
+        # 用 buf.startswith(tok)，而 tok 恒为 buf[:L] → 条件恒真、:318 失配分支
+        # 不可达，且 pending 对 token 长度无条件减法会在 marker 长于 seg.max_len
+        # 时越减越负（实测 -20 → 纯回复文本 trainable=0），算术凑 0 还会误切模式
+        # （marker 从未出现却开学习）。现在 pending 钳制在 [0, len(marker)]。
         if self._pending:
-            if buf.startswith(tok):
-                self._pending -= len(tok)
-                if self._pending == 0:
-                    self._mode = self._pending_mode      # marker 消费完 → 切模式
-                self.buf = buf[len(tok):]
-                return (tok, False)                     # marker 本身不计损失
-            self._pending = 0                           # 失配 → 回到普通判定
-        # ② 待消费的 buf 前缀是否命中某个 marker（完整或前缀）
+            mk = self._pending_mk
+            if not mk:
+                self._pending = 0                        # 陈旧 pending（无 marker 记录）→ 复位
+            else:
+                p = min(max(self._pending, 0), len(mk))  # 钳制到 [0, len(marker)]
+                rest = mk[p:]                            # marker 还差的字符
+                if rest.startswith(tok):                 # token 完全落在 marker 内
+                    self._pending = p + len(tok)
+                    self.buf = buf[len(tok):]
+                    if self._pending >= len(mk):         # 恰好消费完 → 切模式
+                        self._mode = self._pending_mode
+                        self._pending = 0
+                        self._pending_mk = None
+                    return (tok, False)                  # marker 字符不计损失
+                if tok.startswith(rest):                 # marker 在本 token 内部结束
+                    self._pending = 0
+                    self._pending_mk = None
+                    self._mode = self._pending_mode      # marker 完成 → 立即切模式
+                    self.buf = buf[len(tok):]
+                    return (tok, False)                  # token 含 marker 尾巴 → 本步不计损失
+                self._pending = 0                        # 失配 → 复位（审计 2：现已真正可达）
+                self._pending_mk = None
+                # 复位后落到 ②/③ 对**同一 buf** 重新判定（不预先消费）
+        # ② 待消费的 token 是否命中某个 marker（完整或前缀）
+        # 2026-10-07 修复（审计 2）：以 token 本身判定并只消费 token——原 head =
+        # buf[:len(mk)] 会一次吞掉至多 len(mk) 字符，越过分词边界。
         for mk, mode in ((self.assistant_marker, True),
                          (self.user_marker, False)):
-            head = buf[:len(mk)]
-            if mk.startswith(head):
-                self.buf = buf[len(head):]
-                if len(head) == len(mk):
-                    self._mode = mode                    # 完整命中 → 立即切换
-                    return (head, False)                 # marker 字符不计损失
-                self._pending = len(mk) - len(head)      # 部分命中 → 待续
+            if not mk:
+                continue
+            if tok == mk:                                # 完整命中 → 立即切换
+                self.buf = buf[len(tok):]
+                self._mode = mode
+                return (tok, False)
+            if len(tok) < len(mk) and mk.startswith(tok):  # 部分命中 → 待续
+                self.buf = buf[len(tok):]
+                self._pending = len(tok)                 # 已消费前缀长度 ∈ (0, len(mk))
+                self._pending_mk = mk
                 self._pending_mode = mode
-                return (head, False)
+                return (tok, False)
+            if tok.startswith(mk) and len(tok) > len(mk):
+                # ── 返工 4：贪心 token **整段吞下 marker 且更长** ────────────
+                #   例：vocab 里有 "Assistant: 你好"（13 > len("Assistant: ")=11）。
+                #   旧版只有 `tok == mk` 与 `len(tok) < len(mk)` 两条 → 本例
+                #   落进分支③，marker **整个丢失**、模式永不切换、助手回复全程
+                #   不计损失（静默零学习）。现在：**切模式** + 按 marker 长度
+                #   处理可训练位（token 超出 marker 的 len(tok)-len(mk) 个字符
+                #   属于新模式的正文 → 按新模式计损失）。
+                #   ⚠ 无 marker 语料走不到这里：函数首部 `if not
+                #   self.assistant_marker` 已原样返回，路径逐字节不变。
+                self.buf = buf[len(tok):]
+                self._mode = mode
+                return (tok, mode)
         # ③ 普通 token：按当前模式
         self.buf = buf[len(tok):]
         return (tok, self._mode)

@@ -44,11 +44,18 @@ if __name__ == "__main__":
         print(f"  [{k}] {GUIDANCE[k]}")
 
     if "--torch" in sys.argv:
-        print("\n--- 强制 torch 后端等价性自检 ---")
-        from phdnet.backends.accel_readout import AccelReadout  # P30
+        print("\n--- torch 栈现状（P30 后）---")
         dev = select_backend("torch").device
-        ok = selftest_torch(device=dev)
-        print(f"  device={dev}: {'✓ torch 后端与 numpy 参考一致' if ok else '✗ 不一致/不可用'}")
+        # ⚠ 2026-10-07 修复：此处原为 `selftest_torch(device=dev)`，但该函数已随
+        #   P30 的旧 torch 栈一起删除（phdnet/backends/__init__.py 有记录），
+        #   本文件也从未 import 它 → `--torch` 必然 NameError。
+        #   现改为如实说明等价性对拍的**新归属**（读出加速臂）。
+        print(f"  device={dev}")
+        print("  · 旧 TorchSTDPCore / TorchReadout / selftest_torch 已随 P30 删除，")
+        print("    STDP 仍只在 numba CPU 路径上（P30 定案：机制状态保不住就不迁）。")
+        print("  · 读出加速臂的等价性对拍改由以下门禁承担：")
+        print("      python tests/verifiers/verify_accel_readout.py")
+        print("      python tests/verifiers/verify_accel_readout_p55.py")
 
     print("\n提示：本机无加速器时（如当前 Windows CPU 环境），昇腾/ROCm 路径"
           "仅完成代码适配与接口探测，需在有硬件的环境运行 backend_probe.py 完成实测验证。")

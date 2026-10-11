@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 40
     strategy:
       matrix:
-        python-version: ["3.12"]
+        python-version: ["3.14"]
     steps:
       - uses: actions/checkout@v4
 
@@ -23,11 +23,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # 版本约束：最新 numpy 2.3+ 与部分 numba 组合会 import 失败（首次 CI 运行的
-          # 诊断证实 import 阶段即崩）→ 锁定 numba 兼容窗口
-          pip install "numpy<2.3" "numba>=0.61" pyarrow psutil
-          # CPU 版 torch：否则 t_torch_equivalence / t_torch_model_smoke 会以「未安装
-          # torch」被跳过，两个覆盖点在 CI 上从未真正执行。CPU 轮子约 200MB。
+          # Python 3.14：使用本地验证过的 numpy/numba 配对，不再锁旧 numpy<2.3。
+          python -m pip install "numpy==2.5.2" "numba==0.67.0" "Cython==3.3.0" setuptools pyarrow psutil
+          python -c "import sys; assert sys.version_info[:2] == (3, 14), sys.version"
+          python setup_cython.py build_ext --inplace
+          python -c "from phdnet.cykernels import get_kernels; assert get_kernels('force') is not None"
+          # CPU torch 用于现存后端探测与读出对拍；不代表 CUDA/NPU 覆盖。
           pip install torch --index-url https://download.pytorch.org/whl/cpu
 
       - name: fast 回归（9 项，零回归门槛）
@@ -38,6 +39,21 @@ jobs:
           python tests/verifiers/verify_seg_equiv.py
           python tests/verifiers/verify_vocab_parallel.py
           python tests/verifiers/verify_parallel_consistency.py
+
+      - name: Cython 与审计修复门禁
+        run: |
+          python tests/verifiers/verify_cython_loader.py
+          python tests/verifiers/verify_cykernels.py
+          python tests/verifiers/verify_cython_switch.py
+          python tests/verifiers/verify_stdp_parity.py
+          python tests/verifiers/verify_eval_readonly.py
+          python tests/verifiers/verify_wm_modulator.py
+          python tests/verifiers/verify_perf_no_regression.py
+          python tests/verifiers/verify_cann_dispatch.py
+          python tests/verifiers/verify_overlap_contract.py
+          python -m compileall -q phdnet train tools
+          python train/train.py --help
+          python train/infer.py --help
 
       - name: 诊断（对拍失败时打印环境与重跑 traceback）
         if: failure()
@@ -62,11 +78,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Install torch (CPU) + deps
         run: |
           python -m pip install --upgrade pip
-          pip install torch "numpy<2.3" --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+          # numba/psutil 必装：本 job 现在会跑 verify_accel_readout.py 与
+          # t_backend_probe，两者都会 import phdnet 包 → phdnet/__init__ →
+          # model → bigltm → ltm_kernel **无条件需要 numba**（缺了就是
+          # ImportError，与 torch 无关）。原步骤漏装。
+          python -m pip install "numpy==2.5.2" "numba==0.67.0" psutil
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: Device probe + readout bench (CPU 参考)
         run: python tools/bench_accel.py --steps 20
 
@@ -78,13 +99,17 @@ jobs:
           python -c "import numpy; print('numpy', numpy.__version__)" || true
           echo '--- 重跑 bench_accel（完整 traceback）---'
           python tools/bench_accel.py --steps 20; echo "exit=$?"
-      - name: STDP torch 等价性自检
-        run: python -c "from phdnet.torch_backend import selftest_torch; assert selftest_torch('cpu'); print('selftest PASS')"
-      - name: 显式执行两个 torch 回归检查（缺 torch 会在此硬失败）
+      # ⚠ 2026-10-07 修复：原步骤引用的 phdnet.torch_backend.selftest_torch
+      #   与 checks_backend.t_torch_equivalence / t_torch_model_smoke **都不存在**
+      #   （torch 栈已随 P30 删除、checks_backend 只剩 t_backend_probe）→
+      #   本 job 必然 ImportError/ModuleNotFoundError。换成实际存在的等价性门禁。
+      - name: 读出加速臂等价性（P30 后 torch 栈对拍的新归属）
+        run: python tests/verifiers/verify_accel_readout.py
+      - name: 后端探测检查（checks_backend 现存入口；缺 torch 会在此硬失败）
         run: |
           python -c "import torch; print('torch', torch.__version__)"
           python -c "
           import sys; sys.path.insert(0, 'tests')
-          from checks_backend import t_torch_equivalence, t_torch_model_smoke
-          t_torch_equivalence(); t_torch_model_smoke()
-          print('torch checks PASS')"
+          from checks_backend import t_backend_probe
+          t_backend_probe()
+          print('backend probe PASS')"

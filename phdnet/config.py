@@ -1,6 +1,6 @@
 """全局超参配置 —— 对应架构文档 §8 超参数表。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 
 @dataclass
@@ -199,25 +199,17 @@ class PHDNetConfig:
     # 5 次独立核调用。**昇腾 aarch64 实测融合核段 2.4 → 20-27 ms/tok**（疑似
     # prange + fastmath 在该平台退化）→ 保留开关做 A/B，不擅自改默认。
     pc_fused_kernel: bool | str = True   # True/"fused" / "serial" / False
-    # P181：M2 算子后端 —— **"rust"（默认）** / "numpy"（numba 参照，保留）。
-    # ⚠ **默认改Rust**（fhz 指示）：P179 修掉 Python 校验层全量 idx 扫描后，
-    #   Rust 核与 numba 已持平（单线程 Rust 反超 ~1.4x），且 Rust 是昇腾 hybrid
-    #   栈的必需路径。Rust 库不可用时**自动回落 numpy 并记原因**
-    #   （`SparsePCStack.m2_backend_reason`），不中断训练。
-    # ⚠ **与 `pc_fused_kernel=True` 互斥**：融合核是 numba njit，内部不能
-    #   ctypes 分派 → `fused=True` 时 Rust **不会生效**（`rust_effective=False`）。
-    #   Rust 真正生效需 `pc_fused_kernel=False`。
-    m2_backend: str = "rust"             # "rust"（默认） | "numpy"
-    # P181：Rust 侧线程数（**默认 8**）。0 = 按 CPU 核自动取 min(8, 核-1)。
-    rs_threads: int = 8
-    # P182：Rust 融合核的**规模门限**（融合路径 nnz 低于它就走 numba）。
-    # 实测交叉点 nnz≈52万（4096×128 时 Rust 快 1.14x，2048×96 时输 0.34x）。
-    # 0 = 强制全程 Rust；极大值 = 强制全程 numba（对拍用）。
-    rs_fused_min_nnz: int = 393216
+    # ⚠⚠ 2026-10-07（fhz 指令「删除 rust 版本，默认全部改回 python」）：
+    #   M2 算子后端**只有 numba/numpy 一条路**，原 `m2_backend` / `rs_threads`/
+    #   `rs_fused_min_nnz` 三个字段与 phdnet_rs/ 目录一并删除（历史：P181 曾把
+    #   默认改成 "rust"，P182 放开 fused 路径；现整臂移除）。
+    #   老检查点的 meta["cfg"] 若仍带这三个键，用 `PHDNetConfig.from_ckpt()`
+    #   重建可自动忽略（见本类末尾）。
     # P84：fp8 forward 副本的重建间隔（步）——量化成本摊到 N 步；N 越大越省，
     # 但 forward 用的副本越旧（默认 8）。
     fp8_refresh: int = 8
-    # P189/P191：fp8 位模式 → int8 码本的 CPU 转换核（torch/nogil/rust）。
+    # P189/P191：fp8 位模式 → int8 码本的 CPU 转换核（**torch**/nogil；
+    # 2026-10-07 起 rust 分支已随 rust 版本一并删除，只剩这两个实现）。
     # ⚠ 必须是 PHDNetConfig 的正式字段：train.py 会动态设 cfg.fp8_conv，
     #   word_lm.py 用 cfg.__dict__ 重建 config 时动态属性会变成意外关键字
     #   → TypeError（2026-10-07 服务器实测炸过）。
@@ -310,7 +302,13 @@ class PHDNetConfig:
     #   → 低精度下「只保留目标行提升」，学习规则退化为纯 Hebbian。
     #   P105 曾把默认设为 fp16 并认为「保住非目标行更新」，P110 实测推翻：
     #   fp16 只比 bf16 好、并未解决问题（保留率仍 <100%）。
-    # 默认 **fp32**（fhz 2026-10-01 授权改回）：语义正确优先于带宽收益。
+    # 默认 **fp8**（P189，fhz 2026-10-07「模型 fp8、迭代 fp16」）：存储走 fp8
+    #   e4m3fn **位模式（uint8 承载）**，迭代走 **fp16** 域后 RNE cast 回位模式。
+    #   ⚠🔴 2026-10-08（P192）更正：本行原写「默认 **fp32**（fhz 2026-10-01
+    #   授权改回）：语义正确优先于带宽收益」，但下方字段实际是
+    #   `readout_dtype: str = "fp8"` —— **同一段注释内部自相矛盾**，且这正是
+    #   P188 那轮被误导的同类问题（见本字段下方 2026-10-07 的更正注释）。
+    #   **fp32 仍可显式指定**（要精确 p − t 语义时），P110 的反证依然有效。
     # 低精度仍可显式指定（带宽敏感且接受 Hebbian 近似时）。
     # P147（fhz 2026-10-02 指令）：「模型本体 fp8，其余全部 fp16」。
     # ⚠⚠ **P110 的实测反证必须留在案**（它不阻止你的决定，但要如实记录）：
@@ -324,11 +322,17 @@ class PHDNetConfig:
     # fp8 的算子可用性由 `phdnet/backends/fp8_capability.py` **运行时探测**
     #   （原生 fp8 / 只有 int8→自动转 / 都无→报错），不再硬编码禁用（P86 解除）。
     readout_dtype: str = "fp8"
-    # P61（fhz 2026-09-29「迭代默认 fp32，模型默认 bf16」）：M1 稀疏编码器权重
-    # 的存储 dtype。**迭代量恒 fp32**（GEMV 上采样后算）。默认 fp32 而非 bf16
-    # ——numpy/BLAS 路径下低精度存储每次都要付上采样转换（8.4 MB 读 + 16.8 MB
-    # 写 + 16.8 MB 读），实测比 fp32 直接 GEMV 更慢；bf16 语义在读出侧已由
-    # `readout_dtype`（默认 bf16，NPU 原生）落地。`bf16`/`fp16` 可显式指定。
+    # M1 稀疏编码器权重的**存储** dtype。
+    # ⚠ 2026-10-07 更正注释（原注释写「默认 fp32」、还说 readout_dtype 默认 bf16，
+    #   **两处都与代码不符**，P188 那轮就是被它误导的）：
+    #   · 本字段自 P75 起**默认 fp64**：`SparseEncoder._w_fp32` 对 fp32/fp64 都
+    #     直接返回原权重 → fp64 时 GEMV 也留在 fp64，`s0` 因此是 **fp64**。
+    #     要「迭代量恒 fp32」的语义请显式 `encoder_dtype="fp32"`。
+    #   · fp64 的 `s0` 进 Rust M2 核必须在边界 cast 到 f32 —— 处理见
+    #     `SparsePCStack._mv / _add_outer / _oja`（`_mv` 于 2026-10-07 补齐，
+    #     此前它是唯一漏掉的分派点，非融合路径一进 Rust 就 ValueError）。
+    #   · 读出侧精度由 `readout_dtype`（**默认 fp8**，P189「精度改 fp8、迭代 fp16」）
+    #     决定，与本字段无关；`bf16`/`fp16` 可显式指定。
     encoder_dtype: str = "fp64"
     # P19 读出加速器：auto=有加速器就用（昇腾→ROCm→CUDA→DirectML），否则回落
     # numba CPU 原路径（逐位不变）；cpu/off/numba = 强制原路径；
@@ -420,10 +424,14 @@ class PHDNetConfig:
     # CPU 仅 1.3–3.2/191 核、CS/s 250 万–600 万（线程空转等同步）——每步
     # .item() 把 NPU 延迟完全暴露给 CPU，流水线无法重叠。
     nll_sync_every: int = 8
-    # P35：step 分段计时（诊断 CPU 侧 11.4 ms/tok 的分布）。默认关（零开销）；
-    # 开启后 train.py 日志按段打印累计耗时（M1 编码/M2 推理/M3 预测/M5 调制/
-    # M4a WM/M4b LTM/PC 学习/STDP 学习/读出）。
-    step_profiling: bool = False
+    # P35：step 分段计时（诊断 CPU 侧 11.4 ms/tok 的分布）。
+    # ⚠ 2026-10-07 **默认改为 True**（fhz 指令「默认开启 step 详细用时查看」）：
+    #   开启后 train.py 日志按段打印累计耗时（M1 编码/M2 推理/M3 预测/M5 调制/
+    #   M4a WM/M4b LTM/PC 学习/STDP 学习/读出）+ 滑窗口径 segments(win)。
+    #   开销：每个段起点一次 perf_counter（~0.2 µs）+ 每步一次计数，相对
+    #   ms/tok 量级可忽略；要关用 --no-step-profiling。
+    #   这是「昇腾提速」那轮的观测前提：没有分段耗时就没法定位瓶颈在哪一段。
+    step_profiling: bool = True
     # P38/P41（fhz 指令默认开）：torch.compile 融合加速读出的 softmax/nll/
     # addmm_ 小 kernel（CANN 上 launch 开销 ~50-200μs/kernel，每步 5 个）。
     # 失败自动回落 eager 并告警；昇腾实测进行中。
@@ -451,6 +459,48 @@ class PHDNetConfig:
                                     #   低精度 = 原生位型码本存储 + 查表反量化计算
                                     #   （softmax/NLL 保持 fp64 主回路）
 
+    # ══════════════════════════════════════════════════════════════════
+    # **P192：CPU/NPU 重叠（降 NPU 空转）** —— 三个开关，全部**默认关闭**
+    # ══════════════════════════════════════════════════════════════════
+    # 背景（性能唯一出处：`docs/PHD-Net_性能评估与迭代方案.md` §2.2）：
+    #   1b 档 / 昇腾 191 核 + NPU，P113 实测：端到端 12.09 ms/tok
+    #   = NPU 读出 7.83 + CPU 侧 4.26，**逐位吻合** → 完全串行，无隐含重叠。
+    #   → NPU 每步有 4.26 ms 在等 CPU，CPU 每步有 7.83 ms 在等 NPU。
+    # 三个开关分别对应三段可并行的工作，**互不重叠、可单独 A/B**：
+
+    # ① Cython 核（CPU 侧自身提速 + 真放 GIL）
+    cython_kernels: str = "off"        # off(默认) | auto | force
+    #   `off` = 完全不碰 Cython，走现行 numba/BLAS 路径（铁律④逐位不变）。
+    #   `auto`= 加载已编译扩展，否则就地构建；失败**静默回落** numba。
+    #   `force`= 同 auto，但失败** raise**（门禁/CI 用，逼人面对问题）。
+    # ⚠ **诚实边界**：本机（x86 Windows）**无昇腾/NPU**，故本项目
+    #   **没有任何 Cython 核的昇腾端到端收益实测**。已做的只有
+    #   ① 逐位/容差等价门禁（`tests/verifiers/verify_cykernels.py`，41/41）
+    #   ② 本机微基准。收益必须等服务器 A/B，见性能文档 §八。
+    # ⚠ **数值漂移**：Cython 用 MSVC `/O2`（严格 IEEE，无 FMA 收缩），
+    #   M2 numba 核使用 `fastmath=True`；M3 则还存在 fp64/fp32 中间值差异 → 开此开关后
+    #   训练轨迹会与 `off` 有 **fp32 级微小漂移**（~1 ulp/次累加，实测
+    #   max|d| ~1e-8 ~ 1e-5 视规模）。**不得**称为「逐位等价」。
+
+    # ② 保留的停用开关：True 时 fail-fast，未实现跨 token 读出流水。
+    readout_pipeline: bool = False
+    #   训练已有 forward_dev 异步提交；不能仅凭静态代码断言额外流水收益为零。
+    #   `_prev_rate` 是主干活动率，非读出输出；时序学习/记忆状态必须严格保序。
+    #   门禁 tests/verifiers/verify_overlap_contract.py 检查停用契约；
+    #   本机无 NPU，尚无保持语义的流水实现及服务器端到端收益实测。
+
+    # ③ CANN 侧下发流水（官方 task_queue 二级流水 + 算子合并下发）
+    cann_dispatch: bool = False
+    #   设 `TASK_QUEUE_ENABLE=2`（官方：把 workspace 任务也迁到二级流水，
+    #   进一步掩盖 Host 侧下发耗时）+ `COMBINED_ENABLE=1`（非连续算子合并
+    #   下发，减少 kernel 启动次数）。依据：`phdnet/backends/cann_env.py`
+    #   P120 已默认开启这两项；本开关只核对设置与已知失效条件，不修改环境。
+    #   ⚠ `TASK_QUEUE_ENABLE=2` **仅在二进制场景**生效
+    #     （`set_compile_mode(jit_compile=False)`），且 `ASCEND_LAUNCH_BLOCKING=1`
+    #     时被强制失效；Level 2 因内存并发会抬高 NPU 内存峰值（我们 HBM
+    #     0.1/29 GB，无风险）。
+    #   ⚠ **本项目无实测**：这是「官方文档推荐 + 默认无害」，不是结论。
+
 
     def __post_init__(self):
         # 2026-09-28 修复：k_sparse > n_sdr 时 SparseEncoder 的 argpartition kth
@@ -465,3 +515,25 @@ class PHDNetConfig:
             raise ValueError(
                 "sparse_conn=False 已不可用（fhz 2026-09-28 删除稠密 PC 功能）："
                 "主干唯一实现为 SparsePCStack（CSR 稀疏图），请使用默认 True。")
+        # P192：fail-fast 校验新开关的取值域（**不做静默纠正** ——
+        # 与 sparse_conn 同纪律：写了非法值要立刻报错，而不是悄悄换个语义）。
+        if self.cython_kernels not in ("off", "auto", "force"):
+            raise ValueError(
+                f"cython_kernels={self.cython_kernels!r} 非法；"
+                "可用 off(默认) / auto / force。")
+
+    @classmethod
+    def from_ckpt(cls, d: dict) -> "PHDNetConfig":
+        """从检查点 `meta["cfg"]`（`asdict(cfg)` 的快照）重建配置。
+
+        ⚠ 2026-10-07 起配置**删了字段**（`m2_backend` / `rs_threads` /
+        `rs_fused_min_nnz`，随 rust 版本移除）。老检查点里仍带着这些键，
+        直接 `PHDNetConfig(**meta["cfg"])` 会 `TypeError` → 续训/推理**一加载
+        就崩**（与 config.py 记录的 fp8_conv 那次同族）。故加载统一走本方法：
+        **只保留当前仍存在的字段**，丢弃的键打印一行（可追溯，不静默）。
+        """
+        known = {f.name for f in fields(cls)}
+        dropped = sorted(k for k in d if k not in known)
+        if dropped:
+            print(f"[cfg] 忽略检查点中已删除的配置字段：{dropped}", flush=True)
+        return cls(**{k: v for k, v in d.items() if k in known})

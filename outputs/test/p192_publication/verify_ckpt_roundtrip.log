@@ -1,0 +1,13 @@
+[ckpt] 按新格式载入（ckpt_dtype=(none)，解码 0 个键）
+[ckpt] 按新格式载入（ckpt_dtype=fp8，解码 4 个键）
+[ckpt] 按新格式载入（ckpt_dtype=fp8，解码 4 个键）
+  ✓ [fp8] 逐位往返 ok | max|W|=2/2 | ro_W stored dtype=uint8
+[ckpt] 按新格式载入（ckpt_dtype=bf16，解码 4 个键）
+[ckpt] 按新格式载入（ckpt_dtype=bf16，解码 4 个键）
+  ✓ [bf16] 逐位往返 ok | max|W|=2/2 | ro_W stored dtype=uint16
+  ✓ marker gate: case1 trainable=5 (须>0) | case2 trainable=0 (须=0) | 失配复位可达 | case4 吞 marker 切模式 r4=('Assistant: 你好', True) r5=('世界', True)
+  ✓ ckpt 回退判据 gate: ①新格式+空键可载入 ②旧格式+1维数组可载入（均打印「按 X 格式载入」）
+============================================================
+检查点往返逐位等价: PASS ✓（全部状态一致）
+
+[stderr]

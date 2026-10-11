@@ -12,7 +12,7 @@
 > - 硬件后端矩阵与昇腾踩坑——见《PHD-Net_硬件后端适配报告.md》。
 > - 与 Transformer / 大脑的对比结论——见《PHD-Net_竞争力与脑同构性评估.md》。
 >
-> **数据截止：2026-10-02。** 与代码冲突时**一律以代码为准**。全项目事实基线与禁写项见
+> **数据截止：2026-10-08（P192）。** 与代码冲突时**一律以代码为准**。全项目事实基线与禁写项见
 > `docs/文档写作规范.md`（该规范的基线截止日为 2026-09-30，本文以源码为准并在其之上更新）。
 >
 > **相关文档**：
@@ -201,7 +201,7 @@ s[idx] = norm(u[idx]) + 0.1     # 归一到 [0.1, 1.1]，sparse_encoder.py:129
   自身的行级 prange**——而 plain 走的正是后者。服务器实测（1b 档，昇腾 191 核 + NPU）：
   M2_infer **6.92 → 1.28 ms/tok（5.41×）**，端到端 17.63 → 12.09 ms/tok（1.46×），
   四个采样点 sliding PPL 与 serial 运行**逐位相同**（纯调度变化、零语义变化）。
-  对拍见 `tests/verifiers/verify_m2_kernels.py`（11 例三态等价 + n_steps 1/2/3）。
+  对拍见 `tests/verifiers/verify_m2_kernels.py`（13 例三态等价 + n_steps 1/2/3）。
   ⚠ **x86 上测不出这个差异**（本机 fused/serial/plain 三态`max|Δ|=0`，256 行规模下
   结果恰好相同）——x86 结论不构成昇腾证据。
 - **学习**（`sparse_pc.py:500-529`）：下行 `ΔW += η_pc·e⊗r`（误差驱动稀疏外积）；
@@ -396,7 +396,7 @@ mode = "encode" if z > 0.3 else "retrieve"
 | 通道 | 公式 | 脑对应（Yu & Dayan / Hasselmo） | 增益配置 |
 |---|---|---|---|
 | ACh | `σ(gain_ach · z)` | 编码/检索模式门控 | `gain_ach = 1.5` |
-| NE | `σ(gain_ne·(nov − 0.5))`，`nov = |z − z_prev|` | 新颖性 → 可塑性增益 | `gain_ne = 2.0` |
+| NE | `σ(gain_ne·(nov − 0.5))`，`nov = \|z − z_prev\|` | 新颖性 → 可塑性增益 | `gain_ne = 2.0` |
 | DA | `σ(−gain_da · z)` | 巩固信号（低 surprise → 巩固/回放） | `gain_da = 1.5` |
 | 5-HT | `σ(gain_ht·(nov − 0.3))` | 耐心 / 探索-利用权衡 | `gain_ht = 1.0` |
 
@@ -680,33 +680,54 @@ big_ltm 容量 = big_ltm_N × big_ltm_m = 2^24 × 72 = 1,207,959,552   (config_1
 
 ### 5.2 精度作为稀疏的替代维度（读出码本）
 
-P9 精度体系（`readout.py:484-496`）：低精度格式**按原生位型存储为码本**，计算时
+P9 精度体系（`readout.py:354-368`）：低精度格式**按原生位型存储为码本**，计算时
 LUT 反量化到 fp32、更新后重量化写回。**内存流量 ∝ 存储位宽**。
 
-支持的格式（`readout.py:504`，`RO_DTYPES`）：`fp32`（默认）/ `fp16` / `bf16` /
-`int8`（旧名 `fp8`）/ `int4`（旧名 `fp4`，半字节打包）/ `int16` / `int32`。
+`RO_DTYPES`（**`readout.py:377`**）：`fp32` / `fp16` / `bf16` / `int8` / `int16` / `int32`。
+⚠ **这张表里既没有 `fp8` 也没有 `fp4`**：
+`int4`/`fp4` 已按 **P191e**（P152 定案：每步 unpack 抵消存储收益）整体删除，
+显式请求构造期 fail-fast；`fp8` 在 **numba 侧**只是 `int8` 的**兼容别名**
+（`_RO_DTYPE_ALIASES = {"fp8": "int8"}`，`readout.py:375`，P100 正名）。
 **softmax/NLL 一律在 fp64 上计算** —— 这是低精度训练的标准「高精度主回路」结构。
 
-⚠ **默认 `fp32`（`config.py:290-292`，P110 / fhz 2026-10-01 授权改回）**。
+⚠ **但默认不是 `RO_DTYPES` 里的任何一项 —— 默认是 `fp8`**（`config.py:318`
+`readout_dtype: str = "fp8"`；`train/train.py:324` `default="fp8"`，两处一致）。
+P189（fhz 2026-10-07「模型 fp8、迭代 fp16」）的 `fp8` 是**叠加在码本之上的存储/迭代方案**，
+**不是** `RO_DTYPES` 的一个条目：
+W 以 **fp8 e4m3fn 位模式由 uint8 承载**（1 B/元素，访存收益完整），
+迭代在 **fp16 域**完成后 RNE 舍回 fp8 位模式；CLI 的 `choices` 也只有
+`["fp32","fp16","bf16","fp8"]`（无 int 族，int 族显式请求仍禁 P163）。
+⚠ 另：**稀疏读出（`conn_k>0`）内部强制 fp32**（`readout.py:542,660`
+`dtype_name = dtype if conn_k == 0 else "fp32"`）—— 稀疏的意义正是省流量，
+不叠加语义损失。
+
 判据是 `tools/probe_readout_precision.py` 实测的「舍入后元素实际发生变化的比例」
 （= 更新是否被保留），在 `|W|~1e-2` / `|dp|~1e-6` 档：
 
 | 格式 | 非目标行更新保留率 | 目标行保留率 |
 |---|---|---|
-| fp32 | **99.95%**（精确 `p − t`） | 100% |
+| fp8（**默认**，P189） | **最低**（步长比 fp16 粗约 4 倍） | 100% |
+| fp32 | **99.95%**（精确 `p − t`，显式 opt-in） | 100% |
 | fp16 | 26.67% | 100% |
 | bf16 | 5.79% | 100% |
 
-**低精度下「只保留目标行提升」→ 学习规则退化为纯 Hebbian。** 语义正确优先于带宽收益。
-低精度仍可显式指定（带宽敏感且接受 Hebbian 近似时）。
+**低精度下「只保留目标行提升」→ 学习规则退化为纯 Hebbian。**
+⚠ **默认 fp8 意味着这是默认就在承担的代价**，不是可选项：fp8 的粗步长会吞掉
+≈1e-6 的非目标行更新（抑制项丢失），学习偏向「只抬目标行」的全行抬升。
+这是 fhz 2026-10-07 的**知情取舍**（验收靠 `--probe-every` 固定探针集做 PPL A/B，
+见《文档写作规范》§2.4）。要精确 `p − t` 语义，显式 `--readout-dtype fp32`。
 
-⚠ **M1 编码器权重默认 `fp64`**（`config.py:293-298`）而**非 bf16** —— numpy/BLAS 路径下
-低精度存储每次都要付上采样转换，实测比 fp32 直接 GEMV 更慢。**读出侧的 bf16 语义由
-`readout_dtype` 落地**（CLI `--readout-dtype`）。
+⚠ **M1 编码器权重默认 `fp64`**（`config.py:330` `encoder_dtype: str = "fp64"`）
+而**非 bf16** —— numpy/BLAS 路径下低精度存储每次都要付上采样转换，
+实测比 fp32 直接 GEMV 更慢；生产 CLI `--encoder-dtype` 覆盖为 `fp32`
+（`train/train.py:408`）。**读出侧精度与本字段无关**，由 `readout_dtype` 决定
+（CLI `--readout-dtype`，默认 fp8）。
 
-⚠ 量化码本在**加速器**上有能力表（`_unsupported_reason`，`accel_readout.py:773-800`）：
-`int4`/`fp4` 被拒（无 INT4 矩阵乘单元，且 MX 块缩放无算子）。fp8 曾被误禁（P92 教训：
-加新 dtype 时必须同步能力表）。
+⚠ 量化码本在**加速器**上有能力表（`_unsupported_reason`，`accel_readout.py:1767-1790`）：
+`int16`/`int32` 被**显式拒绝并说明原因**（P112，能力表与 `_DT` 对齐）；
+`fp4`/`int4` 被拒（P191e）；`fp8`/`int8` **放行**（`:1776-1777` 返回 `None`）
+—— fp8 曾被误禁（P92 教训：加新 dtype 时必须同步能力表），P189 起改为
+运行时探测（`backends/fp8_capability.py`「真跑一次」）而非静态剔除。
 
 ### 5.3 幂律稀疏连接分配器（`phdnet/sparse_alloc.py`）
 
@@ -864,18 +885,24 @@ LUT 反量化到 fp32、更新后重量化写回。**内存流量 ∝ 存储位�
 
 | 机制 | 脑同构 | 核心文件 | 关键配置（默认） | 稀疏维度 |
 |---|---|---|---|---|
-| M1 稀疏分布式编码 | 初级感觉皮层稀疏放电 + 侧抑制（k-WTA） | `phdnet/sparse_encoder.py` | `n_sdr=256`、`k_sparse=16`、`encoder_dtype="fp64"` | 激活 6.25% |
+| M1 稀疏分布式编码 | 初级感觉皮层稀疏放电 + 侧抑制（k-WTA） | `phdnet/sparse_encoder.py` | `n_sdr=256`、`k_sparse=16`、`encoder_dtype="fp64"`（**库默认**；生产 CLI 覆盖为 `fp32`，P107） | 激活 6.25% |
 | M2 预测编码主干 | 皮层预测编码层级 + sparse connectivity | `phdnet/sparse_pc.py` | `n_mid=128`、`n_top=64`、`n_infer_steps=1`、`eta_pc=eta_oja=0.02`、`pc_w_max=2.0`、`conn_k=0` | 连接 12.5% |
 | M3 时序关联核 | 海马 CA3 递归 + 皮层局部突触 STDP | `phdnet/plasticity.py`、`stdp_kernels.py` | `m_lateral=16`、`lambda_trace=0.35`、`eta_stdp=0.03`、`w_max=1.0` | 连接 1.56%（1B 档） |
 | M4a 工作记忆 | PFC 持续放电 + 基底核门控 | `phdnet/wm.py` | `n_wm_slots=4`、`gamma_wm=0.85`、`gate_thresh=0.35` | 有限槽位 |
 | M4b 长期记忆 | 海马快印迹 + 皮层慢巩固 + 吸引子补全 | `phdnet/bigltm.py`、`sparse_table.py`、`ltm.py` | `big_ltm_N=2^24`、`big_ltm_m=60`、`big_ltm_k=4`、`ltm_imprint_gate=0.8` | 突触存在性 |
 | M5 神经调制 | 蓝斑 NE / DA + 胆碱能编码-检索切换（Hasselmo、Yu & Dayan） | `phdnet/modulator.py` | `mod_gain=1.5`、`multi_modulation=False` | — |
-| M6 读出 | IT → 前额叶/前运动皮层 | `phdnet/readout.py`、`backends/accel_readout.py`、`sparse_alloc.py` | `readout_softmax=False`、`eta_readout=0.15`、`readout_conn_k=0`（库）/ **128（生产 CLI）**、`readout_powlaw_alpha=0.0`（默认关）、`readout_dtype="fp32"` | 均匀 k 连接 4.2%（生产）；幂律**已接入但默认关闭**（词频是代理，见 §2.7.1） |
+| M6 读出 | IT → 前额叶/前运动皮层 | `phdnet/readout.py`、`backends/accel_readout.py`、`sparse_alloc.py` | `readout_softmax=False`、`eta_readout=0.15`、`readout_conn_k=0`（库）/ **128（生产 CLI）**、`readout_powlaw_alpha=0.0`（默认关）、`readout_dtype="fp8"`（**P189**，库默认即 fp8） | 均匀 k 连接 4.2%（生产）；幂律**已接入但默认关闭**（词频是代理，见 §2.7.1） |
 
 **跨机制的架构强化开关**（全部默认关闭）：稳态突触缩放 `homeostasis`、
 错误触发检索 `error_triggered_retrieval`、发育期临界期 `critical_period` + 突触修剪
 `prune_threshold`、验证驱动睡眠 `plateau_sleep`、情景记忆双向校验 `bidir_check`、
 储备库回放 `readout_replay`、稀疏 int8 量化 `sparse_int8`、PC 发育期冻结 `pc_dev_steps`。
+
+**P192 新增的计算后端开关**（全部默认关闭，铁律④）：
+`cython_kernels`（`off`/`auto`/`force`，M2/M3 换 Cython nogil 核）、
+`cann_dispatch`（只核对 P120 已默认开的 CANN 下发项是否真生效）。
+⚠ `readout_pipeline` **已停用**（传了直接报错退出）—— 依据见
+`docs/PHD-Net_性能评估与迭代方案.md` §8.3。
 
 ---
 
@@ -886,7 +913,7 @@ LUT 反量化到 fp32、更新后重量化写回。**内存流量 ∝ 存储位�
 
 | # | 位置 | 不一致 | 本文采用 |
 |---|---|---|---|
-| 1 | `phdnet/config.py:194` vs `train/train.py:291` | `readout_conn_k` **库默认 0（稠密）**、**生产 CLI 默认 128** | 两者都写，并标明各自口径 |
+| 1 | `phdnet/config.py:197` vs `train/train.py:467` | `readout_conn_k` **库默认 0（稠密）**、**生产 CLI 默认 128** | 两者都写，并标明各自口径 |
 | 2 | `docs/文档写作规范.md` §2.2 表 | 仍写「M6 读出**100% 稠密 = 架构欠账**」 | **已过时**。P108（2026-10-01）起 CLI 默认 `readout_conn_k=128`（4.2% 连接率）；P111 起加速器已实现均匀 k 的 gather-GEMV |
 | 20 | `tools/rebaseline.py:9-10` / `phdnet/sparse_pc.py:29-32` | P124 之后 M6 已**三层稀疏化**（均匀 k / 加速器 gather-GEMV / 幂律异质），但 `phdnet/sparse_alloc.py` docstring 的「未接入 `readout.py`」**已过时** | **P124 已接入**（`alpha=0` 逐位等价）。建议把该 docstring 改成「P124 起已接入，默认 alpha=0」 |
 | 21 | 幂律的**词频来源** | 文档若写「按词频分配」而不提来源，会误导读者以为用的是真实 Zipf 频次 | 实为**代理值** `1/rank`（`word_lm.py::_powlaw_proxy_counts`），因构造期语料未流过；且词表是**字典序非频次序** → 代理依据不足。**默认 alpha=0**，见 §2.7.1 |
@@ -895,15 +922,15 @@ LUT 反量化到 fp32、更新后重量化写回。**内存流量 ∝ 存储位�
 | 4 | `tools/rebaseline.py:9-10` docstring | 仍写「冻结语料 **23,504** 字符」+ 旧锚点 `96.7241 / 77.5261` | 与同文件 `ANCHOR` 字典（`394.4687 / 359.2603`）**自相矛盾** |
 | 5 | `docs/文档写作规范.md` §2.2 / §2.7 | 1B 档容量写 `1.370e9`（稠密读出、V=51,962 口径） | **三个都对**：V=51,962/k=128 → **1.2172e9**；V=73,958/k=128 → 1.2201e9；V=51,962/k=0 → 1.3702e9。差异来自词表与稀疏档位，必须标明 |
 | 6 | `docs/文档写作规范.md` §2.2 表 | M1 写「输出 **12.5%** 稀疏」 | 库默认 `k_sparse=16`/`n_sdr=256` = **6.25%**；12.5% 是评测口径（`k_sparse=32`）与 1B 档（128/1024） |
-| 7 | `docs/文档写作规范.md` §2.4 / §2.8 | 写「读出 **CLI 默认 fp16**（库 config 默认 bf16）」 | 两者均为 **fp32**（`config.py:292` 与 `train/train.py:205`）。P110（2026-10-01）授权改回 |
-| 8 | `docs/文档写作规范.md` §2.8 | 写 `--readout-conn-k 0` | 实际 **128**（P108，`train/train.py:291`） |
-| 9 | `phdnet/sparse_encoder.py:12-14` 模块 docstring vs `config.py:298` | docstring 说「M1 默认 `fp32`」 | **config 是 `fp64`**（`sparse_encoder.py` 的形参默认是 `dtype="fp32"`，但 `model.py:37` 传的是 `cfg.encoder_dtype`） |
-| 10 | ~~`train/train.py:250-255`~~ | ~~`--m2-kernel` 的 `default="serial"`，但 help 文本写「**默认 plain**」~~ | **P113 已修**：默认改`plain`（有服务器实测支撑），help 同步为实测数字。见§1 M2 三态核 |
+| 7 | ~~`docs/文档写作规范.md` §2.4 / §2.8 写「读出 **CLI 默认 fp16**（库 config 默认 bf16）」~~ | ✅ **两处均已过时，现行口径 = CLI 与库 config 都是 `fp8`**（`config.py:318`、`train/train.py:324`，P189 2026-10-07）。`文档写作规范.md` §1 禁止表与 §2.4 已同步为 fp8，并注明「fp32 默认是 P110 的历史口径」 | 🟢 已修。本表保留此行作为**「修正一次 ≠ 永久正确」**的实例：P110 改 fp32 → P163 改 fp16 → **P189 改 fp8** |
+| 8 | `docs/文档写作规范.md` §2.8 | 写 `--readout-conn-k 0` | 实际 **128**（P108，`train/train.py:467`） |
+| 9 | `phdnet/sparse_encoder.py:12-14` 模块 docstring vs `config.py:330` | docstring 说「M1 默认 `fp32`」（且第 14 行仍写「读出侧 bf16 已由 `--readout-dtype` **默认启用**」—— 读出侧默认早已不是 bf16，见本表第 7 行） | **config 是 `fp64`**（`sparse_encoder.py` 的形参默认是 `dtype="fp32"`，但 `model.py:49` 传的是 `cfg.encoder_dtype`） |
+| 10 | ~~`train/train.py:250-255`~~ | ~~`--m2-kernel` 的 `default="serial"`，但 help 文本写「**默认 plain**」~~ | **P113 已修**：默认改`plain`（有服务器实测支撑），help 同步为实测数字（现行 `train/train.py:394`）。见§1 M2 三态核 |
 | 11 | `phdnet/sparse_pc.py:29-32` 文档字符串 | 说「开关（默认关闭，默认路径逐位不变）：`cfg.sparse_conn` —— True 时主干改用本模块」 | **已过时**（写于稠密栈仍在时）。2026-09-28 稠密栈已删除，`sparse_conn` 恒 `True`，False 会 fail-fast |
 | 12 | `phdnet/config.py:84-85` vs `phdnet/model.py:53-57` | config 仍保留 `backend` / `torch_dtype` 字段和「昇腾部分型号建议 float16」的说明 | `model.py` 对非 `auto/numpy/cpu` 的 backend **fail-fast**（旧 torch 栈已随 P30 删除）。字段为**兼容保留** |
-| 13 | `tools/bench_readout_sparse.py:113-115` 注释 | 「`sparse_alloc.py` 由另一位同事并行实现中」 | `sparse_alloc.py` **已存在**（26 个 verifier 已在 `verify_readout_sparse_gate.py:375-390` 探测它）。但它**仍未接入 `readout.py`**（纯分配函数） |
+| 13 | ~~`tools/bench_readout_sparse.py:113-115` 注释~~ | ~~「`sparse_alloc.py` 由另一位同事并行实现中」~~ | ✅ **已过时并已解决**：`phdnet/sparse_alloc.py` 已存在，**且 P124 已接入 `readout.py`**（`:574-579`，幂律路径 import `sparse_alloc.build_powlaw_csr`，`alpha=0` 逐位等价于均匀 k）。该注释仍在声称「预留接口 / 未就绪」→ 🔴 **活跃的误导性注释，建议回修**（与本表第 20 行是同一件事的两面） |
 | 14 | `tools/audit_brain_parity.py:139-146` | A4 结论仍写「直接稀疏化读出不可接受」 | 该结论基于 256 维栈 `conn_k=8`（1.0%）。1B 档取 k=128（4.2%）后 PPL 反而**更优**（477 vs 608，4M 档）—— 两者不矛盾但**口径不同**，须标明维度 |
-| 15 | `phdnet/config.py:293-298` 注释 | 注释写「`bf16` 语义在读出侧已由 `readout_dtype`（**默认 bf16**，NPU 原生）落地」 | `readout_dtype` 默认已是 **fp32**（同文件 292 行），注释未同步 |
+| 15 | `phdnet/config.py` 中 `encoder_dtype` 上方的注释块 | 🔴 **2026-10-07 已重写，但重写得只对了一半** —— **本条是活跃缺陷，不是历史问题**。旧注释（写「`bf16` 语义在读出侧已由 `readout_dtype`（**默认 bf16**）落地」）**确实已删除**；现注释（`:320-329`）开头正确声明「本字段自 P75 起**默认 fp64**」、并正确写「读出侧精度由 `readout_dtype`（**默认 fp8**，P189）决定，与本字段无关」。**残留错误在上一段**：`readout_dtype` 字段正上方 `:305` 仍写「默认 **fp32**（fhz 2026-10-01 授权改回）」，而下一行 `:318` 就是 `readout_dtype: str = "fp8"` —— **同一段注释内部自相矛盾，且紧贴它所描述的字段** | 文档采用 `fp8`（`config.py:318` + `train/train.py:324` 双重核对）。**建议回修 `config.py:305`**：删掉「默认 fp32」，改写为「默认 fp8（P189 2026-10-07）；P110 的 fp32 默认是历史口径」，并把 P110 的 fp8 保留率警告保留在案 |
 
 ---
 

@@ -1,0 +1,28 @@
+PASS | 审计1 recall==recall_scored (clean_steps=1) | scored=['t0', 't0', 't0', 't0', 't0', 't0'] recall=['t0', 't0', 't0', 't0', 't0', 't0']
+PASS | 审计1 recall==recall_scored (clean_steps=2) | scored=['t0', 't0', 't0', 't0', 't0', 't0'] recall=['t0', 't0', 't0', 't0', 't0', 't0']
+PASS | 审计1 recall==recall_scored (clean_steps=3) | scored=['t0', 't0', 't0', 't0', 't0', 't0'] recall=['t0', 't0', 't0', 't0', 't0', 't0']
+PASS | 审计1 状态轨迹逐位一致 (cs=2, 6 步) |
+PASS | 审计1 recall_scored 经公共算子 _retrieval 评分 (6 步=6 次) | calls=6（修复前 0 次）
+PASS | 审计2 write(NaN gate) 被拒 | write=False strength=[0.0, 0.0, 0.0, 0.0]
+PASS | 审计2 write 后 strength/read 无 NaN |
+PASS | 审计2 summarize(NaN cue) 被拒 |
+PASS | 漏报3 write(NaN 内容, 正常 gate) 被拒 | write=False read_is_finite=True
+PASS | 漏报3 该次写入后 read() 仍有限 |
+PASS | 漏报3 read() 自愈：毒化槽不污染输出 | out=[0.3330000042915344, 0.3330000042915344, 0.3330000042915344, 0.3330000042915344]
+PASS | 漏报3 summarize(吸引子吐 NaN) 被拒且槽未被写 | rejected=True
+PASS | 审计3 并列幅值 cue 恰好 top-k=8 位 | 激活 8/64（修复前 64/64，超 n_dim/4=16 上限）
+PASS | 审计4 n_slots==1 summarize 成功建立摘要槽 | ret=True summary_slot=0
+PASS | 审计4 n_slots==1 write 被拒且摘要不被覆盖 | write=False overwritten=False
+PASS | 审计5 单通道首样本 z 与幅值成正比 | s=1→z=1.0000(gate 0.8176, 修复前 .704)；s=100→gate 1.000000(z≈100, 修复前 .818)
+PASS | 审计5 MultiModulator 首步 novelty 中性（跳过虚构基线） | ne=0.5(修复前 .566) ht=0.5 z1=1.0000 gate1=0.6132(修复前 .542)
+PASS | 审计5 第二步 novelty 用真实上一步 z 计算 | ne2=0.4614 期望 0.4614
+PASS | 审计6 k_clean>n_dim 被 clamp | k=16
+PASS | 审计6 k=100 recall 不再 argpartition 越界 |
+PASS | 审计6 k<=0 被 clamp 到 1（不再全零静默退化） | k=1 active=1
+PASS | 审计7 空候选显式 ValueError |
+PASS | 审计7 _clean(全零) 不造伪回忆 | sum=0.0
+PASS | 审计7 全零激活 → 空读出而非恒选 names[0] | out=[]（修复前 ['a','a']）
+========================================================================
+ALL PASS (审计 1-7 全绿)
+
+[stderr]

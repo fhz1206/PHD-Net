@@ -255,8 +255,9 @@ def fp8_to_int8_codes(codes_u8, out_i8=None, conv: str = "torch"):
 
     `conv` = "torch"（**默认**，快 5.6×，多 76 MiB 中间张量）
            | "nogil"（慢 5.6×，**0 中间张量** + 释放 GIL）
-           | "rust"（P189：phdnet_rs 多核核；由调用方先确认可用再传）
     两条 Python 路径都在 **CPU** 上执行（fhz 指令）。
+    ⚠ 2026-10-07：原 "rust" 选项已随 rust 版本删除（fhz 指令）——传入它
+    落到下面的兜底分支，按 torch 路径执行（两条 Python 实现数值逐位一致）。
     """
     if str(conv).lower() in ("nogil", "numba", "jit"):
         return fp8_to_int8_codes_nogil(codes_u8, out_i8)

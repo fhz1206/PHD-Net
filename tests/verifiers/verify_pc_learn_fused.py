@@ -87,6 +87,8 @@ def _csr_matvec_ref(indptr, idx, val, x):
 
 def _mk(n0, n1, n2, seed=0, conn_k=16):
     rng = np.random.default_rng(seed)
+    # 2026-10-07：rust 后端已整体删除（M2 只剩 numba/numpy 一套实现），
+    #   本文件「融合核 vs 原多核调用路径 逐位一致」的契约自然成立。
     return SparsePCStack(n0, n1, n2, eta_pc=0.05, eta_oja=0.01, rng=rng,
                          w_max=2.0, conn_k=conn_k)
 

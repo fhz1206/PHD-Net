@@ -1,0 +1,50 @@
+==============================================================================
+门禁：精度策略（降级链 / 七种精度 / 4-bit / 启动一次）—— P151
+==============================================================================
+
+[A] 降级链顺序（fhz：fp→int→fp→报错）
+  PASS  P189 ['fp8', 'fp16', 'bf16', 'fp32'] 链不含禁用项（int/fp4 仍禁；fp8 已放行）
+  PASS  A1 fp8 的链尾在 fp 族内（无 int 兜底）  [链=['fp8', 'fp16', 'bf16', 'fp32']]
+  PASS  P189 ['fp16', 'bf16', 'fp8', 'fp32'] 链不含禁用项（int/fp4 仍禁；fp8 已放行）
+  PASS  A1 fp16 的链尾在 fp 族内（无 int 兜底）  [链=['fp16', 'bf16', 'fp8', 'fp32']]
+  PASS  A2 链里无重复项
+  PASS  A3 链尾是 fp 族（P163：fp32 不再强制兜底）  [尾部=fp32]
+
+[B] 降级行为
+  PASS  B1 fp16 不可用 → 降到 bf16  [落地=bf16]
+  PASS  B2 fp 族全挂 → **不回落到 int**（P163）  [落地=None]
+  PASS  B3 int 请求被拒绝（P163 硬约束）  [candidate_order('int8') 应抛 ValueError]
+  PASS  B4 全链不支持 → dtype=None（调用方必须报错）  [reason 非空=True]
+
+[C] 探测缓存（启动一次）
+  PASS  C1 同设备重复解析**只探测一次**  [首次 1 次，后续共 1]
+  PASS  C2 换设备会重新探测（缓存键含 device）  [共 2 次]
+
+[D] fp 族端到端（稀疏，真实规模）+ int 禁用契约
+  PASS  D  fp32 完整一步（落地 fp32，W 0.50 MiB）  [nll=7.2530]
+  PASS  D  fp16 完整一步（落地 fp16，W 0.50 MiB）  [nll=7.2529]
+  PASS  D  bf16 完整一步（落地 bf16，W 0.50 MiB）  [nll=7.2549]
+  PASS  D  int8 已被禁用（请求即拒绝）  [P163]
+  PASS  D  int16 已被禁用（请求即拒绝）  [P163]
+  PASS  D  int32 已被禁用（请求即拒绝）  [P163]
+  PASS  D8 访存阶梯 fp32 >= fp16 == bf16（同字节）  [0.50 MiB | 0.50 MiB | 0.50 MiB]
+
+[E2] P163：int 族禁用 + fp8/fp4 移出候选链
+  PASS  E2.1 fp4 已从 FAMILIES 移除
+  PASS  E2.1 int4 已从 FAMILIES 移除
+  PASS  E2.2 fp8 请求落到 fp 族（P163：int 已禁用）  [fp8 -> fp16 -> bf16 -> fp32]
+  PASS  E2.3 fp8 链上无 int 族（P163 硬约束）  [fp8 -> fp16 -> bf16 -> fp32]
+  PASS  E2.4 默认模型精度 = fp16（P163）  [=fp16]
+  PASS  E2.5 int 族开关 = False（P163）  [=False]
+
+[F] 能力表
+  PASS  F  fp8 不再被能力表拒绝  [放行]
+  PASS  F  int8 不再被能力表拒绝  [放行]
+
+==============================================================================
+结果：27/27 通过
+==============================================================================
+
+[stderr]
+D:\AiModel\train\phdnet\backends\accel_readout.py:604: RuntimeWarning: [precision] 读出权重 fp16/bf16 请求 → 运行时提升为 fp32（迭代全 fp32，fhz 2026-10-06 决策；P110：fp16 写回丢失 73% 非目标行更新。检查点存储仍为 fp16）
+  _w187.warn(

@@ -1,0 +1,50 @@
+  ✓ 入口无「局部变量使用先于赋值」（P129）
+ms:// 纯函数验证（零网络）
+  ✓ 解析 owner/dataset/path 三段
+  ✓ 路径遍历 '..' 被拒
+  ✓ 空段 '//' 被拒
+  ✓ 缺段被拒
+  ✓ URL 编码只解一次（a%20b 不被二次编码）
+  ✓ 本地路径不误判: 'datasets/pretrain/pretrain_000.000.parquet'
+  ✓ 本地路径不误判: 'eval_corpus/internal_corpus.txt'
+  ✓ 本地路径不误判: 'ms:/single/slash.parquet'
+  ✓ 本地路径不误判: 'C:/data/x.parquet'
+  ✓ 本地路径不误判: 'a/ms://b/c'
+  ✓ 本地路径不误判: ''
+  ✓ ms:// 字符串判为远程
+  ✓ MsFile 实例判为远程
+  ✓ 本地单文件 glob 正常展开
+  ✓ ms:// 单文件分支：只返回 1 个 MsFile（不列目录）
+  ✓ 单文件分支：str 可再解析（worker 分派幂等）
+  ✓ 单文件分支：suffix/name 鸭子语义
+  ✓ fraction=0.3 → 前 30%（ceil(52×0.3)=16）
+  ✓ 抽样结果是前缀子集（顺序不变）
+  ✓ fraction=1 → 全量
+  ✓ fraction 越界被拒（0）
+  ✓ fraction 越界被拒（>1）
+  ✓ fraction 非数字被拒
+  ✓ fraction 缺省 = 1.0（全量）
+  ✓ Path(ms://…) 会丢语义 → 调用方须先判 is_remote
+  ✓ corpus_stats 走远程分支（不 Path() 化 ms://）
+  ✓ corpus_stats 远程体积来自 API Size（无 getsize）
+  ✓ _iter_one 对非 parquet 远程源显式 NotImplementedError
+  ✓ load_text 对非 parquet 远程源显式 NotImplementedError
+  ✓ load_text 只展开一次路径（远程不再二次列目录）
+  ✓ open_parquet_source 本地分支逐位等价（ParquetFile(str(p))）
+  ✓ open_parquet_source 远程有重试
+  ✓ _list_tree 空页终止（不按 len<page_size 判末页）
+  ✓ train.py 已删 stream_factory 死代码（不再绕过 data_path）
+  ✓ 编译通过: train/train.py
+  ✓ 编译通过: train/corpus_stream.py
+  ✓ 编译通过: phdnet/ms_stream.py
+  ✓ 编译通过: phdnet/corpus.py
+  ✓ 编译通过: phdnet/readout.py
+  ✓ 编译通过: tests/verifiers/verify_ms_stream.py
+  ✓ train.py --help 可执行（导入 + argparse 正常）
+  · 静态提示（不参与判据）：疑似裸 % 于 train\train.py:249 —— 请以实际 --help 是否通过为准
+  ✓ 无重复定义的 CLI 选项（P134）— 已扫描 40 个入口
+  ✓ 所有 argparse 入口 --help 均可执行（40 个候选文件）
+
+通过 44/44
+
+[stderr]

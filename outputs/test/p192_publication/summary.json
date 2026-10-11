@@ -1,0 +1,207 @@
+[
+  {
+    "test": "verify_accel_readout.py",
+    "exit_code": 0,
+    "seconds": 6.277
+  },
+  {
+    "test": "verify_accel_readout_p55.py",
+    "exit_code": 0,
+    "seconds": 10.819
+  },
+  {
+    "test": "verify_accel_sparse.py",
+    "exit_code": 0,
+    "seconds": 13.199
+  },
+  {
+    "test": "verify_cann_dispatch.py",
+    "exit_code": 0,
+    "seconds": 5.987
+  },
+  {
+    "test": "verify_cann_env.py",
+    "exit_code": 0,
+    "seconds": 49.624
+  },
+  {
+    "test": "verify_cann_probe.py",
+    "exit_code": 0,
+    "seconds": 6.189
+  },
+  {
+    "test": "verify_ckpt_roundtrip.py",
+    "exit_code": 0,
+    "seconds": 24.582
+  },
+  {
+    "test": "verify_csr_equiv.py",
+    "exit_code": 0,
+    "seconds": 10.21
+  },
+  {
+    "test": "verify_cykernels.py",
+    "exit_code": 0,
+    "seconds": 10.343
+  },
+  {
+    "test": "verify_device_npu_probe.py",
+    "exit_code": 0,
+    "seconds": 11.902
+  },
+  {
+    "test": "verify_encoder_gemv.py",
+    "exit_code": 0,
+    "seconds": 4.168
+  },
+  {
+    "test": "verify_eval_readonly.py",
+    "exit_code": 0,
+    "seconds": 29.499
+  },
+  {
+    "test": "verify_help_percent.py",
+    "exit_code": 0,
+    "seconds": 1.984
+  },
+  {
+    "test": "verify_i18n.py",
+    "exit_code": 0,
+    "seconds": 3.755
+  },
+  {
+    "test": "verify_lang_semantics.py",
+    "exit_code": 0,
+    "seconds": 32.039
+  },
+  {
+    "test": "verify_ltm_kernels.py",
+    "exit_code": 0,
+    "seconds": 3.974
+  },
+  {
+    "test": "verify_ltm_learn_batch.py",
+    "exit_code": 0,
+    "seconds": 17.324
+  },
+  {
+    "test": "verify_ltm_trace_semantics.py",
+    "exit_code": 1,
+    "seconds": 4.467
+  },
+  {
+    "test": "verify_m2_kernels.py",
+    "exit_code": 0,
+    "seconds": 8.224
+  },
+  {
+    "test": "verify_ms_stream.py",
+    "exit_code": 0,
+    "seconds": 139.066
+  },
+  {
+    "test": "verify_multi_device.py",
+    "exit_code": 0,
+    "seconds": 13.751
+  },
+  {
+    "test": "verify_overlap_contract.py",
+    "exit_code": 0,
+    "seconds": 13.204
+  },
+  {
+    "test": "verify_p116_sched.py",
+    "exit_code": 0,
+    "seconds": 34.058
+  },
+  {
+    "test": "verify_parallel_consistency.py",
+    "exit_code": 0,
+    "seconds": 25.309
+  },
+  {
+    "test": "verify_pc_learn_fused.py",
+    "exit_code": 0,
+    "seconds": 14.382
+  },
+  {
+    "test": "verify_perf_no_regression.py",
+    "exit_code": 0,
+    "seconds": 19.265
+  },
+  {
+    "test": "verify_powlaw_readout.py",
+    "exit_code": 0,
+    "seconds": 20.131
+  },
+  {
+    "test": "verify_precision_policy.py",
+    "exit_code": 0,
+    "seconds": 12.741
+  },
+  {
+    "test": "verify_probe_device.py",
+    "exit_code": 0,
+    "seconds": 12.747
+  },
+  {
+    "test": "verify_readout_fused.py",
+    "exit_code": 0,
+    "seconds": 102.943
+  },
+  {
+    "test": "verify_readout_intdtypes.py",
+    "exit_code": 0,
+    "seconds": 4.955
+  },
+  {
+    "test": "verify_readout_sparse.py",
+    "exit_code": 0,
+    "seconds": 194.054
+  },
+  {
+    "test": "verify_readout_sparse_gate.py",
+    "exit_code": 0,
+    "seconds": 4.883
+  },
+  {
+    "test": "verify_repro_process.py",
+    "exit_code": 0,
+    "seconds": 75.531
+  },
+  {
+    "test": "verify_rev_index.py",
+    "exit_code": 0,
+    "seconds": 17.021
+  },
+  {
+    "test": "verify_rl.py",
+    "exit_code": 0,
+    "seconds": 44.963
+  },
+  {
+    "test": "verify_seg_equiv.py",
+    "exit_code": 0,
+    "seconds": 22.702
+  },
+  {
+    "test": "verify_stdp_parity.py",
+    "exit_code": 0,
+    "seconds": 4.446
+  },
+  {
+    "test": "verify_stream_tokenize.py",
+    "exit_code": 0,
+    "seconds": 5.261
+  },
+  {
+    "test": "verify_vocab_parallel.py",
+    "exit_code": 0,
+    "seconds": 14.693
+  },
+  {
+    "test": "verify_wm_modulator.py",
+    "exit_code": 0,
+    "seconds": 4.245
+  }
+]

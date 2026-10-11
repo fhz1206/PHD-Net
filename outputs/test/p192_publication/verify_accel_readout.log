@@ -1,0 +1,71 @@
+[A/B] AccelReadout ≡ Readout（容差判据）
+  [PASS] A 前向容差一致 —— max|Δ|=3.815e-06 ≤ 2.07e-04
+  [PASS] B NLL 容差一致（相对差 ≤1e-4，见判据说明） —— 20.36809683 vs 20.36880112 rel=3.46e-05
+  [PASS] B 更新后 W 容差一致（≤1e-5 相对） —— max|Δ|=1.192e-07 ≤ 2.55e-05
+  [PASS] A n_synapses 与稠密元素数一致 —— 64,128
+  [PASS] A W 常驻设备且为 torch 张量
+[A2] 调用面齐备（model.step 的 4 个入口）
+  [PASS] A2 可调用 __call__（model.step 用 readout(h)）
+  [PASS] A2 learn_softmax 支持 y_pre（省一次 W@h）
+  [PASS] A2 learn（非 softmax）改变 W 且形状不变
+  [PASS] A2 learn 与 Readout.learn 容差一致 —— max|Δ|=4.768e-07
+  [PASS] A2 W 为设备张量（保存路径用 W_cpu）
+[A3] 配置兼容性 → 强制回落 / dtype 能力表
+  [PASS] A3 readout_hidden 回落 numba 并记录原因 —— backend=numba-cpu(回落) reason=readout_hidden>0（两级读出未在加速后端实现）
+  [PASS] A3 readout_conn_k>0 放行（P111 稀疏已实现，不回落） —— _unsupported_reason=None
+  [PASS] A3 int8 放行（_unsupported_reason=None，P105 已实现）
+  [PASS] A3 fp8 旧名别名放行（=int8，P100 正名 / P105 同步）
+  [PASS] A3 int4 显式请求被拒（P191e 已删，fail-fast）
+  [PASS] A3b fp4 显式请求被拒（P191e 已删，fail-fast）
+[A4] 接口完整性（扫描全仓库 readout.X 访问面）
+  [PASS] A4 访问面无缺失（W, X, _accel_fallback_reason …）
+  [PASS] A4 stats() 可用
+  [PASS] A4 conn_k/hidden 为 0（稠密单级）
+  [PASS] A4 _csr 显式拒绝（稀疏未实现） —— NotImplementedError
+[C] 检查点往返
+  [PASS] C load_W 精确还原
+  [PASS] C 形状不符被拒 —— ValueError
+[D] 后端选择与回落
+  [PASS] D auto 在无加速器时回落 numba —— backend=numba-cpu accel=False
+  [PASS] D 回落对象是原 Readout
+  [PASS] D 显式 cpu 走原路径
+  [PASS] D 不可用设备回落且记录原因 —— backend=numba-cpu(回落) reason=RuntimeError: 请求设备 'cuda:99' 不可用（AssertionError:
+  [SKIP] D 有加速器时 auto 上设备（本机无加速器）
+[E] 精度档（int 族已禁用，P163）
+  [PASS] E dtype=fp32 前向可用 —— max=20.6563
+  [PASS] E dtype=fp16 前向可用 —— max=20.6573
+  [PASS] E dtype=bf16 前向可用 —— max=20.6772
+  [PASS] E dtype=int8 应被禁用（P163） —— ValueError
+  [PASS] E dtype=int16 应被禁用（P163） —— ValueError
+  [PASS] E dtype=int32 应被禁用（P163） —— ValueError
+[F] int 族已禁用（P163）—— 请求必须被拒绝
+  [PASS] F1 int8 构造被拒绝（P163 硬约束） —— int 族已整体禁用
+  [PASS] F1 int16 构造被拒绝（P163 硬约束） —— int 族已整体禁用
+  [PASS] F1 int32 构造被拒绝（P163 硬约束） —— int 族已整体禁用
+[H] fp8 端到端（P0-1 更新损坏 / P0-2 forward 降级 / P0-3 learn）
+  [PASS] HD forward() 不抛（P0-2）
+  [PASS] HD CPU 无 fp8 GEMV（上游）→ 降级 fp8_bits 且存储 1B —— device=cpu _fp8_bits=True W=torch.uint8
+  [PASS] HD learn_softmax 一步不抛（P0-1 路径） —— nll=5.3480
+  [PASS] HD learn_softmax max|ΔW| ≤ 1.5·η·max|dp|·max|h|（损坏=160） —— max|ΔW|=0.1641 ≤ 0.2459
+  [PASS] HD learn() 一步不抛（P0-3）
+  [PASS] HD learn max|ΔW| 同量级 + W 全有限（fp8 ≤448） —— max|ΔW|=0.4609 ≤ 0.6728 max|W|=0.3438
+  [PASS] HD W 落在 e4m3 网格（fp8 往返逐位还原） —— non-grid=0
+  [PASS] HD forward y vs fp32 孪生（相对峰差 ≤0.01） —— rel=1.301e-04
+  [PASS] HS forward() 不抛（P0-2）
+  [PASS] HS 稀疏 fp8 存储保持 1B（原生或位模式） —— W=torch.float8_e4m3fn _fp8_native=True
+  [PASS] HS learn_softmax 一步不抛（P0-1 路径） —— nll=4.9504
+  [PASS] HS learn_softmax max|ΔW| ≤ 1.5·η·max|dp|·max|h|（损坏=160） —— max|ΔW|=0.09375 ≤ 0.2454
+  [PASS] HS learn() 一步不抛（P0-3）
+  [PASS] HS learn max|ΔW| 同量级 + W 全有限（fp8 ≤448） —— max|ΔW|=0.1562 ≤ 0.3706 max|W|=0.5625
+  [PASS] HS W 落在 e4m3 网格（fp8 往返逐位还原） —— non-grid=0
+  [PASS] HS forward y vs numpy 复刻重量化管线（相对峰差 ≤0.001） —— rel=4.225e-08
+----------------------------------------------------------------------------
+结果：全部 PASS
+
+[stderr]
+D:\AiModel\train\phdnet\backends\accel_readout.py:604: RuntimeWarning: [precision] 读出权重 fp16/bf16 请求 → 运行时提升为 fp32（迭代全 fp32，fhz 2026-10-06 决策；P110：fp16 写回丢失 73% 非目标行更新。检查点存储仍为 fp16）
+  _w187.warn(
+D:\AiModel\train\phdnet\backends\accel_readout.py:1028: RuntimeWarning: fp8 原生前向在设备 cpu 上失败（RuntimeError: addmv input tensors must have the same dtype, but got Half, Float8_e4m3fn, and H）→ 永久转 fp8 位模式存储 + fp16 计算（P189 语义保持，训练不中断）
+  warnings.warn(
+D:\AiModel\train\phdnet\backends\accel_readout.py:419: RuntimeWarning: [fp8] 稀疏读出（conn_k=8）**已启用 fp8 存储**（fhz 2026-10-02 决策）。⚠ P110 实测低精度会丢弃感知器 p−t 的**非目标行**更新（fp32 99.95% / fp16 26.67%），**fp8 步长比 fp16 粗约 4 倍** → 学习规则将大幅退化为纯 Hebbian。**请用 --probe-every 的 probe_PPL 验证是否还在学习**。
+  _w8.warn(

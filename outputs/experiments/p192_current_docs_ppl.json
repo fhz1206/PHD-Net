@@ -1,0 +1,186 @@
+{
+  "purpose": "current project documentation exploratory PPL; not comparable to frozen anchor",
+  "protocol": "per-document 80/20 split; concatenate all train prefixes; one streaming pass; frozen readonly evaluation",
+  "tokenizer_fit": "full concatenated train + evaluation text (same as historical anchor protocol; vocabulary leakage acknowledged)",
+  "document_set": "all git-tracked .md existing in current workspace, plus docs/index.html; includes data-repository READMEs; excludes outputs logs, private notes and deleted Rust README",
+  "manifest": [
+    {
+      "path": "BUGS.md",
+      "chars": 33687,
+      "train_chars": 26949,
+      "eval_chars": 6738,
+      "sha256": "9f16409d14a948dd1fd32f5ee5728bb7f8be38ff869cbb059a171f32e745498d"
+    },
+    {
+      "path": "README.md",
+      "chars": 8614,
+      "train_chars": 6891,
+      "eval_chars": 1723,
+      "sha256": "875e79419a88d96bb6172793d81dcdfff31c9a16fa8db654629dac6f11170d16"
+    },
+    {
+      "path": "chat/README.md",
+      "chars": 5738,
+      "train_chars": 4590,
+      "eval_chars": 1148,
+      "sha256": "238abbc9773e26ead9f87afabb8fc30207b738f5d4939385b30c685c0033b17f"
+    },
+    {
+      "path": "datasets/README.md",
+      "chars": 4847,
+      "train_chars": 3877,
+      "eval_chars": 970,
+      "sha256": "a472d47a6d5a4ba382a43953ca4ca9e09b940012be7db2145a186d7e1719ca54"
+    },
+    {
+      "path": "datasets/UPLOAD_README.md",
+      "chars": 3656,
+      "train_chars": 2924,
+      "eval_chars": 732,
+      "sha256": "5c577dff0d5ee79ca3f1ea97d2b36f18ca8ddcfd2095401f9d88c8873f681a3d"
+    },
+    {
+      "path": "docs/PHD-Net_CPU-NPU重叠执行计划.md",
+      "chars": 15518,
+      "train_chars": 12414,
+      "eval_chars": 3104,
+      "sha256": "2c69069a7e0569be3e0b67ad5aa0e961c0dd868c874de962ab31b87d892c8cc8"
+    },
+    {
+      "path": "docs/PHD-Net_并行与加速架构分析.md",
+      "chars": 32299,
+      "train_chars": 25839,
+      "eval_chars": 6460,
+      "sha256": "f882a3cd275bfc4de8ab7929d8f92a93ee4847763f50b3e4a209e3b59c1cb289"
+    },
+    {
+      "path": "docs/PHD-Net_性能评估与迭代方案.md",
+      "chars": 47715,
+      "train_chars": 38172,
+      "eval_chars": 9543,
+      "sha256": "8824895caea687cf1417c320300fcbd607ae01057d25e49a91efb34458b673cc"
+    },
+    {
+      "path": "docs/PHD-Net_扩展指南.md",
+      "chars": 18819,
+      "train_chars": 15055,
+      "eval_chars": 3764,
+      "sha256": "8fd84fbde3377c8e9aa16011439de69d820e1795250c67c0e04818fe40ad75ae"
+    },
+    {
+      "path": "docs/PHD-Net_架构设计.md",
+      "chars": 43572,
+      "train_chars": 34857,
+      "eval_chars": 8715,
+      "sha256": "651e3d57dd09343443ad9df1cec25d48b650cee4f13fb88f2ff9b0594322a101"
+    },
+    {
+      "path": "docs/PHD-Net_现状速查.md",
+      "chars": 11449,
+      "train_chars": 9159,
+      "eval_chars": 2290,
+      "sha256": "332da8d8dd7bed41c84827c9fa4754c6f58d0f724481290b497f9f724294189b"
+    },
+    {
+      "path": "docs/PHD-Net_硬件后端适配报告.md",
+      "chars": 25202,
+      "train_chars": 20161,
+      "eval_chars": 5041,
+      "sha256": "6299295c0675a1adce1116e4a04e5148e767ba6215cafb38898446f2ce4bbcff"
+    },
+    {
+      "path": "docs/PHD-Net_竞争力与脑同构性评估.md",
+      "chars": 23302,
+      "train_chars": 18641,
+      "eval_chars": 4661,
+      "sha256": "9740748696f0c62fd6793678e04254d494d89bc006326b1cbaad3702b23f613e"
+    },
+    {
+      "path": "docs/README.md",
+      "chars": 2012,
+      "train_chars": 1609,
+      "eval_chars": 403,
+      "sha256": "29651ca8032d69641b2fbed5109da3d809e2d454e22d7c4125feda77ea3258ec"
+    },
+    {
+      "path": "docs/index.html",
+      "chars": 67536,
+      "train_chars": 54028,
+      "eval_chars": 13508,
+      "sha256": "0c878fb911f7690b9a10f854b0cd0a401ba8c1919e0fab7ad107c97ae31bdd9f"
+    },
+    {
+      "path": "docs/写作与事实基线.md",
+      "chars": 6923,
+      "train_chars": 5538,
+      "eval_chars": 1385,
+      "sha256": "e06c029af4208d07457234c988f794b7097d35911400c0afe9339395b90e3d25"
+    },
+    {
+      "path": "docs/文档写作规范.md",
+      "chars": 13421,
+      "train_chars": 10736,
+      "eval_chars": 2685,
+      "sha256": "6eb67abfc6b8134bec05bb00405a7176b27d1c6456fea89860251df7d24fde27"
+    },
+    {
+      "path": "phdnet/backends/README.md",
+      "chars": 6167,
+      "train_chars": 4933,
+      "eval_chars": 1234,
+      "sha256": "d52ec40d282e530dc5ef28067b97b60f45b0cea8c63713ec28d51e39f5c041c2"
+    },
+    {
+      "path": "tools/README.md",
+      "chars": 7522,
+      "train_chars": 6017,
+      "eval_chars": 1505,
+      "sha256": "3c75d653544b0e7e34467c4a13cafd034909aa8ec71780bc70ee504514d10b76"
+    },
+    {
+      "path": "train/README.md",
+      "chars": 16663,
+      "train_chars": 13330,
+      "eval_chars": 3333,
+      "sha256": "440f4c5d01148bff325488f6875fa386d630dfc05e045b0851d3e6df342b98c2"
+    }
+  ],
+  "manifest_sha256": "262c266fa9a59bd3d52c941c9bb45e2275f2b72e3101373aa2c6ebf40955e2ab",
+  "document_count": 20,
+  "train_chars": 315758,
+  "eval_chars": 78980,
+  "vocab_size": 10449,
+  "config_overrides": {
+    "n_sdr": 256,
+    "k_sparse": 32,
+    "n_mid": 256,
+    "n_top": 256,
+    "eta_pc": 0.0,
+    "eta_oja": 0.0,
+    "eta_stdp": 0.02,
+    "seed": 11,
+    "pred_in_readout": true,
+    "readout_dtype": "fp32",
+    "cython_kernels": "off"
+  },
+  "seg_kwargs": {
+    "max_len": 6,
+    "min_count": 5,
+    "min_entropy": 1.0
+  },
+  "metrics": {
+    "ppl_token": 123140.40007068329,
+    "ppl_char": 179.06243857083282,
+    "bpc": 7.484318928713335,
+    "n_tok": 34956,
+    "oov": 0,
+    "oov_rate": 0.0
+  },
+  "train_seconds": 975.8862195000002,
+  "eval_seconds": 74.61500700000033,
+  "head": "a24cc327f7e937cd905c44315d178b7ca66da2a1",
+  "working_tree": "P192 uncommitted project revisions; snapshot manifest pins input text",
+  "python": "3.14.5",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "npu_measured": false
+}

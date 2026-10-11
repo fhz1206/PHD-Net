@@ -196,7 +196,11 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None,
     """保存完整可续训状态到 path（.npz + 同名 .json 元数据）。返回元数据 dict。
 
     P46（fhz「训练精度改为 fp8」→ 落在**存储**）：`ckpt_dtype="fp8"|"bf16"|"fp16"`
-    只压缩**检查点里的大矩阵**（读出 W 等），加载时自动转回 cfg.readout_dtype。
+    压缩**检查点里的全部大矩阵**——encoder/stdp/读出 W、稠密 pc W、stdp 迹等
+    （float 且 ndim≥2、≥4096 元素；在全部数组组装完后统一压缩，2026-10-07
+    修复（审计 3）后读出 W 确实会被压）。fp8/bf16 存 uint8/uint16 **位模式**
+    （fp16 用 numpy 原生 float16），加载时按 meta["ckpt_dtype_keys"] 逐键解码
+    还原——相对存储精度有损、位模式往返无损；解码失败会拒绝加载（审计 1）。
     动机（实测依据）：① torch 2.14 **不支持 fp8 matmul**（"dot" not implemented
     for Float8_e4m3fn），用它做训练计算需每步 fp8→bf16 转换（+3.4 GB/step）
     → 比 fp32 的 2.6 GB **更慢**；② fp8 最小次正规数 0.00195 远大于 P6 非目标
@@ -214,25 +218,6 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None,
         "stdp_W": to_numpy(net.stdp.W),
         "wm_slots": to_numpy(net.wm.slots), "wm_strength": to_numpy(net.wm.strength),
     }
-    # P46：检查点存储精度压缩。
-    # numpy 没有 bfloat16 / float8_e4m3fn dtype → 必须存**位模式**（uint16 /
-    # uint8）才能真正减小 npz；加载侧按 meta["ckpt_dtype"] 无损解回原精度。
-    # 体积：fp32 → fp16/bf16 减半，fp8 减到 1/4（1B 档 898 → ~225 MiB）。
-    if ckpt_dtype in ("fp8", "bf16", "fp16"):
-        def _down(a):
-            if (not isinstance(a, np.ndarray) or a.dtype.kind != "f"
-                    or a.ndim < 2 or a.size < 4096):        # 只压大矩阵
-                return a
-            if ckpt_dtype == "fp16":
-                return a.astype(np.float16)                  # numpy 原生
-            import torch as _t                             # bf16 / fp8 → 位模式
-            src = _t.from_numpy(np.ascontiguousarray(a))
-            if ckpt_dtype == "bf16":
-                return src.to(_t.bfloat16).view(_t.uint16).numpy()
-            return src.to(_t.float8_e4m3fn).view(_t.uint8).numpy()
-
-        arrs = {k: _down(v) for k, v in arrs.items()}
-
     # 主干：CSR 存三元组值（结构由 conn_k 决定，重建时形状校验）；稠密存整矩阵
     if hasattr(net.pc, "up0"):
         for nm in ("up0", "up1", "dn0", "dn1"):
@@ -306,6 +291,33 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None,
         arrs["ltm_prev"] = np.array(prev if prev is not None else [], dtype=np.int64)
         arrs["ltm_prev_flag"] = np.array([prev is not None], dtype=np.int64)
 
+    # P46：检查点存储精度压缩。
+    # numpy 没有 bfloat16 / float8_e4m3fn dtype → 必须存**位模式**（uint16 /
+    # uint8）才能真正减小 npz；加载侧按 meta["ckpt_dtype_keys"] 精确解码。
+    # 体积：fp32 → fp16/bf16 减半，fp8 减到 1/4（1B 档 898 → ~225 MiB）。
+    # 2026-10-07 修复（审计 3）：_down 原在 ro_W / pc_* 加入 arrs **之前**执行 →
+    # --ckpt-dtype 从不压缩读出 W（实测 ro_W 恒 float32）。现在全部数组组装完
+    # 再统一压缩，并把被压的键记进 meta["ckpt_dtype_keys"] 供加载侧解码。
+    _down_keys: list = []
+    if ckpt_dtype in ("fp8", "bf16", "fp16"):
+        def _down(a):
+            if (not isinstance(a, np.ndarray) or a.dtype.kind != "f"
+                    or a.ndim < 2 or a.size < 4096):        # 只压大矩阵
+                return a
+            if ckpt_dtype == "fp16":
+                return a.astype(np.float16)                  # numpy 原生
+            import torch as _t                             # bf16 / fp8 → 位模式
+            src = _t.from_numpy(np.ascontiguousarray(a))
+            if ckpt_dtype == "bf16":
+                return src.to(_t.bfloat16).view(_t.uint16).numpy()
+            return src.to(_t.float8_e4m3fn).view(_t.uint8).numpy()
+
+        for _k in list(arrs):
+            _d = _down(arrs[_k])
+            if _d is not arrs[_k]:
+                _down_keys.append(_k)
+            arrs[_k] = _d
+
     meta = {
         "version": CKPT_VERSION, "done": int(done), "big_ltm": bool(cfg.big_ltm),
         "csr_pc": bool(hasattr(net.pc, "up0")), "readout_conn_k": int(net.readout.conn_k),
@@ -314,6 +326,9 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None,
         "vocab_size": int(len(lm.tok)), "when": time.strftime("%Y-%m-%d %H:%M:%S"),
         "cfg": asdict(cfg),
         "ckpt_dtype": str(ckpt_dtype or ""),   # P46：位模式压缩的 dtype（加载侧据此解码）
+        # 2026-10-07 修复（审计 3）：实际被压缩的数组键——加载侧**逐键**解码，
+        # 不再靠 dtype 猜（避免误解 int 索引数组），也覆盖后加入的 ro_W/pc_*。
+        "ckpt_dtype_keys": sorted(_down_keys),
     }
     if extra:
         meta.update(extra)
@@ -327,6 +342,85 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None,
 
 
 # ────────────────────────────── 恢复 ──────────────────────────────
+def _decode_bits(name: str, a: np.ndarray, cd: str) -> np.ndarray:
+    """按 ckpt_dtype 把存盘位模式无损解回数值。2026-10-07 修复（审计 1）：
+    原 load 只对 ro_W 做 view 解码、其余直接数值 cast（fp8 读回 uint8=166、
+    bf16=4.87e4 的垃圾），且解码异常被 except: pass 吞掉（fail-open）。
+    现在**任一步失败都抛错拒绝加载**，绝不静默继续。"""
+    if cd == "fp16":
+        if a.dtype == np.float16:
+            return a.astype(np.float32)
+        raise ValueError(f"检查点数组 {name} 存的是 {a.dtype}，与 ckpt_dtype=fp16 "
+                         f"的 float16 位模式不符——检查点已损坏，拒绝加载")
+    want = np.uint8 if cd == "fp8" else (np.uint16 if cd == "bf16" else None)
+    if want is None:
+        raise ValueError(f"未知 ckpt_dtype={cd!r}（数组 {name}）——拒绝加载")
+    if a.dtype != want:
+        raise ValueError(f"检查点数组 {name} 存的是 {a.dtype}，ckpt_dtype={cd} 需要 "
+                         f"{want} 位模式——检查点已损坏或被改写，拒绝加载")
+    try:
+        import torch as _t
+        tt = _t.from_numpy(np.ascontiguousarray(a))
+        if cd == "bf16":
+            return tt.view(_t.bfloat16).float().numpy()
+        return tt.view(_t.float8_e4m3fn).float().numpy()
+    except Exception as e:                              # noqa: BLE001
+        raise RuntimeError(
+            f"检查点数组 {name} 的 {cd} 位模式解码失败（{type(e).__name__}: {e}）；"
+            f"拒绝加载——静默继续会让权重变垃圾（审计 1，fail-open 已移除）") from e
+
+
+class _DecodedNpz:
+    """npz 读取代理：命中 meta["ckpt_dtype_keys"] 的数组读取时做位模式解码。
+    2026-10-07 修复（审计 1/3）：解码对**全部**被压数组生效（encoder/stdp/
+    readout W、稠密 pc W、stdp 迹等），失败即抛（见 _decode_bits）。"""
+
+    __slots__ = ("_z", "_keys", "_cd")
+
+    def __init__(self, z, keys, cd: str):
+        self._z, self._keys, self._cd = z, set(keys), str(cd or "")
+
+    @property
+    def files(self):
+        return self._z.files
+
+    def __contains__(self, k) -> bool:
+        return k in self._z
+
+    def __getitem__(self, k):
+        a = self._z[k]
+        if k in self._keys and isinstance(a, np.ndarray):
+            return _decode_bits(k, a, self._cd)
+        return a
+
+
+def _legacy_down_keys(z, cd: str) -> set:
+    """旧格式检查点（meta 里**没有** `ckpt_dtype_keys`）的解码键回退（返工 3）。
+
+    **重放修复前 `_down` 的压缩谓词**：`kind=='f' and ndim>=2 and size>=4096`。
+    位模式转码不改形状 → 谓词可在**存盘后**按实际 dtype 复算：
+
+      · fp8 → uint8 位模式；bf16 → uint16 位模式（只有过阈值的 float 矩阵
+        才会被存成位模式）；fp16 → float16（numpy 原生）。
+      · **没过阈值**的键（1 维 encoder_b / wm_strength 等）存盘仍是 float
+        → 不解码、直接放行（赋值时 numpy 自动 cast）——旧实现硬编码 5 个键，
+        把这些 float 数组拿位模式去解码 → raise，**旧检查点载不回**。
+    """
+    want = {"fp8": np.uint8, "bf16": np.uint16,
+            "fp16": np.float16}.get(str(cd))
+    if want is None:
+        return set()
+    want = np.dtype(want)
+    out = set()
+    for k in z.files:
+        a = z[k]
+        if (isinstance(a, np.ndarray) and a.dtype == want
+                and a.ndim >= 2 and a.size >= 4096):
+            out.add(k)
+        del a
+    return out
+
+
 def load_model(path: Path, lm) -> dict:
     """从 path 恢复完整状态到 lm（含词表/权重/大空间表）。返回元数据 dict。
 
@@ -334,14 +428,34 @@ def load_model(path: Path, lm) -> dict:
     （读出矩阵形状将错配——请用与原训练相同的 --data 与 --max-chars）。
     """
     net = lm.net
-    with np.load(str(path), allow_pickle=False) as z:
-        meta = json.loads(str(z["meta"][0]))
+    with np.load(str(path), allow_pickle=False) as z0:
+        meta = json.loads(str(z0["meta"][0]))
         if meta.get("version", 0) != CKPT_VERSION:
             raise ValueError(f"检查点版本不支持: {meta.get('version')}")
         if meta["vocab_size"] != len(lm.tok):
             raise ValueError(
                 f"词表大小不一致：检查点 {meta['vocab_size']} vs 当前 {len(lm.tok)}。"
                 f"续训必须使用与原训练相同的 --data 与 --max-chars。")
+
+        # 2026-10-07 修复（审计 1/3）：读取即按 ckpt_dtype 位模式解码（fail-fast）。
+        # ── 返工 3 修正两条回退判据 ────────────────────────────────────────
+        # ① 判据必须是 `'ckpt_dtype_keys' not in meta`（= **旧格式**），不是
+        #    `not _dk`：新格式若没有任何数组过压缩阈值，键表**合法地为空**，
+        #    旧判据会把它误当旧格式去解码 float 数组 → 合法检查点被拒载。
+        # ② 旧格式回退不再硬编码 5 个键，改为**重放修复前 _down 的压缩谓词**
+        #    （见 _legacy_down_keys）——旧盘里没过阈值的键（1 维 encoder_b /
+        #    wm_strength）仍是 float32，硬编码解码会 raise，旧检查点载不回。
+        # 两种情况都打印一行「按 X 格式载入」，便于日志核对。
+        _cd = str(meta.get("ckpt_dtype", "") or "")
+        if "ckpt_dtype_keys" not in meta:                 # 旧格式
+            _dk = _legacy_down_keys(z0, _cd) if _cd else set()
+            print(f"[ckpt] 按旧格式载入（ckpt_dtype={_cd or '(none)'}，"
+                  f"重放压缩谓词 → 解码 {len(_dk)} 个键）")
+        else:                                              # 新格式
+            _dk = set(meta.get("ckpt_dtype_keys") or ()) if _cd else set()
+            print(f"[ckpt] 按新格式载入（ckpt_dtype={_cd or '(none)'}，"
+                  f"解码 {len(_dk)} 个键）")
+        z = _DecodedNpz(z0, _dk, _cd)
 
         _restore_tokenizer(lm, z)
 
@@ -376,20 +490,11 @@ def load_model(path: Path, lm) -> dict:
                 _sync()
         else:
             _rw = np.asarray(z["ro_W"])
-            # P46：位模式解码（fp8/bf16 存 uint8/uint16，无损转回 fp32）
-            _cd = str(meta.get("ckpt_dtype", "") or "")
-            if _cd in ("fp8", "bf16") and _rw.dtype.kind in "ui":
-                try:
-                    import torch as _t
-                    _tt = _t.from_numpy(_rw)
-                    if _cd == "bf16":
-                        _rw = _tt.view(_t.bfloat16).float().numpy()
-                    else:
-                        _rw = _tt.view(_t.float8_e4m3fn).float().numpy()
-                except Exception:                        # noqa: BLE001
-                    pass
-            elif _cd == "fp16" and _rw.dtype == np.float16:
-                _rw = _rw.astype(np.float32)
+            # 2026-10-07 修复（审计 1/3）：位模式解码已由 _DecodedNpz 统一完成
+            # （失败即抛，替代原 except-pass 的 fail-open）；这里只对齐 dtype。
+            _ro_dtype = np.asarray(net.readout.W).dtype
+            if _rw.dtype != _ro_dtype:
+                _rw = _rw.astype(_ro_dtype)
             net.readout.W = _rw
 
         if meta["big_ltm"]:

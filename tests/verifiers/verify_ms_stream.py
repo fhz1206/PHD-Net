@@ -135,9 +135,12 @@ def _main() -> int:
         check(f"编译通过: {rel}", ok)
     # train.py 必须真的能被 import（argparse 层不出错）——不跑训练
     import subprocess
+    # ⚠ 2026-10-07：显式 encoding/errors（区域编码解码失败 → stdout=None →
+    #   下面的 `in r.stdout` 变 TypeError）。
     r = subprocess.run([sys.executable, str(_ROOT / "train" / "train.py"),
                         "--help"], capture_output=True, text=True,
-                       cwd=str(_ROOT), timeout=180)
+                       cwd=str(_ROOT), timeout=180,
+                       encoding="utf-8", errors="replace")
     check("train.py --help 可执行（导入 + argparse 正常）",
           r.returncode == 0 and "--remote-data" in r.stdout
           and "--remote-fraction" in r.stdout)
@@ -214,7 +217,8 @@ def _main() -> int:
         try:
             rr = subprocess.run([sys.executable, f, "--help"],
                                 capture_output=True, text=True,
-                                cwd=str(_ROOT), timeout=120)
+                                cwd=str(_ROOT), timeout=120,
+                                encoding="utf-8", errors="replace")
         except subprocess.TimeoutExpired:
             bad_help.append(f"{rel} (timeout)")
             continue

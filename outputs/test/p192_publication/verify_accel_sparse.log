@@ -1,0 +1,68 @@
+==============================================================================
+P111 稀疏加速读出对拍：n_h=64 n_out=40 k=8 device=cpu(torch)
+==============================================================================
+
+[A] 数值等价（容差判据，跨库归约顺序不同故不要求逐位）
+  PASS  A1 前向 y 与 numba 稀疏一致  [max|Δ|=7.397e-08 (|y|max=1.000)]
+  PASS  A2 learn_softmax 后 CSR val 一致  [max|Δ|=5.960e-08 (尺度 1.000, 相对 5.96e-08)]
+  PASS  A3 learn 后 CSR val 一致  [max|Δ|=5.960e-08 (相对 5.96e-08)]
+  PASS  A1b 连续不同 h：gather 缓存逐 h 失效（epoch 判据）  [cache_epoch=6 ht_epoch=6]
+  PASS  A4 与「稠密+零化非连接位」语义等价  [max|Δ|=5.960e-08 (相对 5.96e-08)]
+
+[B] 调用面完整（P23/P24：换后端必须对齐全部访问面）
+  PASS  B1a conn_k 报告真实 k  [conn_k=8]
+  PASS  B1b hidden=0（单级）
+  PASS  B1c n_synapses = n_out*k  [320 vs 320]
+  PASS  B1d dtype_name=fp32（稀疏锁 fp32）  [fp32]
+  PASS  B1e stats 与 Readout 键对齐  [k=8 syn=320]
+  PASS  B1f stats 单列索引占用（不低估稀疏真实开销）  [val=0.001MB + idx=0.003MB]
+  PASS  B2a _csr 的 indptr/idx 与源 CSR 逐位一致
+  PASS  B2b _csr 的 val 与设备 W 当前值一致
+  PASS  B3 val[:]= 写入 + sync_csr_from_host 生效（ckpt 恢复路径）  [max|Δ|=2.980e-08（fp64↔fp32 往返量级）]
+  PASS  B4 W_cpu → load_W 精确往返  [shape=(40, 8)]
+  PASS  B5 未导出就 sync → fail-fast  [sync_csr_from_host() 在 _csr 之前被调用；请先取 _csr、写入 val[:]，再调用]
+
+[C] 拒绝路径（P19：不静默走错算法）
+  PASS  C1 非均匀行宽 CSR → fail-fast  [稀疏读出只支持均匀 k（收到行宽 min=2 max=3）]
+  PASS  C2 稠密切 _csr → NotImplementedError
+  PASS  C3 load_W 形状不符 → 报错
+
+[C4b] 稀疏前向算子 mulsum vs einsum（P116，容差判据）
+  PASS  C4b einsum 与 mulsum 容差内一致（**非逐位**）  [max|Δ|=0.000e+00 相对=0.00e+00（归约顺序不同，预期非0）]
+  PASS  C4b einsum 输出非零（防「丢权重」类静默错误）  [max|y|=0.8558]
+  PASS  C4b einsum 臂的更新路径仍生效（W 已变）
+
+[C4c] gather 缓存 epoch 判据（跨不同 h 的调用序列）
+  PASS  C4c1 缓存 gather 对应 hA（而非被污染的 hB）  [==hA:True ==hB:False]
+  PASS  C4c2 污染后用 hA 前向，y 与干净实例**数值一致**（无静默错误）  [max|Δ|=0.000e+00]
+  PASS  C4c3 同一 h 连续调用仍复用 gather（判据未过度失效）
+
+[C4d] 稀疏读出的 torch.compile 融合核（P128）
+  PASS  C4d1 稀疏实例**进入** torch.compile 开关（P128 结构断言；本机 compile 不可用 → 改用探针）  [torch.compile 被调用 1 次（桩返回原函数，零环境依赖）]
+  PASS  C4d2 本机 torch.compile 不可用 → 已自动回落 eager（P19 正确行为）  [compiled=False]
+  PASS  C4d4 融合核实现里不含稀疏分支（故放开是安全的）
+
+[C4e] 稀疏更新不物化（P138：P28 禁令的稀疏臂漏改）
+  PASS  C4e1 稀疏更新不用 `add_(dp*g)`（会物化 25.4 MiB 临时张量）  [已改为 addcmul_]
+  PASS  C4e2 用 `addcmul_`（rank-1 AXPY，不物化）
+  PASS  C4e3 addcmul_ 与物化式**容差内一致**（fp32 1 ulp，非逐位）  [max|Δ|=2.384e-07 相对=5.228e-08]
+
+[C4f] gather 精度开关与死代码检查（P145）
+  PASS  C4f1 config 里 readout_gather_impl **只定义一次**（P145 清掉 3 份重试残留）  [实际 1 次]
+  PASS  C4f2 config 默认 gather_dtype=fp16（P147 指令）  [实际='fp16']
+  PASS  C4f2b config 默认 readout_dtype=fp8（P147 指令：模型本体 fp8）  [实际='fp8']
+  PASS  C4f3 fp16 的 g 在**容差内**（实测相对误差 ~2e-4，远松于1e-2）  [max相对Δ=2.193e-04]
+  PASS  C4f4 默认实例的 gather_dtype 是 fp32（未被动过）
+
+[D] 零回归：conn_k=0 稠密路径未被污染
+  PASS  D1 稠密构造仍是 (n_out, n_h) 且 conn_k=0  [(40, 64)]
+  PASS  D2 稠密前向形状不变  [(40,)]
+  PASS  D3 稠密更新仍生效（W 已变）
+
+==============================================================================
+结果：39/39 通过 | 失败 0
+==============================================================================
+
+[stderr]
+D:\AiModel\train\phdnet\backends\accel_readout.py:514: RuntimeWarning: torch.compile 不可用，回落 eager：'gbk' codec can't decode byte 0x94 in position 618: illegal multibyte sequence
+  warnings.warn(f"torch.compile 不可用，回落 eager：{e}",

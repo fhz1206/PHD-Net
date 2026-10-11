@@ -150,8 +150,12 @@ create / cast / matmul 全部 ERR01007，torch.ops 里零个 fp8 算子 ——
 - **存储侧**：fp8 e4m3fn 位模式由 uint8 承载（纯字节，无需 fp8 算子）——
   1 B/元素的访存收益完整保留；
 - **计算侧**：查表反量化 → fp16 GEMV/gather；或每步 CPU 转换 int8 码本走
-  **真实存在**的 int8 算子（P154/P155；转换核 `phdnet_rs/src/fp8_conv.rs`，
-  x86 实测量化 LUT 版比 torch 向量化快 8.44×）；
+  **真实存在**的 int8 算子（P154/P155；`--fp8-conv` 选 **torch**（默认）/ **nogil**，
+  转换核在 `phdnet/backends/fp8_int8_convert.py`）。
+  🔴 原第三个选项 `rust`（`phdnet_rs/src/fp8_conv.rs`）**已随 P188 整体删除**，
+  传旧值会**按 torch 处理**（不报错 —— 两条 Python 路径本就逐位一致）；
+  ⚠ 那个「rust 版比 torch 快 8.44×」的 x86 实测数字**已随实现删除而作废**，
+  不可再作为选型依据。
 - **迭代侧**：fp16 域 rank-1 更新 → RNE cast 回 fp8 位模式（fhz「迭代用 fp16」）。
 
 ⚠ 换 910C/950（原生 MXFP8）或 ROCm gfx942 时，探测会自动命中原生 fp8
@@ -350,6 +354,10 @@ P30 删除前的 `TorchPHDNet.__init__` 有一段显式拒绝表。**这些机�
 **第三组（结构约束）**：`sparse_conn=False`（要求稠密主干）显式拒绝 ——
 torch 栈恒用稀疏 CSR 语义（`TorchSparsePC` 只实现 CSR 边表示）；
 `readout_dtype ∈ {fp8, fp4}` 拒绝。
+⚠ **这是 P30 删除旧 torch 栈时的历史拒绝表，不是现行加速后端的能力表**：
+现行 `AccelReadout._unsupported_reason()` 对 `fp8`/`int8` **返回 `None`（放行）**
+（`accel_readout.py:1776-1777`），P189 起 fp8 位模式存储为**默认**路径；
+`fp4`/`int4` 才仍被拒（P191e）。参见本文 §3.2 与 §3.4。
 
 ⚠ 这份清单共 **20 项 config 机制 + 1 项 `plateau_sleep`**，源码注释里
 「缺 7 项机制」指的是**第二组**那 7 项静默忽略的，不是总数。
@@ -390,7 +398,7 @@ torch 栈恒用稀疏 CSR 语义（`TorchSparsePC` 只实现 CSR 边表示）；
 | `tools/accel_doctor.py` | 设备**真的能算**吗 | ① 环境矩阵（torch / torch_npu / **CANN 版本** + 配对警告）② `resolve_devices` 结果 ③ **试分配真实规模张量 + 前向 matvec**（默认 73,958×3,072 fp32 ≈ 908 MB）④ 性能对照（设备 torch / CPU torch / numba 基线）⑤ 结论。`--no-bench` 只诊断 |
 | `tools/probe_readout_precision.py` | 低精度**是否丢弃学习更新** | 纯测量，不改生产代码（§四） |
 | **`tools/diag_readout_npu.py`**<br>（P113 新增，**已删**——结论沉淀在性能文档 §3.5） | **读出热路径还有没有设备同步点？时间花在带宽还是算子？** | 两个子问题：① **同步点静态扫描**（扫 `torch.equal` / `.item()` / `.cpu()` / `bool(tensor)` 等显式同步原语）；② **字节流量拆解**（分idx / val / 临时张量 `g` / `dp` 四项）。⚠ **带宽下界是估算值不是实测**（依赖假设带宽）——**把下界当实测是本项目反复踩过的坑**（`BUGS.md` A8/B12） |
-| `tools/bench_accel.py` | 读出热路径基准 + **等效带宽 GB/s** | 默认 V=73,958 / H=3,072（1B 真实词表规模），fp32/fp16/bf16 **三档都跑**。读出是 GEMV，**受带宽限制而非算力** → 等效带宽（3×|W| / 耗时）是**唯一可跨平台比较的指标** |
+| `tools/bench_accel.py` | 读出热路径基准 + **等效带宽 GB/s** | 默认 V=73,958 / H=3,072（1B 真实词表规模），fp32/fp16/bf16 **三档都跑**。读出是 GEMV，**受带宽限制而非算力** → 等效带宽（3×\|W\| / 耗时）是**唯一可跨平台比较的指标** |
 | `multi_device.capability_report()` | 后端 × 设备能力矩阵 + 本机探测 + 行动建议 | `verbose=True` 打印 |
 
 ### 7.2 ⚠ 判断加速是否生效：看日志，不看「检测到设备」
@@ -430,10 +438,10 @@ CPU 侧 4.26 ms vs NPU 侧 7.83 ms（性能文档 §4.1）→ **瓶颈在 NPU �
 |---|---|
 | `verify_accel_readout.py` | `AccelReadout` 对拍 + **接口完整性自动扫描**（A4：正则扫全仓库 `readout.X` 访问面）+ 拒绝路径断言（A3） |
 | `verify_accel_readout_p55.py` | **2×2 矩阵**（target 数组 / `target_idx` × eager / compiled），判据容差 1e-5 |
-| `verify_accel_sparse.py` | 稀疏读出 27 例：数值等价 / 调用面 / 拒绝路径 / 零回归 |
+| `verify_accel_sparse.py` | 稀疏读出 39 例：数值等价 / 调用面 / 拒绝路径 / 零回归 |
 | `verify_multi_device.py` | 设备解析 / 分片均衡与余数 / 单设备 ≡ `AccelReadout` / 分片 ≡ 单设备（**逐位**）/ 计划报告 / host 线程收敛 |
 | `bench_accel_path.py` | 复现读出路径的设备流量与墙钟对照 |
-| **`verify_m2_kernels.py`**（P113 新增，11 例） | M2 推理核三态（fused/serial/plain）对拍。它属 CPU 侧而非设备侧，列在这里是因为**默认值切换的零回归证据**（A1/A2/A3 + 行级 prange 不改变求和顺序） |
+| **`verify_m2_kernels.py`**（P113 新增，13 例） | M2 推理核三态（fused/serial/plain）对拍。它属 CPU 侧而非设备侧，列在这里是因为**默认值切换的零回归证据**（A1/A2/A3 + 行级 prange 不改变求和顺序） |
 | `python tests/run_tests.py fast` | 零回归门槛 **9/9** |
 
 `verify_accel_sparse.py` 的价值在于它是**实现的准入门槛，不是事后补的测试** ——
@@ -456,11 +464,11 @@ ckpt 的 `val[:] = ...` 写进无人引用的数组 → **检查点「恢复成�
 | 1 | **能力表与 `_DT` 错位：`int16` / `int32` 被能力表放行但构造期 `ValueError`** | `_unsupported_reason()` 对 `int16`/`int32` 返回 `None`（放行），但 `_DT` 只有 `{fp32, fp16, bf16, int8}` → 构造抛 `ValueError: 不支持 dtype='int16'`。实测：`pick_readout_backend` 静默回落 `numba-cpu`，**`fallback_reason=None`（原因丢失！）** | 🔴 **活跃缺陷**。CLI `--readout-dtype` 的 `choices` 含 `int16`/`int32`，用户可选 → 选了就走 numba，且**日志不打印回落原因**（因为不是被 `_unsupported_reason` 拒的，是构造异常）。这正好是踩坑 15 的变种 |
 | 2 | `train/train.py:389`、`train/infer.py:222,248` 仍引用**已删除**的 `tools/train_torch_lm.py` | commit `4120a5b`（P30）删除了该文件；三个引用点仍在打印「torch 栈 tools/train_torch_lm.py --device auto」 | 🟠 用户按提示去跑会 `file not found` |
 | 3 | `phdnet/device.py::_verify` 永远返回 `False` | 函数体第一行就 `raise NotImplementedError`（`selftest_torch` 已随 P30 删除），`return bool(selftest_torch(...))` 是**不可达代码** | 🟡 `BackendInfo.verified` 恒 False。语义上是「等价自检已随旧栈移除」，但写法是死代码 + 会误导 |
-| 4 | CLI `--readout-dtype` **实际默认 `fp32`**，但部分文档写 `fp16` | `train/train.py:206` `default="fp32"`；help 文本写「默认 fp32（P110 实测）」。旧版文档与 `文档写作规范.md` §2.4 仍写 fp16 | 🟡 P110 已改默认，文档未同步 |
+| 4 | ~~CLI `--readout-dtype` 实际默认 `fp32`，但部分文档写 `fp16`~~ | ✅ **已过时两次，现已解决**：`train/train.py:324` `default="fp8"`、`choices=["fp32","fp16","bf16","fp8"]`，help 写「**默认 fp8**（P189，fhz 2026-10-07：模型 fp8，迭代 fp16）」。`phdnet/config.py:318` 同样是 `readout_dtype: str = "fp8"` —— **CLI 与库 config 一致**，P110 的 fp32 默认已是历史 | 🟢 已修。⚠ 代价**不是**已消失而是**已记录**：fp8 步长比 fp16 粗约 4 倍，非目标行 `p − t` 更新保留率最低 → 学习偏向纯 Hebbian（§3.2、§四 P110 实测；启动日志按精度分叉点名保留率，`train/train.py:987-1037`） |
 | 5 | ~~CLI `--m2-kernel` 实际默认 `serial`，但 help 文本写「默认 plain」~~ | ✅ **P113 已解决**：`train/train.py:250` `default="plain"`，help 同步改写为实测数字（M2 6.92 → 1.28 ms/tok、5.41×、端到端 17.63 → 12.09、四个采样点 PPL 逐位相同）。**`serial` 现为历史默认** | 🟢 已修（本文是修复范例：help 不必删数字，改成**实测数字**更有用） |
-| 6 | CLI `--encoder-dtype` **实际默认 `fp32`**，但 help 文本写「**默认 fp64**」 | `train/train.py:256` `default="fp32"`，help 写「**默认 fp64**：昇腾 aarch64 上 fp32 sgemv 实测慢约 70 倍」 | 🟡 help 自相矛盾（P107 已把默认改回 fp32） |
+| 6 | CLI `--encoder-dtype` **实际默认 `fp32`**，但 help 文本写「**默认 fp64**」 | `train/train.py:408` `default="fp32"`，help 写「**默认 fp64**：昇腾 aarch64 上 fp32 sgemv 实测慢约 70 倍」。库 `config.encoder_dtype` 是 `fp64`（`config.py:330`） | 🟡 help 自相矛盾（P107 已把**CLI** 默认改回 fp32；库默认 fp64 是有意的，CLI 显式覆盖 —— 见《扩展指南》§4） |
 | 7 | 稀疏读出**已在加速后端实现**，但 `phdnet/backends/README.md` §四回落表仍列 `readout_conn_k > 0 → 回落` | `_unsupported_reason()` 对 `readout_conn_k=128` 返回 `None`（实测）；README 表格仍写「加速后端未实现」 | 🟡 子包 README 滞后于 P111 |
-| 8 | `phdnet/backends/README.md` 标题写「精度：读出默认 int8」，正文表格写「默认 `--readout-dtype fp16`」 | 实际默认 `fp32` | 🟡 同一文件内自相矛盾 |
+| 8 | `phdnet/backends/README.md` 标题写「精度：读出默认 int8」，正文表格写「默认 `--readout-dtype fp16`（CLI 默认；库 config 默认 bf16）」，且写「fp8 / fp4 在所有加速器禁用（P86）」 | 实际默认 **`fp8`**（`train/train.py:324` 与 `config.py:318` 一致），且 **fp8 的 blanket ban 已于 P189 解除**（`_unsupported_reason()` 对 `_rd in ("int8","fp8")` 返回 `None`，`accel_readout.py:1776-1777`）；fp4/int4 才仍禁（P152/P191e） | 🟡 同一文件内自相矛盾，**且禁令口径已过期**（`phdnet/backends/README.md:77,82,86,89,90`） |
 | 9 | `phdnet/backends/README.md` 称 verifier 有 `verify_accel_sparse` 外的引用、以及 `bench_accel.py` 三档 | `ls tests/verifiers/` = **22 个 `.py`**（21 个 `verify_*` + 1 个 `bench_accel_path`；P113 新增 `verify_m2_kernels.py`）。`文档写作规范.md` §2.7 已同步为 22 | 🟢 计数已同步（`verify_accel_sparse` / `verify_readout_intdtypes` / `verify_readout_sparse_gate` / `verify_ltm_learn_batch` / `verify_m2_kernels` 是后加的） |
 | 10 | `phdnet/backends/torch_backend.py` 模块 docstring 首行仍写「STDP 关联核的 torch 实现」，但文件里**只有探针 + 基准** | `TorchSTDPCore` 已随 P30 删除；docstring 未同步 | 🟢 首行描述误导 |
 

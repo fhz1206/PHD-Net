@@ -134,7 +134,11 @@ def g1_numeric_equivalence() -> None:
               f"最大相对差 {rd:.3e}")
 
         # (b) 保留位置上的权重必须**原样搬运**（值/索引都没错位）。
-        Wd = W.astype(np.float64)
+        # ⚠ 2026-10-07：参照 dtype 从 float64 改为 **float32** —— P173（M2/M3/M4a
+        #   定案 fp32）后 `_from_dense_csr` 的 val 就是 fp32 存储，拿 fp64 输入
+        #   去比 fp32 存储测的是**精度选择**，不是「搬运错位」；本条的职责是后者，
+        #   故参照必须与存储同 dtype（仍然要求 max|Δ| == 0.0，一个字节都不许差）。
+        Wd = W.astype(np.float32)
         same_pos = True
         max_pos = 0.0
         for i in range(N_OUT):
@@ -153,8 +157,15 @@ def g1_numeric_equivalence() -> None:
         if k == N_IN:
             y_orig = Wd @ h
             rd0 = rel_diff(y_sparse, y_orig)
-            check("k=n_in（不裁剪）稀疏前向 == 原稠密前向", rd0 < REL_TOL,
-                  f"最大相对差 {rd0:.3e}")
+            # ⚠ 2026-10-07：容差由 1e-12 放宽到 1e-5。此时**没有任何裁剪**，
+            #   差异只可能来自「W 经 fp32 存储」（P173）+ CSR 顺序累加 vs BLAS 分块。
+            #   ⚠ 证据更正（交叉验证）：本机实测最大相对差 **5.280e-15**，
+            #   早先注释里写的 1.221e-06 **复现不出来、不得再引用**。
+            #   保留 1e-5 是给**跨平台 BLAS/设备差异**留的余量：错位/裁剪类缺陷是
+            #   O(1) 级差异，1e-5 仍能抓住；而 1e-12 在换 BLAS 或换设备时可能误报。
+            #   裁剪是否引入误差由上面 (a) 用 1e-12 单独钉住，两者不共用容差。
+            check("k=n_in（不裁剪）稀疏前向 == 原稠密前向（fp32 级容差）",
+                  rd0 < 1e-5, f"最大相对差 {rd0:.3e}（fp32 存储 + 归约顺序）")
 
     # (d) Readout.from_dense(k=0) 的权重必须与稠密实例**完全相同**。
     #     这是端到端对拍的入口：权重不同则后面所有比较都无意义。
@@ -340,10 +351,16 @@ def g3_update_path() -> None:
     leaked = [int(i) for i in touched_rows if i != 0]
     check("行归属隔离：仅第 0 行有梯度时，只有第 0 行的 val 变化", not leaked,
           f"泄漏到行 {leaked[:5]}" if leaked else f"变化行 = {touched_rows.tolist()}")
+    # ⚠ 2026-10-07：期望值必须先落到 val 的 dtype（fp32，P173），否则它是
+    #   fp64 中间量、与 fp32 存储比出 ~1e-9 的假差异（本条原本 1e-13 容差必然红）。
+    #   与上面 (c2a) 的 `expect` 数组同口径 —— 那条之所以一直是 0.000e+00，
+    #   正是因为它写进了 fp32 数组、自动取整。
+    expect0 = (v_m[:row_w[0]]
+               + eta_l * 0.5 * b_l[idx_m[:row_w[0]]]).astype(val_m.dtype,
+                                                             copy=False)
     check("行归属隔离：第 0 行变化量与 eta·a·h 一致",
-          scaled_err(val_m[:row_w[0]],
-                     v_m[:row_w[0]] + eta_l * 0.5 * b_l[idx_m[:row_w[0]]]) < 1e-13,
-          "行内更新量核对（尺度归一）")
+          scaled_err(val_m[:row_w[0]], expect0) < 1e-13,
+          "行内更新量核对（尺度归一，期望已按 fp32 存储取整）")
     check("行归属隔离：其余行 val 逐位不变",
           np.array_equal(val_m[row_w[0]:], v_m[row_w[0]:]),
           f"第 1..{N_OUT - 1} 行未变")

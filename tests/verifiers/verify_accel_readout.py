@@ -167,14 +167,12 @@ def main() -> None:
           _unsupported_reason(PHDNetConfig(readout_dtype="int8")) is None)
     check("A3 fp8 旧名别名放行（=int8，P100 正名 / P105 同步）",
           _unsupported_reason(PHDNetConfig(readout_dtype="fp8")) is None)
-    # P151（fhz 2026-10-03「解禁 fp8, fp4, int4, int8」）：4-bit **已解禁**。
-    #   P86 当初的理由「910B 无 INT4 矩阵乘单元」对稀疏 gather-GEMV 不成立——
-    #   4-bit 在加速臂是 **uint8 打包 + fp16 计算域**（`_pack4`/`_unpack4`），
-    #   **不需要 int4 矩阵乘单元**。存储省 8×（vs fp32）是真实的。
-    check("A3 int4 放行（P151 解禁：uint8 打包 + fp16 计算，不需 int4 单元）",
-          _unsupported_reason(PHDNetConfig(readout_dtype="int4")) is None)
-    check("A3b fp4 放行（P151 解禁）",
-          _unsupported_reason(PHDNetConfig(readout_dtype="fp4")) is None)
+    # P191e（fhz 2026-10-07 指令）：int4/fp4 计算代码**整体删除**（P152 定案
+    # 「unpack 开销抵消存储收益」，从未上生产）——能力表把显式请求拦下。
+    check("A3 int4 显式请求被拒（P191e 已删，fail-fast）",
+          _unsupported_reason(PHDNetConfig(readout_dtype="int4")) is not None)
+    check("A3b fp4 显式请求被拒（P191e 已删，fail-fast）",
+          _unsupported_reason(PHDNetConfig(readout_dtype="fp4")) is not None)
 
     # ── A4：接口完整性自动扫描（P23 根治：三次崩溃都是漏属性）──
     print("[A4] 接口完整性（扫描全仓库 readout.X 访问面）")
@@ -190,7 +188,11 @@ def main() -> None:
                 txt = f.read_text(encoding="utf-8", errors="ignore")
             except Exception:                                # noqa: BLE001
                 continue
-            for m in re.finditer(r"readout\.([a-zA-Z_][a-zA-Z_0-9]*)", txt):
+            # 门禁收紧：锚定左边界 —— `accel_readout.pick_readout_backend`
+            # 这类**模块名**访问（左邻是 `_`）与 `x.readout.Y` 形式不再被
+            # 误捕成实例属性访问面。
+            for m in re.finditer(
+                    r"(?<![\w.])readout\.([a-zA-Z_][a-zA-Z_0-9]*)", txt):
                 used.add(m.group(1))
     # 本模块自身定义的属性不算；只检查**外部访问面**
     own = set(re.findall(r"def ([a-zA-Z_][a-zA-Z_0-9]*)",
@@ -204,11 +206,12 @@ def main() -> None:
     inst = AccelReadout(8, 8, None, device="cpu", w0=np.zeros((8, 8), np.float32))
     missing = []
     for name in sorted(used):
+        # 门禁收紧：正则已锚定左边界（`(?<![\w.])readout\.`），
+        # `accel_readout.AccelReadout` / `accel_readout.resolve_accel_device` /
+        # `accel_readout.pick_readout_backend` 这些**模块级名**不再被误捕
+        # → 从 skip 表删除（删除后 A4 仍须全绿，否则说明真有漏网访问面）。
         if name in ("py", "Readout", "forward", "device", "X",
-                    "_accel_fallback_reason", "backends", "_csr",
-                    "AccelReadout",          # from .accel_readout import AccelReadout
-                    "resolve_accel_device"):  # from .accel_readout import resolve_accel_device
-
+                    "_accel_fallback_reason", "backends", "_csr"):
             continue                                    # 模块名/自身属性/诊断用
         if not hasattr(inst, name):
             missing.append(name)
@@ -301,6 +304,143 @@ def main() -> None:
         check(f"F1 {_dt} 构造被拒绝（P163 硬约束）", _rej,
               "int 族已整体禁用")
 
+    # ── H：fp8 端到端（P0-1 / P0-2 / P0-3 门禁，2026-10-07 修复后补）──────
+    # 覆盖三条「曾全绿通过却必崩/必损坏」的路径：
+    #   P0-1 稀疏 fp8 原生更新把**位模式当实值**（一步 max|ΔW|=160，期望 ~0.06）；
+    #   P0-2 forward()/__call__() 无 P191c 降级兜底（CPU 无 fp8 GEMV → 直接崩）；
+    #   P0-3 learn() 三种 fp8 存储态全部崩溃（addmv / Byte vs Half / Promotion）。
+    # 判据是「量级 + 有限性 + 容差」而非逐位（fp8 格点本身非线性）。
+    print("[H] fp8 端到端（P0-1 更新损坏 / P0-2 forward 降级 / P0-3 learn）")
+    from phdnet.backends.fp8_int8_convert import FP8_VAL_LUT
+
+    def _fp8_dec(ro_h):
+        """W（fp8 原生或降级后的 uint8 位模式）→ 实值（LUT 精确反量化）。"""
+        bits = ro_h.W.view(torch.uint8).detach().cpu().numpy().reshape(-1)
+        return FP8_VAL_LUT[bits].reshape(tuple(ro_h.W.shape)).astype(np.float64)
+
+    _eta_h = 0.05
+    _n_hh, _n_oo = 64, 96
+    _rng_h = np.random.default_rng(11)
+    _w0_h = _rng_h.normal(0.0, 0.05, (_n_oo, _n_hh)).astype(np.float32)
+    _h_h = (np.abs(_rng_h.normal(0.0, 1.0, _n_hh)) + 0.1).astype(np.float32)
+    _t_h = np.zeros(_n_oo, dtype=np.float32)
+    _t_h[int(_rng_h.integers(0, _n_oo))] = 1.0
+
+    def _h_case(tag, sparse):
+        ck = 8 if sparse else 0
+        ro_h = AccelReadout(_n_hh, _n_oo, None, device="cpu", dtype="fp8",
+                            w0=None if sparse else _w0_h, conn_k=ck)
+        # ① forward 不抛（P0-2）；CPU fp8 GEMV 不可用是上游事实 → 必须降级跑完
+        try:
+            y_h = ro_h.forward(_h_h)
+            _ok, _err = True, ""
+        except Exception as _e:                                # noqa: BLE001
+            y_h, _ok, _err = None, False, f"{type(_e).__name__}: {_e}"
+        check(f"H{tag} forward() 不抛（P0-2）", _ok, _err)
+        if not _ok:
+            return
+        if not sparse:
+            # 稠密：上游无 fp8 GEMV（addmv_impl_cpu 未实现）→ 必须已永久降级，
+            # 且存储仍是 1 字节（fp8 请求的访存语义不丢）。
+            _deg = bool(ro_h._fp8_bits) and ro_h.W.dtype == torch.uint8
+            check(f"H{tag} CPU 无 fp8 GEMV（上游）→ 降级 fp8_bits 且存储 1B",
+                  (ro_h.device != "cpu") or (_deg and ro_h.W.element_size() == 1),
+                  f"device={ro_h.device} _fp8_bits={ro_h._fp8_bits} W={ro_h.W.dtype}")
+        else:
+            # 稀疏：前向走 P154 int8 计算域（不降级），存储必须仍是 1 字节 fp8
+            check(f"H{tag} 稀疏 fp8 存储保持 1B（原生或位模式）",
+                  ro_h.W.element_size() == 1
+                  and (bool(ro_h._fp8_native) or bool(ro_h._fp8_bits)),
+                  f"W={ro_h.W.dtype} _fp8_native={ro_h._fp8_native}")
+        # ② learn_softmax 一步不抛 + ΔW 与 η·|dp|·|h| 同量级（P0-1 损坏 = 160）
+        _Wb = _fp8_dec(ro_h)
+        try:
+            _nll = ro_h.learn_softmax(_h_h, _t_h, _eta_h, y_pre=y_h)
+            _ok2, _err2 = True, f"nll={float(_nll):.4f}"
+        except Exception as _e:                                # noqa: BLE001
+            _ok2, _err2 = False, f"{type(_e).__name__}: {_e}"
+        check(f"H{tag} learn_softmax 一步不抛（P0-1 路径）", _ok2, _err2)
+        if not _ok2:
+            return
+        _Wa = _fp8_dec(ro_h)
+        _p = np.exp(np.asarray(y_h, dtype=np.float64) - float(np.max(y_h)))
+        _p = _p / _p.sum()
+        _bnd_s = (1.5 * _eta_h * float(np.abs(_p - _t_h).max())
+                  * float(np.abs(_h_h).max()))
+        _d1 = float(np.abs(_Wa - _Wb).max())
+        check(f"H{tag} learn_softmax max|ΔW| ≤ 1.5·η·max|dp|·max|h|（损坏=160）",
+              _d1 <= max(_bnd_s, 1e-6),
+              f"max|ΔW|={_d1:.4g} ≤ {max(_bnd_s, 1e-6):.4g}")
+        # ③ learn() 一步不抛 + ΔW 同量级 + W 全有限（P0-3；dp 基准 = 新前向）
+        _y2 = ro_h.forward(_h_h)
+        _Wb2 = _fp8_dec(ro_h)
+        try:
+            ro_h.learn(_h_h, _t_h, _eta_h)
+            _ok3, _err3 = True, ""
+        except Exception as _e:                                # noqa: BLE001
+            _ok3, _err3 = False, f"{type(_e).__name__}: {_e}"
+        check(f"H{tag} learn() 一步不抛（P0-3）", _ok3, _err3)
+        if not _ok3:
+            return
+        _Wa2 = _fp8_dec(ro_h)
+        _bnd_l = (1.5 * _eta_h * float(np.abs(_t_h - _y2).max())
+                  * float(np.abs(_h_h).max()))
+        _d2 = float(np.abs(_Wa2 - _Wb2).max())
+        _fin = (bool(np.isfinite(_Wa2).all())
+                and float(np.abs(_Wa2).max()) <= 448.0)   # e4m3 最大有限值
+        check(f"H{tag} learn max|ΔW| 同量级 + W 全有限（fp8 ≤448）",
+              _d2 <= max(_bnd_l, 1e-6) and _fin,
+              f"max|ΔW|={_d2:.4g} ≤ {max(_bnd_l, 1e-6):.4g} "
+              f"max|W|={float(np.abs(_Wa2).max()):.4g}")
+        # 结构不变量（门禁收紧时**保留**）：W 必须始终落在 e4m3 格点上 ——
+        # LUT 反量化的每个值再做一次 float32→e4m3→float32 往返必须逐位还原。
+        _bits_g = ro_h.W.view(torch.uint8).detach().cpu().numpy().reshape(-1)
+        _vals_g = np.asarray(FP8_VAL_LUT[_bits_g], dtype=np.float32)
+        _rt_g = (torch.from_numpy(_vals_g).to(torch.float8_e4m3fn)
+                 .to(torch.float32).numpy())
+        _gok = bool(np.array_equal(_rt_g, _vals_g, equal_nan=True))
+        check(f"H{tag} W 落在 e4m3 网格（fp8 往返逐位还原）", _gok,
+              f"non-grid={int((~np.equal(_rt_g, _vals_g)).sum())}")
+        # ④ 前向对拍（**门禁收紧**）：
+        #    稠密（LUT→fp16 GEMV）实测 1.3e-4 → 1e-2 判据（按任务书口径）；
+        #    稀疏前向走 P154 W8A8（fp8→int8 重量化 + 激活动态 int8）——旧门禁
+        #    拿「同一份量化后权重的 fp32 孪生」对拍，把**量化本身**的实测
+        #    2.6e-2 也算进容差（5e-2），损坏（O(1)）之外近 10× 的漂移会漏网。
+        #    现在在门禁里用 numpy **复刻同一重量化管线**（W 与 gather 后的 h
+        #    都量化到 int8 网格、int16 乘 + 整数累加、最后脱两个 scale）——
+        #    量化误差被复刻吸收 → 容差 5e-2 → **1e-3**（实测 rel 见输出）。
+        #    结构不变量「max|ΔW| ≤ 1.5·η·max|dp|·max|h|」与「W 落在 e4m3 网格」
+        #    在本块之外**单独保留**，收紧容差不得把它们删掉。
+        _y_now = ro_h.forward(_h_h)
+        if sparse and bool(getattr(ro_h, "_int8_compute", False)):
+            _ws_r, _gs_r = (float(v) for v in ro_h._last_int8_scales)
+            _Wd = _fp8_dec(ro_h)                    # (n_out,k) fp8 实值
+            _Wq = np.clip(np.rint(_Wd.astype(np.float32)
+                                  / np.float32(_ws_r)), -127, 127)
+            _g_t = getattr(ro_h, "_cache_g", None)  # 实现真实用到的 gather(h)
+            if _g_t is None:                        # 理论不发生（前向必 gather）
+                _g_t = torch.from_numpy(
+                    np.ascontiguousarray(_h_h, dtype=np.float32))[ro_h.Wi.long()]
+            _g32 = _g_t.detach().cpu().numpy().astype(np.float32)
+            _Gq = np.clip(np.rint(_g32 / np.float32(_gs_r)), -127, 127)
+            # int16×int16 → 整数累加（k=8 远不回绕）→ 脱两个 scale，与 torch
+            # 侧逐位同整数；量化/舍入全部在 numpy 里复刻 → 误差只剩 fp32 末次乘。
+            _y_ref = (_Wq.astype(np.int64) * _Gq.astype(np.int64)
+                      ).sum(axis=1) * (_ws_r * _gs_r)
+            _tol, _ref_kind = 1e-3, "numpy 复刻重量化管线"
+        else:
+            _twin = AccelReadout(_n_hh, _n_oo, None, device="cpu", dtype="fp32",
+                                 w0=_fp8_dec(ro_h).astype(np.float32), conn_k=ck)
+            _y_ref = _twin.forward(_h_h)
+            _tol, _ref_kind = 1e-2, "fp32 孪生"
+        _rel = (float(np.abs(np.asarray(_y_now, dtype=np.float64)
+                             - np.asarray(_y_ref, dtype=np.float64)).max())
+                / max(float(np.abs(_y_ref).max()), 1e-6))
+        check(f"H{tag} forward y vs {_ref_kind}（相对峰差 ≤{_tol:g}）",
+              _rel <= _tol, f"rel={_rel:.3e}")
+
+    _h_case("D", sparse=False)
+    _h_case("S", sparse=True)
 
     print("-" * 76)
     if _FAILURES:

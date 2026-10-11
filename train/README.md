@@ -86,6 +86,14 @@ python tests/run_tests.py fast
 | `--omp-proc-bind` | **开** | 设 `OMP_PROC_BIND=close` 把 OpenMP 线程绑到物理核。⚠ 只设 PROC_BIND、**不设 `OMP_PLACES=cores`**——191 核 place 表会让线程池每次同步遍历，实测 M2 慢 8–13×。`--no-omp-proc-bind` 关闭 |
 | `--torch-compile` | **关** | 默认 OFF：inductor 编译在服务器上不稳定（debug trace 干扰 + 编译耗时不可控）；eager 在 NPU 上是 4 个小 kernel 异步流提交。本机实测曾 +15%（26.34 vs 30.98 ms/tok），但跨平台不保证 |
 | `--torch-compile-mode` | `default` | 显式开编译时的模式。**必须用 `default`**：读出每步原地更新 W，cudagraphs 拒绝 mutated inputs，`reduce-overhead` / `max-autotune` 会打印 `skipping cudagraphs due to mutated inputs` 并丢掉该收益 |
+
+### P192 新增（全部默认关闭，铁律④）
+
+| 开关 | 默认 | 说明 |
+|---|---|---|
+| `--cython-kernels` | **`off`** | `off`/`auto`/`force`。`auto` = M2/M3 的 CSR/STDP 核改走 `phdnet/_cykernels.pyx`（Cython nogil + OpenMP），加载失败静默回落 numba；`force` 同 `auto`。⚠ **开后不是逐位等价**：numba 核全带 `fastmath=True`（FMA 收缩 + 重结合），Cython 用 `/O2`（严格 IEEE）→ 实测轨迹漂移 **8.6e-08**（@`stdp.W`）。⚠ **昇腾端到端收益无实测**（本机无昇腾）。构建：`python setup_cython.py build_ext --inplace` |
+| `--cann-dispatch` | 关 | **不新增任何行为**，只核对 P120 已默认开的 `TASK_QUEUE_ENABLE=2` / `COMBINED_ENABLE=1` 是否**真的生效**（官方列了两个静默失效条件且都不打日志：仅二进制场景生效、JIT 路径；`ASCEND_LAUNCH_BLOCKING=1` 会强制关闭 task_queue）。非昇腾环境判定为「不适用」而非失败 |
+| ~~`--readout-pipeline`~~ | — | **P192 已停用：传了直接报错退出**（`SystemExit`，发生在建模之前）。原拟做跨 token 流水，但代码核对发现训练步设备路径**已零同步**（`forward_dev` + `nll_sync_every`），静态可证收益为 0，且跨 token 前移会违反铁律③的逐 token 时序。证据：`tests/verifiers/verify_overlap_contract.py`（19/19） |
 | `--readout-conn-k` | `0`（稠密） | 稀疏读出每输出单元入边数。`0`=稠密，是**主路径也是当前架构欠账**（M6 100% 稠密）。大词表时可设 512–2048 换成 CSR 稀疏读出 |
 
 ### 2.3 规模与容量
@@ -348,4 +356,4 @@ meta 落盘**数据口径**（数据路径 / `--remote-fraction` / 语言过滤�
 | 首次启动慢 | numba 首次全量编译约 2.6 s；`[numba] cache` 看缓存目录与大小 |
 | 检查点写盘慢 | 1B 档每次约 867 MiB D2H + 数秒写盘，属预期；调大 `--ckpt-every` |
 | 想确认容量 | 启动时的容量验算表，或 `--report` 查已生长突触 / 利用率 |
-| 门禁失败 | `python tests/run_tests.py fast`（9 项）+ `tests/verifiers/` 下 26 个 verifier |
+| 门禁失败 | `python tests/run_tests.py fast`（9 项）+ `tests/verifiers/` 下的专项 verifier（**别写死数量**，用 `ls tests/verifiers/*.py` 现查） |

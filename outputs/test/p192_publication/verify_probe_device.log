@@ -1,0 +1,20 @@
+[A] 静态检查：探测用的设备必须是 self.device（已解析），不是原始入参
+[PASS] A1 `_dev` 有赋值  —— line 181: _dev = str(self.device)
+[PASS] A2 `_dev` 取自 self.device（P161 修复）  —— 若为 str(device) 则会用未解析的 'auto' → 全线 fail
+[PASS] A3 `_dev` **不是** `str(device)`  —— 当前: _dev = str(self.device)
+
+[B] 动态验证：bug 机理（device='auto' 必然失败）
+[PASS] B1 torch.ones(device='auto') 失败（bug 机理成立）  —— Expected one of cpu, cuda, ipu, xpu, mkldnn, opengl, opencl,...
+[PASS] B2 报错来自 torch 的设备表（列的是 cpu/cuda/…）  —— 这正是生产日志里那段文本
+[PASS] B3 已解析设备（cpu）可建张量
+
+[C] 回归：device=auto 的读出必须能完成探测 + 一步训练
+[PASS] C:fp16 device=auto 可跑完（落地 fp16）  —— nll=6.9846 device=cpu
+[PASS] C:bf16 device=auto 可跑完（落地 bf16）  —— nll=6.9849 device=cpu
+[PASS] C:fp32 device=auto 可跑完（落地 fp32）  —— nll=6.9845 device=cpu
+
+==================================================================
+结果：0 例 FAIL
+==================================================================
+
+[stderr]

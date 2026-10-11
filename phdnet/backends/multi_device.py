@@ -87,6 +87,12 @@ def probe_multi() -> dict:
             continue
         rec = dict(info)
         n = int(info.get("count") or 0)
+        # ⚠ 2026-10-07 修复（审计 P1-4 消费端）：有的探针记录**只有 device 没有
+        #   count**（torch_directml 原先就是），下面的 "n > 0" 会把它当成
+        #   「没有设备」→ auto 永远选不中该平台。有 device 且 ok ⇒ 至少 1 张。
+        if n == 0 and info.get("ok") and info.get("device"):
+            n = 1
+            rec["count"] = 1
         if info.get("ok") and n > 0:
             prefix = _PLATFORM_DEV.get(key)
             rec["devices"] = ([f"{prefix}:{i}" for i in range(n)]
@@ -340,7 +346,11 @@ BACKEND_MATRIX = {
 def capability_report(verbose: bool = True) -> dict:
     """返回（并可打印）后端 × 设备能力矩阵 + 本机探测结果 + 建议动作。"""
     probes = probe_multi()
-    avail = [k for k, v in probes.items() if v.get("ok") and v.get("count")]
+    # ⚠ 2026-10-07：判据从 "v.get(count)" 放宽到 "count or device" ——
+    #   缺 count 的记录会被算成「无加速器」，于是 capability_report 报
+    #   accelerators=[] 而 BACKEND_MATRIX 却写着该平台 yes（声明支持但选不中）。
+    avail = [k for k, v in probes.items()
+             if v.get("ok") and (v.get("count") or v.get("device"))]
     accel = [k for k in avail if k != "cpu"]
     report = {
         "matrix": BACKEND_MATRIX,

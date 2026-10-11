@@ -111,18 +111,19 @@ def rel_roundtrip_err(fmt: str, W: np.ndarray) -> tuple[float, float]:
 # ────────────────────────────────────────────────────────────────────────────
 def t1_construct_forward_learn() -> None:
     print("\n" + "=" * 88)
-    print("T1 · 9 种写法（7 规范名 + fp8/fp4 旧名别名）：构造 / 前向有限 / learn")
+    print("T1 · 7 种写法（6 规范名 + fp8 旧名别名；int4/fp4 已按 P191e 删除）："
+          "构造 / 前向有限 / learn")
     print("=" * 88)
     print(f"  RO_DTYPES = {RO_DTYPES}（共 {len(RO_DTYPES)} 个规范名）")
 
-    # 白名单必须恰好是 7+2 别名所覆盖的那7 个（防「加了格式忘了加进白名单」）。
-    check("RO_DTYPES 含全部 7 个规范名",
-          set(RO_DTYPES) == {"fp32", "fp16", "bf16", "int8", "int4",
+    # 白名单必须恰好是这 6 个（P191e 删 4-bit 后；防「加了格式忘了加进白名单」）。
+    check("RO_DTYPES 含全部 6 个规范名（无 4-bit）",
+          set(RO_DTYPES) == {"fp32", "fp16", "bf16", "int8",
                              "int16", "int32"},
           f"RO_DTYPES = {RO_DTYPES}")
 
     rng = np.random.default_rng(20260930)
-    for dtype in RO_DTYPES + ("fp8", "fp4"):          # 7 + 2 = 9 种写法
+    for dtype in RO_DTYPES + ("fp8",):                # 6 + 1 = 7 种写法
         try:
             ro = Readout(N_IN, N_OUT, rng, dtype=dtype)
             h = rng.normal(0, 1, N_IN).astype(np.float32)
@@ -143,13 +144,16 @@ def t1_construct_forward_learn() -> None:
 
     # 旧名必须归一到新名（否则 `fp8` 会走一条无人验证的独立路径）。
     ro8 = Readout(N_IN, N_OUT, rng, dtype="fp8")
-    ro4 = Readout(N_IN, N_OUT, rng, dtype="fp4")
     check("旧名 fp8 → int8（旧名正名兼容契约，P100）",
           ro8.dtype_name == "int8" and ro8.qfmt == "int8",
           f"fp8 → dtype_name={ro8.dtype_name}")
-    check("旧名 fp4 → int4（旧名正名兼容契约，P100）",
-          ro4.dtype_name == "int4" and ro4.qfmt == "int4",
-          f"fp4 → dtype_name={ro4.dtype_name}")
+    # P191e：4-bit 已删除 → int4/fp4 显式请求必须在白名单处 fail-fast。
+    for _bad in ("int4", "fp4"):
+        try:
+            Readout(N_IN, N_OUT, rng, dtype=_bad)
+            check(f"显式请求 {_bad} 被 fail-fast 拒绝（P191e）", False, "未拒绝")
+        except ValueError:
+            check(f"显式请求 {_bad} 被 fail-fast 拒绝（P191e）", True)
 
     # CSR 稀疏模式**仍强制 fp32**（量化码本与 CSR 不叠加）——P92/P100 已定语义，
     # 本轮不得改动，这里显式钉住。
@@ -356,47 +360,43 @@ def t4_kernel_vs_numpy() -> None:
 # ────────────────────────────────────────────────────────────────────────────
 def t5_no_regression() -> None:
     print("\n" + "=" * 88)
-    print("T5 · 不回归：fp32/fp16/bf16/int8/int4 的存储与往返行为不变")
+    print("T5 · 不回归：fp32/fp16/bf16/int8 的存储与往返行为不变"
+          "（int4 已按 P191e 删除）")
     print("=" * 88)
     rng = np.random.default_rng(31337)
     W = rng.normal(0.0, 0.05, (N_OUT, N_IN)).astype(np.float32)
     n = N_IN * N_OUT
 
-    # (a) 存储位宽不变（省内存的前提）。int4 是半字节打包（n/2 字节）。
+    # (a) 存储位宽不变（省内存的前提）。
     expect_bytes = {"fp32": 4.0, "fp16": 2.0, "bf16": 2.0, "int8": 1.0,
-                    "int4": 0.5, "int16": 2.0, "int32": 4.0}
+                    "int16": 2.0, "int32": 4.0}
     for fmt, eb in expect_bytes.items():
         ro = Readout(N_IN, N_OUT, rng, dtype=fmt)
         per = ro._codes.nbytes / n if fmt != "fp32" else ro._W.nbytes / n  # noqa: SLF001
         check(f"{fmt:<5} 存储位宽不变（{eb:g} B/权重）", abs(per - eb) < 1e-9,
               f"实测 {per:.2f} B/权重")
 
-    # (b) 码本 dtype 不变：fp16/bf16 = uint16 码、int8 = uint8 码、int4 = 打包 uint8。
+    # (b) 码本 dtype 不变：fp16/bf16 = uint16 码、int8 = uint8 码。
     #     int16 也是 uint16（符号|幅值，与 fp16/bf16 同存储形态）；int32 = int32。
     for fmt, want in (("fp16", np.uint16), ("bf16", np.uint16),
-                      ("int8", np.uint8), ("int4", np.uint8),
+                      ("int8", np.uint8),
                       ("int16", np.uint16), ("int32", np.int32)):
         codes = quantize_to(fmt, W)
         check(f"{fmt:<5} 码本 dtype = {np.dtype(want).name}",
               codes.dtype == want, f"实测 {codes.dtype}")
 
-    # (c) int4 仍是半字节打包（长度 = 元素数/2）——它走独立路径（MX 块缩放），
-    #     不能被 int16 的 2 B 逻辑污染。
-    c4 = quantize_to("int4", W)
-    check("int4 半字节打包（码数 = 元素数/2）", c4.size == n // 2,
-          f"{c4.size} 码/ {n} 元素")
+    # (c) P191e：int4 半字节打包断言已随 4-bit 删除（显式请求 fail-fast，T1 已验）。
 
-    # (d) 旧 5 种格式的往返误差仍在已验证量级（fp32 精确为 0）。
-    for fmt in ("fp32", "fp16", "bf16", "int8", "int4"):
+    # (d) 旧 4 种格式的往返误差仍在已验证量级（fp32 精确为 0）。
+    for fmt in ("fp32", "fp16", "bf16", "int8"):
         ro = Readout(N_IN, N_OUT, rng, dtype=fmt)
         ro.W = W
         e = float(np.max(np.abs(ro.W - W)) / np.max(np.abs(W)))
-        lim = {"fp32": 1e-9, "fp16": 1e-3, "bf16": 1e-2, "int8": 1e-1,
-               "int4": 5e-1}[fmt]
+        lim = {"fp32": 1e-9, "fp16": 1e-3, "bf16": 1e-2, "int8": 1e-1}[fmt]
         check(f"{fmt:<5} 往返误差 < {lim:g}（既有行为不变）", e < lim, f"{e:.3e}")
 
     # (e) LUT 表单例仍齐备，且 int32 **刻意不建 LUT**（17 GB 物化即 OOM）。
-    for fmt in ("fp16", "bf16", "int8", "int4", "int16"):
+    for fmt in ("fp16", "bf16", "int8", "int16"):
         lut, lat, sb = _q_tables(fmt)
         ok = lut is not None and lat is not None and sb > 0
         check(f"{fmt:<5} LUT 单例存在（{lut.size} 项，符号位 {sb}）", ok,

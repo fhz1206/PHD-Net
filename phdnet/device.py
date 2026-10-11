@@ -98,6 +98,7 @@ def probe(verify: bool = True) -> BackendInfo:
     verified = False
     notes = ""
 
+    # ── 昇腾 NPU（最高优先级；可用则直接返回）─────────────────────────────
     if npu_plugin:
         try:
             import torch_npu  # noqa: F401,WPS433  （注册 npu 设备）
@@ -109,17 +110,32 @@ def probe(verify: bool = True) -> BackendInfo:
             notes = "已装 torch_npu 但 NPU 不可用（检查 CANN 驱动与 npu-smi）"
         except Exception as e:
             notes = f"torch_npu 导入失败：{type(e).__name__}: {e}"
-    elif hip:
+
+    # ⚠ 2026-10-07 修复（审计 P1-7）+ **同日返工**：这里原来是 `elif hip` —— 只要机器**装了
+    #   torch_npu 但没有 NPU 硬件**，上面的 npu 块设完 notes 就把整条 elif 链
+    #   跳过，**同机的 ROCm/CUDA 直接被忽略**（实测：fake torch_npu +
+    #   `torch.cuda.is_available()` 桩 True → 返回 torch-cpu；拔掉 torch_npu
+    #   同样条件 → torch-cuda）。NPU 不可用只该是**附注**，不能短路后续探测；
+    #   且 torch_backend.probe_devices 是各平台独立探测、不受此影响 →
+    #   两套「统一口径」在同机上会给出不同答案（torch_lm 注释却声称一致）。
+    # ⚠ 2026-10-07：**把 notes 带进这两个 return** —— 否则 npu 块里记下的
+    #   「已装 torch_npu 但 NPU 不可用」这类附注会在这里被**静默丢弃**，
+    #   诊断信息只在最终的 torch-cpu 分支才带上（交叉验证发现的口径不一致）。
+    _suffix = f"；{notes}" if notes else ""
+    if hip:
         if torch.cuda.is_available():
             verified = _verify(torch, "cuda", hip) if verify else False
             return BackendInfo("torch-rocm", "rocm", "cuda", torch.__version__, hip,
                                False, numba_ok, verified,
-                               f"检测到 ROCm/HIP 运行时 {hip}（ROCm 走 cuda 设备接口）")
+                               f"检测到 ROCm/HIP 运行时 {hip}（ROCm 走 cuda 设备接口）"
+                               + _suffix)
         notes = f"torch 为 ROCm 构建（hip={hip}）但未检测到可用设备"
+        _suffix = ""
     elif torch.cuda.is_available():
         verified = _verify(torch, "cuda", hip) if verify else False
         return BackendInfo("torch-cuda", "cuda", "cuda", torch.__version__, hip,
-                           False, numba_ok, verified, "检测到 NVIDIA CUDA 设备")
+                           False, numba_ok, verified,
+                           "检测到 NVIDIA CUDA 设备" + _suffix)
 
     # DirectML（Windows 上的 AMD/Intel GPU 路径）
     if importlib.util.find_spec("torch_directml") is not None:
@@ -141,14 +157,15 @@ def probe(verify: bool = True) -> BackendInfo:
 
 
 def _verify(torch, device: str, hip) -> bool:
-    """在目标设备上跑 torch 后端与 numpy 参考的等价性自检。"""
-    try:
-        raise NotImplementedError(  # noqa: WPS433
-            "selftest_torch 已随旧 torch 栈删除（P30）；等价性对拍改由 "
-            "tests/verifiers/verify_accel_readout.py 承担")
-        return bool(selftest_torch(device=device))
-    except Exception:
-        return False
+    """torch 后端等价性自检 —— P30 后**恒为 False**（自检已随栈删除）。
+
+    2026-10-07 清理：原实现是「先 `raise NotImplementedError` 再留一行不可达的
+    `return bool(selftest_torch(...))`」—— `selftest_torch` 已不存在，那行是
+    死代码（还会误导读者以为自检还能跑）。等价性对拍的新归属见 docstring 提示。
+    """
+    # selftest_torch 已随旧 torch 栈删除（P30）；等价性对拍改由
+    # tests/verifiers/verify_accel_readout.py 承担。
+    return False
 
 
 def select_backend(prefer: str = "auto") -> BackendInfo:

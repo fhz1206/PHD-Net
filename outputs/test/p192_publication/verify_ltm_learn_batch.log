@@ -1,0 +1,12 @@
+P78：learn 批量多核路径 —— 逐位对拍 + 服务器形态计时
+  ✓ 批量 vs Python 逐位一致（int8=False, guidance=False）
+  ✓ 批量 vs Python 逐位一致（int8=False, guidance=True）
+  ✓ 批量 vs Python 逐位一致（int8=True, guidance=False）
+  ✓ 批量 vs Python 逐位一致（int8=True, guidance=True）
+  ✓ 6 步序列逐表内容逐位一致（含生长/量化/迹衰减）
+    active 128x128 (16384 combos): python   340.28 ms -> prange     2.02 ms | 168.37x
+    active 256x256 (65536 combos): python  1557.40 ms -> prange     4.72 ms | 329.80x
+
+通过 5/5（另附服务器形态计时）
+
+[stderr]

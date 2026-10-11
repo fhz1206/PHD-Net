@@ -1,0 +1,13 @@
+== Part A: CSR 并行核 vs 并行化前串行版（同 fastmath）==
+matvec     逐位: True
+add_outer  逐位: True
+oja_up     逐位: True
+row_norms  逐位: False
+scale_rows 逐位: True
+== Part B: zh 多进程流 vs 串行参考 ==
+[ci-fallback] 本地数据集缺失，使用合成语料: C:\Users\ASUS\AppData\Local\Temp\phd_ci_corpus_2j67pwf9\pretrain_*.parquet
+zh 流 块数: 串行=8 并行=8  逐位一致: True
+  首块前 60 字符: '机器学习模型的训练需要大量语料与稳定的评测基准。并行一致性验证的目标是保证多核与单核路径逐位相同。机器学习模型的训练需要'
+DONE
+
+[stderr]

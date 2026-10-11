@@ -3,14 +3,25 @@
 架构对应（文档 §2 M3）：
     稀疏拓扑：每神经元仅 m 条出边，复杂度 O(活跃×m)
     突触迹：  P_pre ← λ·P_pre + pre ；  P_post ← λ·P_post + post
-    更新：    Δw = η·(P_pre·post − P_post·pre)₊  截断于 [0, w_max]
+    更新：    Δw = η·(2·P_pre·post − P_post·pre)   再裁剪到 [0, w_max]
+              （与实现一致：numpy 分支 raw = 2·tp[i]·post[k] − tp_hist[k]·pre[i]，
+               numba 核 _stdp_delta 同式；负值直接降低权重，非 (·)₊ 正部；
+               E/I 开启时抑制性出边符号取反并裁剪到 [−w_max, 0]）
 
 计算核与自检已拆分至 phdnet/stdp_kernels.py（NUMBA_OK 在此再导出，兼容旧引用）。"""
 
+from functools import partial
+
 import numpy as np
+
+from . import stdp_kernels as _sk
 
 from .stdp_kernels import (NUMBA_OK, NUMBA_AVAILABLE, _predict_edges,
                            _predict_edges_np, _selftest_numba, _stdp_delta)
+# P192：分派入口（Cython off 时**就是**上面的 numba/numpy 实现本身，
+# off 分派只转发原核，不等于本轮 η 修复后与历史轨迹不变）。
+from .stdp_kernels import predict_edges as _predict_edges_dispatch
+from .stdp_kernels import stdp_delta as _stdp_delta_dispatch
 
 __all__ = ["STDPCore", "NUMBA_OK"]
 
@@ -25,7 +36,10 @@ class STDPCore:
                  dual: bool = False, lam_slow: float = 0.85, beta_slow: float = 0.5,
                  homeostasis: bool = False, homeo_target: float = 2.0,
                  metaplasticity: bool = False, bcm_tau: float = 0.01,
-                 ei_synapses: bool = False, ei_ratio: float = 0.2):
+                 ei_synapses: bool = False, ei_ratio: float = 0.2,
+                 cython_module=_sk._CYK_DEFAULT):
+        self._cyk = _sk._CYK if cython_module is _sk._CYK_DEFAULT else cython_module
+        self._delta = partial(_stdp_delta_dispatch, cython_module=self._cyk)
         self.n, self.m, self.lam, self.eta, self.w_max = n, m_edges, lam, eta, w_max
         # M3：T4.1 逐突触自适应；T4.2 多尺度双迹（默认关闭 = 旧行为）
         self.adaptive, self.adapt_rho, self.adapt_eps = adaptive, adapt_rho, adapt_eps
@@ -51,7 +65,8 @@ class STDPCore:
         self.t_post_slow = np.zeros(n)                       # T4.2 长窗后迹
         self.v = np.full((n, m_edges), 0.25)                 # T4.1 每突触梯度二阶矩
         self.theta = np.zeros(n)                             # BCM 滑动阈值（按突触后神经元）
-        self._predict = _predict_edges if NUMBA_OK else _predict_edges_np
+        self._predict = (partial(_predict_edges_dispatch, cython_module=self._cyk)
+                         if NUMBA_OK else _predict_edges_np)
 
     def predict(self, pre_rate: np.ndarray) -> np.ndarray:
         """由上一时刻发放率预测当前发放率（时序前瞻）。
@@ -75,20 +90,32 @@ class STDPCore:
         # 组合后的迹直接送原核——numba 路径无需改动即可支持
         if self.dual:
             self.t_pre_slow = self.lam_slow * self.t_pre_slow + pre_rate
-            self.t_post_slow = self.lam_slow * self.t_post_slow + post_rate
+            # t_post_slow **不得**在此吸收当步 post（违反上方 :70-71 顺序约束：
+            # 核内 LTD 会拿到含当前共激活的 post 迹 → 与 LTP 相消）。
+            # 移到本方法末尾（滞后一步吸收），见方法末尾注释。
             tp = self.t_pre + self.beta_slow * self.t_pre_slow
             tp_hist = self.t_post + self.beta_slow * self.t_post_slow
         else:
             tp, tp_hist = self.t_pre, self.t_post
-        # T4.1 需要逐突触状态 → 只能在 numpy 路径实现（numba 核无该参数，
-        # 且本环境 numba 自检未通过，实际始终走 numpy）
-        # 元可塑性 / STDP 稳态 / E-I 同样需要逐突触、按通道状态 → 一并强制 numpy。
-        # 默认（adaptive/homeostasis/metaplasticity/ei 全 False）仍走 numba 核，逐位不变。
+        # T4.1 需要逐突触状态 → numpy 路径（numba 核无该参数）。
+        # 元可塑性 / STDP 稳态 / E-I 同样需要逐突触、按通道状态 → 强制 numpy。
+        # 默认仍走 numba（Cython 显式开启才替换）；本轮 η 缩放修复改变历史
+        # 默认学习轨迹，不能把「off 分派未变」说成整次提交逐位不变。
         if NUMBA_OK and not (self.adaptive or self.homeostasis
                              or self.metaplasticity or self.ei_synapses):
-            _stdp_delta(self.W, self.post_idx,
-                        self.eta * eta_scale * tp, tp_hist,
-                        pre_rate, post_rate, 1.0, self.w_max)
+            # ⚠⚠ 2026-10-07 修复（审计 P0）：原调用把 `self.eta * eta_scale`
+            #   **折进 t_pre**，却给核传 `eta=1.0` 且 **tp_hist 未缩放** ——
+            #   于是 LTP 项带 η·ηs、**LTD 项一个 η 都没有**；而 numpy 分支
+            #   （下方 :113 `dw = self.eta * eta_scale * raw`）两项都乘。
+            #   后果（同种子 30 步实测）：
+            #     η=0.03, ηs=1.0 → numba W sum=1.31 vs numpy 2.31（91% vs 85% 零）
+            #     η=0.03, ηs=0.5 → 0.59 vs 1.15（M3 近死）
+            #     η=ηs=1.0      → 逐位相同 ← _selftest_numba **只测这一档**
+            #   所以自检恒绿、门禁全绿，而生产（η=0.03）两条路径早已分叉。
+            #   修法：两迹传**原始值**，η·ηs 走核的 eta 参数 —— 与 numpy 逐位同构。
+            self._delta(self.W, self.post_idx, tp, tp_hist,
+                        pre_rate, post_rate,
+                        self.eta * eta_scale, self.w_max)
         else:
             # numpy 回退（真事件驱动）：仅遍历活跃突触前神经元的出边行，
             # 计算量 O(活跃×m) 而非 O(N×m) —— 与 numba 核语义一致
@@ -126,3 +153,7 @@ class STDPCore:
                 over = nrm > self.homeo_target
                 self.W[over] *= (self.homeo_target / nrm[over])[:, None]
         self.t_post = self.lam * self.t_post + post_rate
+        if self.dual:
+            # 慢 post 迹滞后一步吸收当步 post（核已用「更新前」的历史 post 迹算完
+            # LTP/LTD，见 step() 文档的顺序要点）
+            self.t_post_slow = self.lam_slow * self.t_post_slow + post_rate

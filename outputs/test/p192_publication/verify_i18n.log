@@ -1,0 +1,53 @@
+==============================================================================
+门禁：终端 i18n（最长匹配 / 诊断行 / 粘连 / 标点 / 性能）
+==============================================================================
+
+[A] 最长匹配优先
+  PASS  A  总计用时 12.3 秒  [→ 'total time 12.3 s']
+  PASS  A  缓存目录不存在  [→ 'cache dir missing']
+  PASS  A  已加载检查点 3 个  [→ 'loaded checkpoint 3 ']
+
+[B] 词表健康
+  PASS  B1 _TABLE 无重复键  [{}]
+  PASS  B2 _MAP 与 _TABLE 键数一致（去重后无丢失）  [149 vs 149]
+  PASS  B3 每个词条单独输入都命中自身译文（无短串遮蔽）  [被遮蔽 0 个：[]]
+
+[C] 诊断行
+  PASS  C  '[precision] 读出权重 fp16 请求 → 运行时提升为 '… 原样
+  PASS  C  '[ltm-diag] recalls=10 active=16'… 原样
+  PASS  C  '[rocm-env] 设置失败（不致命）：OSError: x'… 原样
+  PASS  C  '  [probe] 稀疏路径 torch.compile 不可用'… 原样
+  PASS  C  非诊断行仍翻译  ['training finished']
+
+[D] 粘连与标点
+  PASS  D1 无中英粘连（backend unavailable）  ['readout backend unavailable, already reverted']
+  PASS  D2 全角逗号转半角  ['readout backend unavailable, already reverted']
+  PASS  D3 全角冒号转半角且无双空格  ['warning: training finished, final PPL 123.4']
+  PASS  D4 「次」译为 times 而非 x  ['3 times iteration 后仍 not converged']
+  PASS  D5 空译文（个→）不再产生双空格  ['loaded 3 checkpoint']
+  PASS  D6 句末句号不带行尾空格  ['training finished.']
+  PASS  D7 句号后紧跟汉字时补一个空格  ['training finished. 下一段 start']
+  PASS  D8 「迭代」有词条（不残留中文）  ['iteration 3 times done']
+
+[E] 保真（对齐表格 / 纯中文 / 数值）
+  PASS  E1 纯 ASCII 对齐表格逐字节不变
+  PASS  E2 纯中文未命中词条时原样返回
+  PASS  E3 数值串不变
+
+[F] 包装器与性能
+  PASS  F1 writelines 也被翻译（修前绕过）  ['training finished\nfinal PPL 123.4\n']
+  PASS  F2 install_stream_filter 幂等
+  PASS  F3 纯 ASCII 快速通道 < 10µs（修前 27.97µs）  [1.52µs]
+  PASS  F4 中文行 < 60µs  [19.59µs]
+
+[G] set_lang 边界
+  PASS  G1 默认 en  [en]
+  PASS  G2 zh-CN → zh  [zh]
+  PASS  G3 未知语言回 en（不回 zh）  [en]
+  PASS  G4 zh 模式原样返回
+
+==============================================================================
+结果：30/30 通过
+==============================================================================
+
+[stderr]

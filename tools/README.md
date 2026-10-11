@@ -2,7 +2,7 @@
 
 适用范围：本目录下**工具型脚本**的用途分组与典型命令。**参数一律以源码为准**
 （`python tools/<名>.py --help`）；未列出的参数表示该脚本没有该开关。
-**数据截止：2026-09-30。** 相关文档：`README.md`、`train/README.md`、
+**数据截止：2026-10-11（P192 发布复核）。** 相关文档：`README.md`、`train/README.md`、
 `datasets/README.md`、`datasets/UPLOAD_README.md`。
 
 > **生产入口单轨**：训练只有 `train/train.py`，推理只有 `train/infer.py`。
@@ -41,7 +41,7 @@
 
 | 脚本 | 一句话 | 典型命令 |
 |---|---|---|
-| `rebaseline.py` | 冻结语料 BASE 配置的基线复测：两个口径 + 吞吐 + 主干连接率。**无命令行参数** | `python tools/rebaseline.py` |
+| `rebaseline.py` | 冻结语料 BASE 配置比较；默认显式历史 fp32，偏移须归因；不覆盖锚点 | `py -3.14 tools/rebaseline.py --json`<br>`py -3.14 tools/rebaseline.py --readout-dtype fp8 --json` |
 | `audit_gen_eval.py` | 泛化实测：域内 held-out / 近域 / 远域 PPL + 词级 2-gram 参照（全程 readonly） | `python tools/audit_gen_eval.py --ckpt outputs/smoke/phdnet1b_smoke_sft.npz --skip-tokens 150000 --indomain-tokens 30000` |
 | `audit_precision.py` | 精度体系三层审计：L1 各 dtype 融合核 vs numpy 参考**逐位**、L2 带宽、L3 端到端 PPL。**无命令行参数** | `python tools/audit_precision.py` |
 | `audit_brain_parity.py` | 脑同构指标逐项开关实测（`--sparse-conn` / `--big-ltm` / `--cortical-init` / `--sparse-readout` / `--ei-synapses` / `--k-sparse` / `--two-level`） | `python tools/audit_brain_parity.py --big-ltm` |

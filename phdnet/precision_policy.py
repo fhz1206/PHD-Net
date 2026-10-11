@@ -88,10 +88,14 @@ DEFAULT_ITER_DTYPE = "fp16"
 def candidate_order(requested: str) -> list[str]:
     """给出 `requested` 的**降级尝试顺序**。
 
-    顺序：同族替代（窄→宽）→ 跨族（先同位宽的，再逐级放宽）→ fp32 兜底。
-    例：`fp8` → fp8, fp16, bf16, fp32, int8, int16, int32
-        `int8` → int8, int16, int32, fp8, fp16, bf16, fp32
-        `fp4` → fp4, fp8, fp16, bf16, fp32, int4, int8, int16, int32
+    顺序：请求本身 → 同族替代（窄→宽）→ 跨族 → **fp32 兜底（恰在链尾、只出现一次）**。
+    ⚠ 2026-10-07 更正示例（原示例列了 int8/int16/int32/int4，与 P163「int 族整体禁用」、
+      P152/P191e「4-bit 删除」都已不符，会误导调用方）：
+        `fp8`  → fp8, fp16, bf16, fp32
+        `fp16` → fp16, bf16, fp8, fp32
+        `bf16` → bf16, fp16, fp8, fp32
+        `fp32` → fp32
+      int 族请求直接 ValueError（见下方 P163 分支）。
     ⚠ `fp32` **始终在链上**（它是所有族的公共终点，且一定能跑），
       但**只有当前面全部不可用时才会被选中** —— 否则 fp8 就退化成 fp32 了。
     """
@@ -155,22 +159,21 @@ def candidate_order(requested: str) -> list[str]:
     out = [x for x in out if x not in ("fp4", "int4")]
     if req.lower() == "fp8" and "fp8" not in out:
         out = ["fp8"] + out
-    # 去掉裸 fp32 中间项（若已被排除则只剩 fp16/bf16）
-    if out and out[0] != "fp32" and "fp32" in out[1:]:
-        out = [out[0]] + [x for x in out[1:] if x != "fp32"]
+    # fp32 只允许出现在**链尾**（它是所有族的公共终点、一定能跑）：
+    # 原实现把 `fp32 in out[1:` 的每一处都删掉 —— 连**链尾的兜底**一起删了，
+    # 于是 chain(fp8)=[fp8,fp16,bf16]、chain(fp16)=[fp16,bf16,fp8]，
+    # 与 docstring「⚠ fp32 始终在链上…只有当前面全部不可用时才会被选中」矛盾：
+    # fp8/fp16/bf16 全部探测失败时会直接报「无任何可用精度」，而 fp32 明明可用。
+    # 2026-10-07 修复：删中间项、**保留（或补到）链尾**。
+    if out and out[0] != "fp32" and "fp32" in out:
+        out = [x for x in out if x != "fp32"] + ["fp32"]
     return out
 
 
-def _fp8_candidate_enabled() -> bool:
-    """fp8 是否进降级候选链（P167）。
-
-    默认 **False**（= P163 的口径，依据是 910B 实测）。设 `PHD_FP8=1` 打开，
-    用于**别的平台真的有 fp8 时**（例如 ROCm gfx942 / NVIDIA sm89+）——
-    打开后仍由 `resolve_precision` 的 `_probe` **真跑一次**决定，
-    跑不通会正常降级，故打开**没有正确性风险**，只有一点启动开销。
-    """
-    return str(os.environ.get("PHD_FP8", "0")).strip().lower() in (
-        "1", "true", "yes", "on")
+# 2026-10-07 删除 `_fp8_candidate_enabled()`（P167 的 PHD_FP8 开关）：
+#   **零调用方**（全仓库 grep 证实），P189 起 fp8 已无条件进链首
+#   （见 candidate_order 末尾），留着这个「默认 False 的开关」只会让读者
+#   以为 fp8 还是可选的 —— 属审计 P3-15 的「死代码 + 过期文档」。
 
 
 def describe_chain(requested: str) -> str:

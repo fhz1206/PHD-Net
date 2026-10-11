@@ -221,14 +221,27 @@ class Telemetry:
             self._smi_reported = True
             print(f"[telemetry] npu-smi = {self._smi_path}", flush=True)
         try:
+            # ⚠ 2026-10-07：显式 UTF-8 解码（text=True 默认按区域编码解码，
+            #   中文 Windows/GBK 环境下 npu-smi 输出会在 reader 线程抛
+            #   UnicodeDecodeError → 这里被 except 吞掉 → **遥测静默失效**（本行
+            #   加 encoding 就是为堵它；下面的 parse FAILED 分支另有独立开关，
+            #   2026-10-07 已把「只报一次」的 flag 从 _smi_reported 拆出），
+            #   正是 B6/B7 那类「工具静默失效」的入口）。
             r = subprocess.run([self._smi_path, "info"], capture_output=True,
-                               text=True, timeout=10)
+                               text=True, timeout=10,
+                               encoding="utf-8", errors="replace")
             got = _parse_npu_smi(r.stdout)
-            if got is None and not self._smi_reported:
+            # ⚠ 2026-10-07 修复（审计 P2-9）：这里原来**复用** `_smi_reported`
+            #   当「解析失败只报一次」的开关，但上面 220 行已经把它置 True →
+            #   `not self._smi_reported` **恒 False**，这条诊断**永不可达**：
+            #   npu-smi 输出格式一变，AI Core%/HBM 就悄悄回 `--` 而日志零线索，
+            #   正是本段注释声称修掉的「工具静默失效」。→ 拆独立开关。
+            #   另：原文 `raw head://n` 是错误转义残留（本意是换行 \n）。
+            if got is None and not getattr(self, "_smi_parse_failed_once", False):
                 # 解析失败：把原始输出打出来一次，便于按真实格式修解析器
-                self._smi_reported = True
+                self._smi_parse_failed_once = True
                 head = "\n".join(r.stdout.splitlines()[:14])
-                print(f"[telemetry] npu-smi parse FAILED; raw head://n{head}",
+                print(f"[telemetry] npu-smi parse FAILED; raw head:\n{head}",
                       flush=True)
         except Exception:                               # noqa: BLE001
             return
@@ -263,7 +276,8 @@ class Telemetry:
                 _cmd += ["-c", _cid]
             try:
                 r2 = subprocess.run(_cmd, capture_output=True, text=True,
-                                    timeout=10)
+                                    timeout=10, encoding="utf-8",
+                                    errors="replace")
                 u = _parse_npu_smi_usages(r2.stdout)
                 if not u and not getattr(self, "_usages_dbg", False):
                     # P127：**解析不到字段时必须报一次**。此前是完全静默的，
@@ -272,7 +286,7 @@ class Telemetry:
                     self._usages_dbg = True
                     print("[telemetry] `npu-smi -t usages` 未解析到字段；"
                           f"cmd={' '.join(_cmd)} rc={r2.returncode}；"
-                          f"原始输出前 6 行://n"
+                          f"原始输出前 6 行：\n"   # ← 2026-10-07：原为字面 ":/" + "n"（错误转义残留）
                           + "\n".join(r2.stdout.splitlines()[:6]), flush=True)
                 if u:
                     out.update(u)
@@ -321,7 +335,8 @@ class Telemetry:
         # `npu-smi` 直接 rc=215 "This command must input card id."。
         try:
             r = subprocess.run([self._smi_path, "info", "-l"],
-                               capture_output=True, text=True, timeout=10)
+                               capture_output=True, text=True, timeout=10,
+                               encoding="utf-8", errors="replace")
             for ln in r.stdout.splitlines():
                 m = re.match(r"\s*(?:npu\s*id|npu)\s*[:：]\s*(\d+)",
                              ln, re.I)

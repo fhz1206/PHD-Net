@@ -42,6 +42,15 @@ for p in (str(_HERE), str(_ROOT)):
 os.environ.setdefault(  # P39：numba 缓存持久化（不被 __pycache__ 清理波及）
     "NUMBA_CACHE_DIR", str(_ROOT / "outputs" / "numba_cache"))
 
+# 控制台编码容错（2026-10-07 修复）：与 train/train.py 同源 —— 中文 Windows 的
+# GBK 控制台打不出 ⚠/emoji → `UnicodeEncodeError` 让 `--help` 直接崩。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(errors="replace")
+    except Exception:
+        pass
+
+
 from ckpt_1b import _rebuild_sdrs, load_model                      # noqa: E402
 from corpus_stream import SEP, StreamingTokenizer, char_chunks     # noqa: E402
 from phdnet.config import PHDNetConfig                             # noqa: E402
@@ -104,7 +113,7 @@ def load_from_ckpt(model_path: Path) -> PHDWordLM:
         ckpt_vocab = {str(w) for w in z["tok_vocab"]}
         ckpt_tokens = [str(t) for t in z["tok_tokens"]]
         ckpt_max_len = int(z["tok_max_len"][0]) if "tok_max_len" in z.files else 6
-    cfg = PHDNetConfig(**meta["cfg"])
+    cfg = PHDNetConfig.from_ckpt(meta["cfg"])
 
     # 词表重建（与 ckpt_1b._restore_tokenizer 同一注入逻辑，逐位一致）
     seg = WordSegmenter.__new__(WordSegmenter)

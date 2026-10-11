@@ -51,106 +51,15 @@ else:                                               # pragma: no cover
     _ro_dense_update = None
 
 
-# ---------------------------------------------------------------------------
-# P183：M1 fp32 前向走 **Rust AVX2 核**（默认），BLAS 作回退。
-# ---------------------------------------------------------------------------
-# # 为什么（实测，本机 x86，best-of-8，8 线程）
-#
-#   | shape             | 标量 m1_gemv | **AVX2** | BLAS    | AVX2 vs BLAS |
-#   |-------------------|--------------|----------|---------|---------------|
-#   | 4096× 4096        | 3.51 ms      | 1.94 ms  | 2.37 ms | **1.22×**     |
-#   | 73958× 512        | 7.52 ms      | 6.53 ms  | 7.14 ms | **1.09×**     |
-#   | 51962× 3072(1b档) | 28.35 ms     | 20.92 ms | 31.80 ms| **1.52×**     |
-#   | 16384× 2048       | 6.78 ms      | 6.23 ms  | 8.07 ms | **1.30×**     |
-#   | 8192× 8192        | 12.79 ms     | 10.72 ms | 18.72 ms| **1.75×**     |
-#
-# → **Rust AVX2 全面快于 BLAS**（1.09–1.75×）。
-#   关键事实：`mechanisms::m1_gemv` 用的是**标量** `gemv_row`（逐列累加），
-#   而 `simd::gemv_row_avx2`（4 路 FMA 累加器）此前**只被 `m1_gemv_simd` 用**，
-#   生产前向从未走它 → 本次让前向直接用 AVX2 核。
-# ⚠ **数值**：AVX2 改变求和顺序 → **非逐位**（实测 relerr 1.6e-06 ~ 3.1e-06，
-#   落在 1e-5 容差门内；与 P131 einsum 非逐位 3e-5 同量级或更好）。
-# ⚠ **降级可归因**（P161）：Rust 库不可用/无 AVX2 → 回落 BLAS，原因记入 `_RO_M1`。
-_RO_M1 = {"k": None, "why": ""}
-
-
-def _m1_rust_kernels():
-    """惰性加载 Rust 核 + 探测 AVX2。返回 `(kernels, reason)`。"""
-    if _RO_M1["k"] is not None:
-        return _RO_M1["k"], ""
-    if _RO_M1["why"]:
-        return None, _RO_M1["why"]
-    try:
-        import os as _os
-        import sys as _sys
-        _d = _os.path.join(_os.path.dirname(_os.path.dirname(
-            _os.path.abspath(__file__))), "phdnet_rs")
-        if _d not in _sys.path:
-            _sys.path.insert(0, _d)
-        from phdnet_rs import load as _load
-        _k, _why = _load()
-    except Exception as _e:                       # noqa: BLE001
-        _RO_M1["why"] = "Rust 库导入失败：%s: %s" % (type(_e).__name__, _e)
-        return None, _RO_M1["why"]
-    if _k is None:
-        _RO_M1["why"] = "Rust 库不可用：%s（修：bash phdnet_rs/build.sh）" % _why
-        return None, _RO_M1["why"]
-    if not _k.has_avx2():
-        _RO_M1["why"] = "本机无 AVX2 → M1 回落 BLAS"
-        return None, _RO_M1["why"]
-    _RO_M1["k"] = _k
-    return _k, ""
-
-
-def _m1_threads() -> int:
-    """M1 核的线程数（P183：**默认 8**，与 M2 一致；env `PHDNET_M1_THREADS` 可覆盖）。"""
-    try:
-        return int(os.environ.get("PHDNET_M1_THREADS", "") or 8)
-    except ValueError:
-        return 8
-
-
-def _m1_rust_worth_it(n_in: int, n_out: int) -> bool:
-    """**按规模判断** Rust AVX2 是否比 BLAS 快（P183 实测）。
-
-    实测（本机 x86，8 线程，含调用开销）：
-
-    | n_in × n_out | cells | Rust | BLAS | 比值 |
-    |---|---|---|---|---|
-    | 256 × 1024| 26万 | 0.048ms | 0.023ms | 0.48x（输，跨界开销占主导） |
-    | 1024 × 4096 | 419万 | 0.630 | 0.659 | 1.05x |
-    | **3072 × 51962（1b档）** | **1.6亿** | 26.29 | 38.00 | **1.45x** |
-    | 2048 × 16384 | 3355万 | 7.09 | 8.44 | 1.19x |
-
-    → 门限取 **cells ≥ 1<<23（8M）**：小于它ctypes 跨界 + 分配 `out` 的
-    固定开销摊不薄，回落 BLAS。
-    ⚠ 门限可用 env `PHDNET_M1_MIN_CELLS` 覆盖（0 = 强制全程 Rust）。
-    """
-    try:
-        thr = int(os.environ.get("PHDNET_M1_MIN_CELLS", "") or (1 << 23))
-    except ValueError:
-        thr = 1 << 23
-    return n_in * n_out >= thr
-
-
-# 前向**无 bias**（等价 `W @ h`）→共享零向量，按 n_out 缓存避免每次分配
-_M1_ZERO_B = {}
-
-
-def _m1_zero_b(n_out: int):
-    z = _M1_ZERO_B.get(n_out)
-    if z is None:
-        z = np.zeros(n_out, dtype=np.float32)
-        _M1_ZERO_B[n_out] = z
-    return z
 
 
 
-# P9：量化码本的融合核（fp16/bf16/fp8/fp4）——**位算法量化**（非二分搜索：
+
+# P9：量化码本的融合核（fp16/bf16/fp8）——**位算法量化**（非二分搜索：
 # 搜索版每元素 ~15 次比较使更新核计算受限，实测 fp16 慢 fp32 33×）。
 # 各格式舍入约定（与 numpy 参考/quantize_to 一致）：
 #   fp16 = IEEE RNE（numpy astype 同源）；bf16 = RNE 位截断；
-#   fp8/fp4 = 最近格点、并列取小幅值（与格点 searchsorted 同则）。
+#   fp8 = 最近格点、并列取小幅值（与格点 searchsorted 同则）。
 # 越界一律 clamp 到最大有限码（防 Inf/NaN 毒化）。
 if NUMBA_OK:                                        # pragma: no cover
     from numba import get_thread_id
@@ -247,67 +156,6 @@ if NUMBA_OK:                                        # pragma: no cover
                     c = (e8 << 3) | man3
         return np.uint8(c | s)
 
-    @njit(inline="always")
-    def _q_fp4(scr, w, wscale):
-        v = w / wscale
-        if v < 0.0:
-            v = -v
-            if v <= 0.25: q = 8
-            elif v <= 0.75: q = 9
-            elif v <= 1.25: q = 10
-            elif v <= 1.75: q = 11
-            elif v <= 2.5: q = 12
-            elif v <= 3.5: q = 13
-            elif v <= 5.0: q = 14
-            else: q = 15
-        else:
-            if v <= 0.25: q = 0
-            elif v <= 0.75: q = 1
-            elif v <= 1.25: q = 2
-            elif v <= 1.75: q = 3
-            elif v <= 2.5: q = 4
-            elif v <= 3.5: q = 5
-            elif v <= 5.0: q = 6
-            else: q = 7
-        return np.uint8(q)
-
-    @njit(inline="always")
-    def _hash01(step, i, j):
-        """确定性哈希 -> [0,1)（跨运行可复现，不依赖全局 RNG）。"""
-        x = np.uint64(step) * np.uint64(0x9E3779B97F4A7C15) \
-            ^ (np.uint64(i) * np.uint64(0xC2B2AE3D27D4EB4F)) \
-            ^ (np.uint64(j) * np.uint64(0x165667B19E3779F9))
-        x = (x ^ (x >> np.uint64(33))) * np.uint64(0xFF51AFD7ED558CCD)
-        x = x ^ (x >> np.uint64(33))
-        return np.float64(x >> np.uint64(11)) * 1.1102230246251565e-16
-
-    @njit(inline="always")
-    def _q_fp4_sr(scr, w, wscale, step, i, j):
-        """fp4 e2m1 确定性随机舍入（P12）：v 落在格点区间 [lat[m], lat[m+1]]
-        内按线性概率取右端点——期望值 = v（无偏），小更新不被 RNE 永久吞掉
-        （e2m1 块内动态范围仅 12×，RNE 下 |Δw| < 半格点的更新恒被舍回 →
-        训练中期漂移失控，实测 1800 步附近 nll 从 1.9 跳到 10+）。
-        随机源 = 确定性哈希 (step, i, j)，跨运行逐位可复现；|v| ≥ 6 饱和。"""
-        v = w / wscale
-        neg = v < 0.0
-        av = -v if neg else v
-        m = 0
-        if av >= 0.5: m = 1
-        if av >= 1.0: m = 2
-        if av >= 1.5: m = 3
-        if av >= 2.0: m = 4
-        if av >= 3.0: m = 5
-        if av >= 4.0: m = 6
-        if m > 6: m = 6
-        k = m
-        if m < 7:
-            t = (av - lat_fp4[m]) / (lat_fp4[m + 1] - lat_fp4[m])
-            if t > 1.0:
-                t = 1.0
-            if _hash01(step, i, j) < t:
-                k = m + 1
-        sgn = 8 if neg else 0
-        return np.uint8(k + sgn)
 
 
 # P101：整数定点码本（int16 / int32）——**最近格点 = 四舍五入到最近整数**，
@@ -334,7 +182,7 @@ def _rint_rne(v):
     return f if (f - np.floor(f / 2.0) * 2.0) == 0.0 else f + 1.0
 
 
-# P9：量化码本的更新核（fp16/bf16/fp8/fp4）——LUT 反量化 + 位算法重量化。
+# P9：量化码本的更新核（fp16/bf16/fp8）——LUT 反量化 + 位算法重量化。
 if NUMBA_OK:                                        # pragma: no cover
     @njit(cache=True, parallel=True, fastmath=False, nogil=True)
     def _ro_q_update_fp16(codes, scr, dp, h, eta, n_in):
@@ -378,63 +226,6 @@ if NUMBA_OK:                                        # pragma: no cover
                 w = lut_fp8[codes[o]] - (e * h[j]) * eta
                 codes[o] = _q_fp8(scr, w)
 
-    @njit(cache=True, parallel=True, fastmath=False, nogil=True)
-    def _ro_q_update_fp4(codes, scr, mxs, dp, h, eta, n_in, ws, step):
-        """fp4 e2m1 + **MX 块缩放**（P12，2026-09-28）：半字节打包 + 每 16 元素
-        一块的共享缩放（ws: (n_out, n_blk) fp32），解决逐张量缩放下小权重整体
-        落入 0/0.5 粗格点的分辨率问题（原实现 4K 口径 +5.88% 已废弃）。
-
-        每步两遍：pass1 反量化 + fp32 更新进行缓冲并记块内 max；pass2 按块
-        重算缩放（max/6）并重量化写回。行独立并行（prange），行内串行 → 逐位确定。
-        scr: (threads, n_in) fp32 行缓冲；mxs: (threads, n_blk) 块 max 缓冲。
-        codes 行步长 = n_blk×8 字节（块对齐布局，奇数 n_in 的填充半字节值 0）。
-        """
-        n_blk = (n_in + 15) // 16
-        row_sz = n_blk * 8
-        n_out = codes.shape[0] // row_sz
-        for i in prange(n_out):
-            e = dp[i]
-            if e == 0.0:
-                continue
-            t = get_thread_id()
-            wrow = scr[t]
-            mrow = mxs[t]
-            row = i * row_sz
-            wsc = ws[i]
-            for bi in range(n_blk):
-                mrow[bi] = 0.0
-            # pass1：反量化 + 更新（块缩放），记新块内 max
-            for j in range(n_in):
-                byte = codes[row + (j >> 1)]
-                if (j & 1) == 1:
-                    c = (byte >> 4) & 15
-                else:
-                    c = byte & 15
-                w = lut_fp4[c] * wsc[j >> 4] - (e * h[j]) * eta
-                wrow[j] = w
-                aw = -w if w < 0.0 else w
-                bi = j >> 4
-                if aw > mrow[bi]:
-                    mrow[bi] = aw
-            # pass2：按块重算缩放（max → 6 上限）并重量化写回
-            for bb in range(n_blk):
-                sblk = mrow[bb] / 6.0
-                if sblk <= 0.0:
-                    sblk = 1.0                 # 全零块：缩放任取（量化结果全 0 码）
-                wsc[bb] = sblk
-                j0 = bb * 16
-                j1 = j0 + 16
-                if j1 > n_in:
-                    j1 = n_in
-                for j in range(j0, j1):
-                    o = row + (j >> 1)
-                    q = _q_fp4_sr(scr, wrow[j], sblk, step, i, j)
-                    if (j & 1) == 1:
-                        codes[o] = (codes[o] & np.uint8(0x0F)) | np.uint8(q * 16)
-                    else:
-                        codes[o] = (codes[o] & np.uint8(0xF0)) | np.uint8(q)
-
-    # -----------------------------------------------------------------------
     # P101 整数定点码本更新核（int16 / int32）
     #
     # 语义与 int8 路径完全一致：`w = dequant(codes) − (dp⊗h)·eta` 再重量化，
@@ -532,23 +323,6 @@ if NUMBA_OK:                                        # pragma: no cover
             y[i] = s
         return y
 
-    @njit(cache=True, parallel=True, fastmath=False, nogil=True)
-    def _ro_q_matvec_fp4(codes, lut, h, n_in, ws):
-        """fp4 e2m1 + MX 块缩放前向：w = lut[c] × ws[i, j>>4]（块对齐行步长）。"""
-        n_blk = (n_in + 15) // 16
-        row_sz = n_blk * 8
-        n_out = codes.shape[0] // row_sz
-        y = np.empty(n_out, dtype=np.float64)
-        for i in prange(n_out):
-            s = 0.0
-            row = i * row_sz
-            wsc = ws[i]
-            for j in range(n_in):
-                c = (codes[row + (j >> 1)] >> 4) if (j & 1) \
-                    else (codes[row + (j >> 1)] & np.uint8(0xF))
-                s += lut[c] * wsc[j >> 4] * h[j]
-            y[i] = s
-        return y
 
     @njit(cache=True, parallel=True, fastmath=False, nogil=True)
     def _ro_q_matvec_i32(codes, h, n_in, wscale):
@@ -568,10 +342,10 @@ if NUMBA_OK:                                        # pragma: no cover
             y[i] = s
         return y
 else:                                               # pragma: no cover
-    (_ro_q_update_fp16, _ro_q_update_bf16, _ro_q_update_fp8,
-     _ro_q_update_fp4) = (None, None, None, None)
+    (_ro_q_update_fp16, _ro_q_update_bf16, _ro_q_update_fp8) = \
+        (None, None, None)
     _ro_q_update_int16 = _ro_q_update_int32 = None
-    _ro_q_matvec_u16 = _ro_q_matvec_u8 = _ro_q_matvec_fp4 = None
+    _ro_q_matvec_u16 = _ro_q_matvec_u8 = None
     _ro_q_matvec_i32 = None
 
 _RO_STATE = {"ok": None}      # None=未探测 / True=可用 / False=回退 numpy
@@ -579,25 +353,28 @@ _RO_STATE = {"ok": None}      # None=未探测 / True=可用 / False=回退 nump
 
 # ---------------------------------------------------------------------------
 # P9 读出精度体系（2026-09-26，fhz 指令：**停止 fp64 支持**；新增 fp16/bf16/
-# fp8/fp4；**默认 fp32**）。
+# fp8；**默认 fp32**）。
 #
 # 设计：低精度格式**按原生位型存储为码本**，计算时查表（LUT）反量化到 fp32、
 # 更新后重新量化写回；融合核内联查表/二分量化 → 内存流量 ∝ 存储位宽：
-#   fp16（2B，IEEE 半精度）/ bf16（2B，截尾 fp32 指数）/ fp8（1B，e4m3fn）/
-#   fp4（0.5B，e2m1 半字节打包）——流量分别为 fp32 的 1/2、1/2、1/4、1/8。
+#   fp16（2B，IEEE 半精度）/ bf16（2B，截尾 fp32 指数）/ fp8（1B，e4m3fn）
+# ——流量分别为 fp32 的 1/2、1/2、1/4。
 # 量化 = 到格式正格点集的最近邻（二分搜索，numba 纯算术实现，无位技巧依赖）；
 # 越界截断到格点端点、NaN 归 +0（防权重投毒扩散）。
 # 质量口径：softmax/NLL 一律在 fp64 上计算（y 反量化后升精度），仅存储与
 #   梯度更新走低精度——这是低精度训练的标准「高精度主回路」结构。
+# P191e（2026-10-07）：int4/fp4 已整体删除（P152 定案：每步 unpack 抵消存储
+#   收益，从未上生产）——历史口径见 git。
 # ---------------------------------------------------------------------------
 
-# P100：**int8/int4 正名**（fhz 2026-09-30：「fp8 改为 int8，fp4 改为 int4」）。
-# 关键事实：这里的 "fp8" **本来就是 uint8 码本**（`_ro_q_matvec_u8` / 1 字节存），
-# "fp4" 是 4-bit 打包（两元素一字节）——即**它们一直是整数量化**，只是名字
-# 误导。更重要的是：**P92 把它们当 fp8 在加速器上禁用了，等于误禁了昇腾
-# 真正支持的 INT8 Cube 路径**。现在正名并按设备能力重新裁决。
-_RO_DTYPE_ALIASES = {"fp8": "int8", "fp4": "int4"}      # 旧名 → 新名（兼容）
-RO_DTYPES = ("fp32", "fp16", "bf16", "int8", "int4", "int16", "int32")
+# P100：**fp8→int8 正名**（fhz 2026-09-30：「fp8 改为 int8」）。
+# 关键事实：这里的 "fp8" **本来就是 uint8 码本**（`_ro_q_matvec_u8` / 1 字节存）
+# ——即**它一直是整数量化**，只是名字误导。更重要的是：**P92 把它当 fp8 在
+# 加速器上禁用了，等于误禁了昇腾真正支持的 INT8 Cube 路径**。现在正名并按
+# 设备能力重新裁决。int4/fp4 已按 P191e 删除。
+_RO_DTYPE_ALIASES = {"fp8": "int8"}      # 旧名 → 新名（兼容）
+# P191e：int4/fp4 已整体删除（P152 定案）——显式请求 fail-fast。
+RO_DTYPES = ("fp32", "fp16", "bf16", "int8", "int16", "int32")
 
 # P101 整数定点码本的量化上限（= 格点数）。饱和裁剪与量化都用这两个常量，
 # 保证「核内裁剪阈值」与「numpy 参考的 np.clip 边界」是同一个数。
@@ -638,10 +415,6 @@ def _build_lut(fmt: str) -> np.ndarray:
         val = np.where((e == 15) & (m == 7), np.float32(np.nan), val) * s
         lut = val.astype(np.float32)
         b, sb = 0x7F, 7
-    elif fmt == "int4":                             # P100 原 "fp4"：4-bit 打包（16 码）
-        pos = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
-        lut = np.concatenate([pos, -pos]).astype(np.float32)       # 全 16 码（15 = -0）
-        b, sb = 8, 3
     elif fmt == "int16":
         # P101：**均匀定点**码本。存储码 = 符号位(bit15) | 幅值(bit0-14)，
         # 幅值域 0..32767 → 正域 **32768 个格点**（0, s, 2s, …, 32767·s），
@@ -664,7 +437,6 @@ _Q_TABLES: dict = {}
 lut_fp16, lat_fp16, sb_fp16 = _build_lut("fp16")
 lut_bf16, lat_bf16, sb_bf16 = _build_lut("bf16")
 lut_fp8, lat_fp8, sb_fp8 = _build_lut("int8")
-lut_fp4, lat_fp4, sb_fp4 = _build_lut("int4")
 lut_int16, lat_int16, sb_int16 = _build_lut("int16")   # P101：int16 建表（int32 不建）
 
 
@@ -710,14 +482,11 @@ def quantize_to(fmt: str, x: np.ndarray) -> np.ndarray:
     idx = np.where(pick_left, left, idx).astype(np.uint32)
     sign = np.where(x < 0, np.uint32(1 << sb), np.uint32(0)).astype(np.uint32)
     codes = idx | sign
-    if fmt == "int4":
-        codes = codes.astype(np.uint8).reshape(-1, 2)
-        return (codes[:, 0] | (codes[:, 1] << 4)).astype(np.uint8)
     return codes.astype(np.uint16 if fmt in ("fp16", "bf16", "int16") else np.uint8)
 
 
 def dequantize_from(fmt: str, codes: np.ndarray, n_elem: int | None = None) -> np.ndarray:
-    """码本 → fp32（numpy 向量化）。fp4 半字节展开。"""
+    """码本 → fp32（numpy 向量化）。"""
     lut, lat, sb = _q_tables(fmt)
     if fmt == "fp32":
         return codes
@@ -726,116 +495,15 @@ def dequantize_from(fmt: str, codes: np.ndarray, n_elem: int | None = None) -> n
         # 整数在 fp64 的 53 位尾数内**精确**可表示（fp32 只有 24 位，2³¹ 附近的
         # ulp 是 256，会把相邻码合并 → 精度凭空丢掉 ~8 位）。
         return codes.astype(np.float64)
-    if fmt == "int4":
-        lo = (codes & 0xF).astype(np.int32)
-        hi = (codes >> 4).astype(np.int32)
-        vals = np.empty(codes.size * 2, dtype=np.float32)
-        vals[0::2] = lut[lo]
-        vals[1::2] = lut[hi]
-        return vals[:n_elem] if n_elem is not None else vals
     idx = codes.astype(np.int32)
     return lut[idx]
 
 
 # ---------------------------------------------------------------------------
-# P12（2026-09-28）：fp4 **MX 块缩放**（fhz 指令「编写 fp4 精度核心，接入主线」）。
-# 块大小 K=16（OCP MX 对齐），每块共享一个 fp32 缩放 s_b = max|w|_b / 6.0
-# （e2m1 格点上限），使各块的小权重也能用满格点集——解决逐张量缩放下
-# +5.88% 的分辨率不足。诚实标注：缩放为任意 fp32 正数，非严格 OCP MX 的
-# E8M0（2 的幂）——分辨率收益相同、实现更简单；严格 E8M0 列为后续项。
+# P191e（fhz 2026-10-07 指令）：fp4 MX 块缩放（P12）与 4-bit 打包核已**整体删除**
+# （P152 定案：每步 unpack 抵消存储收益，从未上生产）。显式请求 fail-fast。
 # ---------------------------------------------------------------------------
 
-FP4_BLOCK = 16
-
-
-def _q_fp4_codes(v: np.ndarray) -> np.ndarray:
-    """已除好块缩放的 fp32 数组 → e2m1 码 0..15（uint8，逐元素，未打包）。
-
-    与 numba `_q_fp4` 逐位一致（最近格点、中点归小幅值、-0.0 归正零码）。
-    """
-    ax = np.abs(v.astype(np.float32))
-    idx = np.searchsorted(lat_fp4, ax)
-    idx = np.clip(idx, 0, len(lat_fp4) - 1)
-    left = np.maximum(idx - 1, 0)
-    pick_left = (ax - lat_fp4[left]) <= (lat_fp4[idx] - ax)
-    idx = np.where(pick_left, left, idx).astype(np.uint8)
-    return (idx | np.where(v < 0, np.uint8(8), np.uint8(0))).astype(np.uint8)
-
-
-def _hash01_np(step, i, j):
-    """_hash01 的 numpy 向量化版（与 numba 逐位一致；uint64 乘法回绕为设计行为）。"""
-    with np.errstate(over='ignore'):
-        return _hash01_np_inner(step, i, j)
-
-
-def _hash01_np_inner(step, i, j):
-    x = (np.uint64(step) * np.uint64(0x9E3779B97F4A7C15)
-         ^ (np.uint64(i) * np.uint64(0xC2B2AE3D27D4EB4F))
-         ^ (np.uint64(j) * np.uint64(0x165667B19E3779F9)))
-    x = (x ^ (x >> np.uint64(33))) * np.uint64(0xFF51AFD7ED558CCD)
-    x = x ^ (x >> np.uint64(33))
-    return (x >> np.uint64(11)).astype(np.float64) * 1.1102230246251565e-16
-
-
-def _q_fp4_row_sr(w_row: np.ndarray, sblk: np.ndarray, step: int,
-                  row: int, n_in: int, block: int = FP4_BLOCK) -> np.ndarray:
-    """fp4 SR 整行量化（格点区间线性插值，与 numba _q_fp4_sr 逐位一致）。
-    w_row: (n_in,) fp32 已更新的行；sblk: (n_blk,) 本行块缩放（新值）。"""
-    j = np.arange(n_in)
-    v = (w_row / sblk[j >> 4]).astype(np.float32)
-    neg = v < 0
-    av = np.abs(v)
-    m = np.zeros(n_in, dtype=np.int64)
-    for th, thr in enumerate((0.5, 1.0, 1.5, 2.0, 3.0, 4.0)):
-        m[av >= thr] = th + 1
-    m = np.minimum(m, 6)
-    lo = lat_fp4[m]
-    hi = lat_fp4[np.minimum(m + 1, 7)]
-    t = np.where(m < 7, (av - lo) / (hi - lo), 0.0)
-    t = np.minimum(t, 1.0)
-    r = _hash01_np(step, row, j)
-    k = (m + (r < t)).astype(np.uint8)
-    return (k | np.where(neg, np.uint8(8), np.uint8(0))).astype(np.uint8)
-
-
-def quantize_fp4_mx(W: np.ndarray, block: int = FP4_BLOCK):
-    """fp32 权重 → (codes 半字节打包 uint8, wscales fp32 (n_out, n_blk))。
-
-    块缩放 s_b = max|w|_b / 6.0（全零块取 1.0）；W 按行补零到 K 的整数倍
-    （n_blk×K 恒为偶数 → 无行尾半字节问题；codes 行宽 = n_blk×8 字节，
-    与 numba 核的块对齐行步长一致）。
-    """
-    W = np.ascontiguousarray(W, dtype=np.float32)
-    n_out, n_in = W.shape
-    n_blk = (n_in + block - 1) // block
-    Wp = np.zeros((n_out, n_blk * block), dtype=np.float32)
-    Wp[:, :n_in] = W
-    blocks = Wp.reshape(n_out, n_blk, block)
-    m = np.abs(blocks).max(axis=2)
-    ws = np.where(m > 0, m / 6.0, 1.0).astype(np.float32)
-    q = np.empty((n_out, n_blk * block), dtype=np.uint8)
-    for b in range(n_blk):
-        s = ws[:, b: b + 1]
-        q[:, b * block: (b + 1) * block] = _q_fp4_codes(blocks[:, b, :] / s)
-    # 半字节打包（低 4 位 = 偶下标，高 4 位 = 奇下标，与 numba 核一致）；
-    # 展平为 1D（行步长 n_blk×8，核内 row = i × row_sz 切行）
-    packed = (q[:, 0::2] | (q[:, 1::2] << 4)).astype(np.uint8)
-    return np.ascontiguousarray(packed.ravel()), np.ascontiguousarray(ws)
-
-
-def dequantize_fp4_mx(codes: np.ndarray, ws: np.ndarray,
-                      n_elem: int, block: int = FP4_BLOCK) -> np.ndarray:
-    """(codes, wscales) → fp32 展平权重（n_elem = n_out × n_in）。"""
-    n_out, n_blk = ws.shape
-    codes = codes.reshape(n_out, n_blk * 8)      # 1D 存储 → 行视图
-    lo = (codes & 0xF).astype(np.int32)
-    hi = (codes >> 4).astype(np.int32)
-    vals = np.empty((n_out, n_blk * block), dtype=np.float32)
-    vals[:, 0::2] = lut_fp4[lo]
-    vals[:, 1::2] = lut_fp4[hi]
-    n_in = n_elem // n_out if n_out else 0
-    return ((vals.reshape(n_out, n_blk, block) * ws[:, :, None])
-            .reshape(n_out, -1)[:, :n_in].ravel())
 
 
 class Readout:
@@ -861,14 +529,15 @@ class Readout:
         self.hid_k = int(hid_k)
         self.eta_hid = float(eta_hid)
         # P9 精度体系（2026-09-26，fhz 指令）：**停止 fp64 支持**；可选
-        # fp32（默认）/ fp16 / bf16 / int8 / int4（旧名 fp8/fp4 为别名）。低精度 = 原生位型码本存储 +
+        # fp32（默认）/ fp16 / bf16 / int8（旧名 fp8 为别名；int4/fp4 已按
+        # P191e 删除）。低精度 = 原生位型码本存储 +
         # 查表反量化计算 + 重新量化写回（P9 融合核），softmax/NLL 保持 fp64。
         # 注：结构性稀疏模式暂用 fp32 CSR（与量化码本不叠加——组合另行立项）。
         dtype = _RO_DTYPE_ALIASES.get(str(dtype).lower(), str(dtype).lower())
         if dtype not in RO_DTYPES:
             raise ValueError(
                 f"readout dtype 须为 {RO_DTYPES} 之一"
-                f"（兼容旧名 fp8→int8 / fp4→int4），实际: {dtype!r}"
+                f"（兼容旧名 fp8→int8；int4/fp4 已按 P191e 删除），实际: {dtype!r}"
                              "（fp64 已按 fhz 指令停止支持）")
         self.dtype_name = dtype if self.conn_k == 0 else "fp32"
         self.qfmt = self.dtype_name if self.dtype_name != "fp32" else None
@@ -876,9 +545,6 @@ class Readout:
         # C8 修复：可选权重范数上限，防止长跑/高学习率下读出权重溢出
         # （默认 0.0 = 关闭，保持旧行为逐位不变）
         self.w_clip = float(w_clip)
-        # P12（2026-09-28）：fp4 MX 块缩放数组（(n_out, n_blk) fp32）；其他格式 None
-        self._wscales: np.ndarray | None = None
-        self._ro_step = 0               # fp4 SR 的确定性哈希步计数
         # B7（2026-09-22）：minibatch 梯度累积缓冲（accumulate=1 时永不启用）
         self._grad_acc: np.ndarray | None = None
         self._acc_n = 0
@@ -940,15 +606,12 @@ class Readout:
     def _set_dense(self, W: np.ndarray) -> None:
         """按当前精度格式存放稠密权重（fp32 直存；低精度量化为码本）。
 
-        fp4（P12，2026-09-28）：**MX 块缩放**——每 16 元素一块、块内 max 映射到
-        e2m1 格点上限 6（`self._wscales` (n_out, n_blk) fp32），各块小权重也能
-        用满格点集（替代已废弃的逐张量缩放，原实现 +5.88% 已按 fhz 指令重写）。
-
         P101：int16/int32 用 **per-tensor scale = max|W| / QMAX**，即把张量最大
-        幅值精确映到码本端点（格点用满、不浪费动态范围）。这与 int8/int4 的
+        幅值精确映到码本端点（格点用满、不浪费动态范围）。这与 int8 的
         `_wscale = 1.0`（码本自带 fp 语义、动态范围由格式固定）不同——整数码本
         的格点是「等距无量纲整数」，必须由外部 scale 赋予物理量纲。全零张量取
         scale = 1.0（避免除零；此时全部重量化到码 0）。
+        P191e：fp4 MX 块缩放分支已删（P152 定案）。
         """
         if self.qfmt is None:
             self._W = np.ascontiguousarray(W, dtype=np.float32)
@@ -956,14 +619,11 @@ class Readout:
             self._lut = self._lat = None
             self._sbit = 0
             self._wscale = 1.0
-            self._wscales = None
         else:
             W = np.ascontiguousarray(W, dtype=np.float32)
             self._lut, self._lat, self._sbit = _q_tables(self.qfmt)
-            if self.qfmt == "int4":
-                self._wscale = 1.0
-                self._codes, self._wscales = quantize_fp4_mx(W)
-            elif self.qfmt in ("int16", "int32"):
+            # P191e：int4/fp4 分支已删（P152 定案）。
+            if self.qfmt in ("int16", "int32"):
                 qmax = INT16_QMAX if self.qfmt == "int16" else INT32_QMAX
                 amax = float(np.abs(W).max())
                 # P104「迭代自适应」：scale 留 **2× 余量**——训练中权重幅值
@@ -971,19 +631,14 @@ class Readout:
                 # 回绕好，且截断点在 2σ 之外，实际罕见）。代价是量化步长 ×2
                 # （int16 误差 1.5e-5 → 3e-5，仍远小于 int8 的 4e-2）。
                 self._wscale = ((amax * 2.0) / qmax) if amax > 0.0 else 1.0
-                self._wscales = None
                 self._codes = quantize_to(self.qfmt, W / self._wscale)
             else:
                 self._wscale = 1.0
-                self._wscales = None
                 self._codes = quantize_to(self.qfmt, W)
 
     def _deq_w(self) -> np.ndarray:
         """码本 → fp32 稠密权重（兼容视图；统计/保存用）。"""
         n = self._n_out * self._n_in
-        if self.qfmt == "int4":
-            return dequantize_fp4_mx(self._codes, self._wscales,
-                                     n).reshape(self._n_out, self._n_in)
         return (dequantize_from(self.qfmt, self._codes, n)
                 * self._wscale).reshape(self._n_out, self._n_in)
 
@@ -1007,8 +662,6 @@ class Readout:
         self.dtype = np.float32
         self.w_clip = float(w_clip)
         self._grad_acc, self._acc_n = None, 0
-        self._wscales = None
-        self._ro_step = 0
         self._csr = _from_dense_csr(W, self.conn_k)
         self._codes = None
         self._wscale = 1.0
@@ -1089,24 +742,18 @@ class Readout:
             # 符号|幅值码，lut 同形，**逐位走同一条已验证的核**）；
             # int32 无 LUT，走 `_ro_q_matvec_i32`（code·scale 直接换算）。
             K = {"fp16": _ro_q_matvec_u16, "bf16": _ro_q_matvec_u16,
-                 "int8": _ro_q_matvec_u8, "int4": _ro_q_matvec_fp4,
+                 "int8": _ro_q_matvec_u8,
                  "int16": _ro_q_matvec_u16, "int32": _ro_q_matvec_i32}[self.qfmt]
             hh = h.astype(np.float32, copy=False)
             if self.qfmt == "int32":
                 return K(self._codes, hh, self._n_in, self._wscale)
-            scale = self._wscales if self.qfmt == "int4" else self._wscale
-            return K(self._codes, self._lut, hh, self._n_in, scale)
-        if self._W.dtype == np.float32:         # fp32：Rust AVX2 核（P183），回退 BLAS
+            return K(self._codes, self._lut, hh, self._n_in, self._wscale)
+        if self._W.dtype == np.float32:         # fp32 → BLAS（2026-10-07 起唯一路径）
             hh = h.astype(np.float32, copy=False)
-            # ⚠ P183：Rust AVX2 比 BLAS 快 **1.09-1.75×**（本机 8线程实测）。
-            #   数值**非逐位**（改求和顺序，relerr~1e-6，在 1e-5 容差门内）。
-            #   Rust 不可用 / 无 AVX2 → 回落 BLAS（原因记在 `_RO_M1["why"]`）。
-            _k, _why = _m1_rust_kernels()
-            if _k is not None and _m1_rust_worth_it(self._n_in, self._n_out):
-                _out = np.empty(self._n_out, dtype=np.float32)
-                _k.m1_gemv_simd(self._W, hh, _m1_zero_b(self._n_out), _out,
-                                _m1_threads())
-                return _out.astype(np.float64, copy=False)
+            # ⚠ 2026-10-07（fhz「删除 rust 版本」）：原 P183 的 Rust AVX2 前向核
+            #   已整体删除，M1 前向回到 BLAS。AVX2 与 BLAS 的差异本来就只是
+            #   求和顺序（relerr~1e-6）；现在**逐位基线就是 BLAS 本身**，
+            #   与「融合核 vs BLAS」的既有容差口径一致。
             return (self._W @ hh).astype(np.float64, copy=False)
         return self._W @ h
 
@@ -1142,14 +789,7 @@ class Readout:
             _ro_q_update_bf16(self._codes, scr, dp32, h32, e32, n)
         elif self.qfmt == "int8":
             _ro_q_update_fp8(self._codes, scr, dp32, h32, e32, n)
-        else:                                   # fp4 MX：额外需要行缓冲与块 max 缓冲
-            import numba as _nb
-            n_blk = (n + 15) // 16
-            wrow = np.empty((_nb.get_num_threads(), n), dtype=np.float32)
-            mxs = np.empty((_nb.get_num_threads(), n_blk), dtype=np.float32)
-            self._ro_step += 1
-            _ro_q_update_fp4(self._codes, wrow, mxs, dp32, h32, e32, n,
-                             self._wscales, self._ro_step)
+        # P191e：fp4 MX 更新分支已删（P152 定案；qfmt 白名单已无 fp4）。
         return True
 
     def _clip(self) -> None:
@@ -1275,7 +915,7 @@ class Readout:
         elif self.conn_k > 0:                           # 稀疏梯度下降（存在的边）
             _csr_add_outer(*self._csr, p - target, h, -eta)
         else:
-            # P7/P9：融合核（fp32 原生；fp16/bf16/fp8/fp4 = 码本内联查表 + 重新量化）
+            # P7/P9：融合核（fp32 原生；fp16/bf16/fp8 = 码本内联查表 + 重新量化）
             if not self._apply_update(p - target, h, eta):
                 self.W = self.W - eta * np.outer(p - target, h)   # numpy 回退（含量化）
         self._clip()

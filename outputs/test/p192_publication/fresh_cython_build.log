@@ -1,0 +1,7 @@
+_cykernels.c
+  正在创建库 D:\AiModel\train\.tmp_fresh_cython_2ixd3vfe\build\cython_temp\Release\AiModel\train\.tmp_fresh_cython_2ixd3vfe\phdnet\_cykernels.cp314-win_amd64.lib 和对象 D:\AiModel\train\.tmp_fresh_cython_2ixd3vfe\build\cython_temp\Release\AiModel\train\.tmp_fresh_cython_2ixd3vfe\phdnet\_cykernels.cp314-win_amd64.exp
+正在生成代码
+已完成代码的生成
+FRESH_SUCCESS D:\AiModel\train\.tmp_fresh_cython_2ixd3vfe\phdnet\_cykernels.cp314-win_amd64.pyd cython-kernels: cp314 openmp=yes
+
+[stderr]

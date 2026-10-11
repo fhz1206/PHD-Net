@@ -19,12 +19,14 @@ class Neuromodulator:
 
     def observe(self, surprise: float):
         """输入当前意外度，返回 (gate ∈ [0,1], mode ∈ {encode, retrieve})。"""
+        # 2026-10-07 修复（审计 5）：旧实现 Welford 先更新后算 z，首样本 z 恒≈1、与幅值
+        # 脱钩（s=1→gate .704、s=100→.818 同档）；改为用更新前的 mu/m2/count 算 z（z≈surprise）。
+        std = (self.m2 / self.count) ** 0.5 + 1e-6
+        z = (surprise - self.mu) / std
         self.count += 1.0
         delta = surprise - self.mu
         self.mu += delta / self.count
         self.m2 += delta * (surprise - self.mu)
-        std = (self.m2 / self.count) ** 0.5 + 1e-6
-        z = (surprise - self.mu) / std
         gate = float(1.0 / (1.0 + np.exp(-self.gain * z)))   # σ(a·z)
         mode = "encode" if z > 0.3 else "retrieve"
         return gate, mode
@@ -58,7 +60,7 @@ class MultiModulator:
         self.mu = 0.0            # 意外度在线均值（Welford）
         self.m2 = 1.0
         self.count = 1.0
-        self._z_prev = 0.0
+        self._z_prev = None            # 2026-10-07 修复（审计 5）：0.0 是虚构基线，恒定 surprise 流首步 novelty 虚高（gate .542 vs 稳态 .341）；None=尚无历史，首步跳过 novelty
         # 暴露的四通道（observe 前给中性初值，避免未初始化访问）
         self.ach = 0.5
         self.ne = 0.5
@@ -71,21 +73,27 @@ class MultiModulator:
         gate 以 ACh 为主、NE 增强（与旧单标量 gate 语义尽量靠拢，便于对比）；
         mode 仍由 surprise 的 z 分数决定（z>0.3 视为新颖 → encode）。
         """
+        # 2026-10-07 修复（审计 5）：先用更新前统计算 z（同单通道）；首步 _z_prev=None
+        # 跳过 novelty、ne/ht 给中性值 0.5，不再与虚构基线 0.0 比较产生虚高新颖。
+        std = (self.m2 / self.count) ** 0.5 + 1e-6
+        z = (surprise - self.mu) / std
         self.count += 1.0
         delta = surprise - self.mu
         self.mu += delta / self.count
         self.m2 += delta * (surprise - self.mu)
-        std = (self.m2 / self.count) ** 0.5 + 1e-6
-        z = (surprise - self.mu) / std
         # ACh：surprise 高 → 编码模式
         self.ach = float(1.0 / (1.0 + np.exp(-self.gain_ach * z)))
-        # NE：意外度的"变化率" → 新颖性 → 可塑性（一阶差分经 z 标准化）
-        nov = abs(z - self._z_prev)
-        self.ne = float(1.0 / (1.0 + np.exp(-self.gain_ne * (nov - 0.5))))
+        if self._z_prev is None:       # 首步无历史 → novelty 中性（审计 5）
+            self.ne = 0.5
+            self.ht = 0.5
+        else:
+            # NE：意外度的"变化率" → 新颖性 → 可塑性（一阶差分经 z 标准化）
+            nov = abs(z - self._z_prev)
+            self.ne = float(1.0 / (1.0 + np.exp(-self.gain_ne * (nov - 0.5))))
+            # 5-HT：低新颖性/低唤醒 → 高耐心（延长检索、降低冲动写入）
+            self.ht = float(1.0 / (1.0 + np.exp(self.gain_ht * (nov - 0.3))))
         # DA：surprise 低（环境可预测）→ 巩固
         self.da = float(1.0 / (1.0 + np.exp(self.gain_da * z)))   # = σ(-gain_da·z)
-        # 5-HT：低新颖性/低唤醒 → 高耐心（延长检索、降低冲动写入）
-        self.ht = float(1.0 / (1.0 + np.exp(self.gain_ht * (nov - 0.3))))
         self._z_prev = z
         gate = float(self.ach * (0.5 + 0.5 * self.ne))
         mode = "encode" if z > 0.3 else "retrieve"

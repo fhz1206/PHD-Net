@@ -1,0 +1,31 @@
+==============================================================================
+门禁：device.probe 后端择优链（NPU 最高优先级 + 不可用时不得短路）
+==============================================================================
+
+[形态①] 装了 torch_npu 且 NPU 可用
+  PASS  ①  NPU 可用时返回 torch-npu（npu 分支不得被删）  [name=torch-npu kind=npu]
+  PASS  ①  BackendInfo.npu_plugin 标记为已装  [True]
+  PASS  ①  use_torch_backend('npu') 为 True  [True]
+  PASS  ①  select_backend('npu') 选中 npu  [torch-npu/npu]
+
+[形态②] 装了 torch_npu 但 NPU 不可用 + CUDA 可用
+  PASS  ②  不再被 npu 短路，落到 torch-cuda（P1-7 原始命题）  [name=torch-cuda kind=cuda]
+  PASS  ②  notes 保留「已装 torch_npu 但不可用」的附注  [检测到 NVIDIA CUDA 设备；已装 torch_npu 但 NPU 不可用（检查 CANN 驱动与 npu-smi）]
+
+[形态③] 未装 torch_npu + CUDA 可用
+  PASS  ③  无插件 + CUDA → torch-cuda  [name=torch-cuda kind=cuda]
+
+[形态④] 未装 torch_npu + 无加速器
+  PASS  ④  无插件 + 无加速器 → cpu 路径  [name=torch-cpu kind=cpu]
+
+[结构] 源码级防回归（防止再次「改 if 链删掉整块」）
+  PASS  S1 源码含 torch-npu 返回分支
+  PASS  S2 源码含 torch.npu.is_available 判据
+  PASS  S3 npu_plugin 变量被真正使用（非死变量）  [出现 3 次]
+  PASS  S4 非 npu 分支不是 elif（不可用时不得短路 hip/cuda）
+
+==============================================================================
+结果：12/12 通过
+==============================================================================
+
+[stderr]

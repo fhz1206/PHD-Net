@@ -224,8 +224,15 @@ class SparseLTM:
                 "请保持 1。")
         self._check_sparse(rate)                       # A2：契约校验（稠密模式显式报错）
         cur = self.encode(rate)
-        if self._prev is not None and cur:
+        if cur:
+            # ── 漏报2修复：prev 为 None（首次 imprint / begin_episode 之后）
+            # 也要走 learn —— learn 在早退之前先积累 cur 的突触后迹。原来
+            # 整块被跳过 ⇒ 下一次 imprint 的 prev 侧 t_pre==0 → 整行 continue，
+            # 第一对配对永久丢失（实测 3 次 imprint 后 out rows = []/[]/[2,3]；
+            # begin_episode 断拍时连丢两对）。
+            # prev=None 时 learn 只 touch、不改权重，与旧分支语义一致。
             self.table.learn(self._prev, cur)
+        if self._prev is not None and cur:
             # P66 诊断（2026-09-29）：服务器 1B 档 `M4b_ltm` 段从 0.14 涨到
             # 19.5 ms/tok 且**超线性**——`learn` 的代价 = |prev|×|cur| 次
             # `_find_slot`（且 `ltp<=0` 短路永不生效，因为 `_touch` 把 cur 每个
@@ -336,7 +343,18 @@ class SparseLTM:
         """
         if forget <= 0.0:
             return
-        f = 1.0 - 0.01 * forget
+        if forget > 100.0:
+            # ── 漏报3：fail-fast（与 imprint 的 amortize>1 同一先例）。
+            # forget>100 是 API 误用：历史上 f<0 让 float 路径权重整体变负、
+            # int8 路径却 clip 归零（两路径语义相反）；上一版改成
+            # f=max(0,…) 后 forget=150/200 与 100 都静默归零 —— 误用被掩盖。
+            # 宁可抛错，也不静默替调用方选一种语义。
+            raise ValueError(
+                f"ltm_consolidate_forget={forget} 越界：forget 以「百分比」计，"
+                "有效区间 [0, 100]（0=不巩固，1=轻微衰减，100=全部归零）；"
+                ">100 属误用——历史上会让 float 路径权重变负（int8 路径却 "
+                "clip 归零，两路径语义相反）。若只想轻微衰减请传 forget=1.0。")
+        f = 1.0 - 0.01 * forget              # forget∈(0,100] ⇒ f∈[0,1]，恒非负
         table = self.table
         if hasattr(table, "vals") and hasattr(table, "size"):      # 在线 CSR 表
             if table.int8_store:

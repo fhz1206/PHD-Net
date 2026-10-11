@@ -139,16 +139,40 @@ def probe_devices() -> dict:
     except ImportError:
         out["npu"] = {"ok": False,
                       "note": "torch_npu 未安装（CANN 适配需单独安装该插件）"}
+    except Exception as e:                     # noqa: BLE001
+        # ⚠ 2026-10-07 修复（审计 P1-5）：原来**只接 ImportError** —— torch_npu
+        #   装了但加载失败（OSError / DLL 缺失）会**裸抛**，连锁把
+        #   resolve_device('auto')、resolve_accel_device、resolve_devices('auto')
+        #   全部炸掉。torch_lm.ensure_npu_registered 早就把同类异常缓存成
+        #   `_npu_err`，这里却没接 → 既不降级也不进日志（P160「失败要可见」
+        #   在本侧复发）。对照 device.py::probe 用的是 `except Exception`。
+        out["npu"] = {"ok": False,
+                      "note": f"torch_npu 探测失败：{type(e).__name__}: {str(e)[:120]}"}
     # DirectML（与 device.py::probe() 的择优链对齐；此前 probe_devices 无此项，
     # 导致 resolve_device('auto') 会跳过 Windows 上的 AMD/Intel GPU 直通）
     try:
         import torch_directml                                   # noqa: WPS433
         dev = torch_directml.device()
+        # ⚠ 2026-10-07 修复（审计 P1-4）：**补 count 键**。下游三处
+        #   （multi_device 的 `int(info.get("count") or 0)` 与 auto 循环、
+        #    accel_readout.pick_readout_backend 的 `v.get("ok") and v.get("count")`、
+        #    multi_device.capability_report）**都靠 count 判「有没有设备」**——
+        #   缺键 ⇒ 仅 DirectML 的 Windows 机器被当成「无加速器」：auto 选 cpu、
+        #   capability_report 报 accelerators=[]、且回落原因为空；
+        #   而 BACKEND_MATRIX 明明写着 dml=yes、torch_lm.resolve_device 也支持 dml
+        #   → 「声明支持但永远选不中」。
         out["dml"] = {"ok": dev is not None, "device": str(dev) if dev else None,
+                      "count": 1 if dev is not None else 0,
                       "version": getattr(torch_directml, "__version__", None)}
     except ImportError:
         out["dml"] = {"ok": False,
+                      "count": 0,
                       "note": "torch_directml 未安装（Windows AMD/Intel GPU 路径）"}
+    except Exception as e:                     # noqa: BLE001
+        # 与 npu 同款：插件存在但加载失败不能裸抛（P1-5 同族）
+        out["dml"] = {"ok": False, "count": 0,
+                      "note": f"torch_directml 探测失败：{type(e).__name__}: "
+                              f"{str(e)[:120]}"}
     return out
 
 

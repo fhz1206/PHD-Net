@@ -1,0 +1,41 @@
+[A] 设备解析
+  [PASS] A.auto 返回列表且非空 —— devices=['cpu'] | probe=cpu:1
+  [PASS] A.cpu 显式
+  [PASS] A 显式列表回显 —— cpu
+  [PASS] A 不可用设备诚实报错 —— RuntimeError（如实）
+  [PASS] A allow_fallback 回退 cpu
+  [SKIP] A.max_devices（本机单设备，截断等价恒等）
+[B] 分片计划
+  [PASS] B 均衡切分 —— [(0, 25), (25, 50), (50, 75), (75, 100)]
+  [PASS] B 余数分配（10/4 → 3,3,2,2） —— [(0, 3), (3, 6), (6, 8), (8, 10)]
+  [PASS] B 空段剔除（2/4） —— [(0, 1), (1, 2)]
+  [PASS] B 覆盖完整且不重叠 —— [(0, 130), (130, 259), (259, 388), (388, 517)]
+  [PASS] B 非法设备数被拒 —— ValueError
+[C] 单设备 ≡ AccelReadout（逐位）
+  [PASS] C 前向逐位一致 —— max|Δ|=0.000e+00
+  [PASS] C NLL 逐位一致 —— 6.959223747253418 vs 6.959223747253418
+  [PASS] C 更新后 W 容差一致（≤1e-5 相对） —— max|Δ|=2.980e-08 ≤ 4.04e-06
+[D] 读出列并行分片 ≡ 单设备（4 路分片，逐位）
+  [PASS] D 分片区间覆盖完整 —— [(0, 130), (130, 259), (259, 388), (388, 517)]
+  [PASS] D 前向逐位一致（4 分片 ≡ 单设备） —— max|Δ|=0.000e+00
+  [PASS] D NLL 逐位一致 —— 6.959223747253418 vs 6.959223747253418
+  [PASS] D 更新后 W 逐位一致（4 分片 ≡ 单设备） —— max|Δ|=0.000e+00
+  [PASS] D to_numpy 形状还原
+  [PASS] D dtype=fp16 可前向 —— dtype=float32
+  [PASS] D dtype=bf16 可前向 —— dtype=float32
+[E] 自动选型计划
+  [PASS] E 单卡策略为原生路径
+  [PASS] E 多卡策略含列并行 —— 读出列并行 ×4（按词表行切分；LTM 分片见 shard_ranges）
+  [PASS] E 通信量字段
+  [PASS] E 未并行部分如实列出
+[F] host 线程收敛
+  [PASS] F 多卡建议 1 线程
+[G] 后端 × 设备能力矩阵
+  [PASS] G.numba 仅 CPU（物理限制）
+  [PASS] G.torch 栈覆盖 NPU/CUDA/ROCm/DML
+  [PASS] G 生产后端标注为 numba/CPU
+  [PASS] G 无加速器时 action 为空（本机预期） —— accel=[]
+----------------------------------------------------------------------------
+结果：全部 PASS
+
+[stderr]

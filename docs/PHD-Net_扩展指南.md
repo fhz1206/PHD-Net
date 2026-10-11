@@ -20,6 +20,7 @@
 | 加一个读出后端 / 换设备 | `phdnet/backends/accel_readout.py` + `resolve_accel_device()` | `verify_accel_readout.py`（全PASS）+ `verify_accel_sparse.py`（22/22，若涉及稀疏） |
 | 加一种 dtype | **三处**（见 §4.1） | `verify_accel_readout.py` + `verify_ms_stream.py`（检查点往返） |
 | 改一个 numba 核 | `phdnet/ltm_kernel.py` 等 | 对拍（**逐位优先**）+ `verify_ltm_kernels.py` |
+| **改/加一个 Cython 核** | `phdnet/_cykernels.pyx`（+ `setup_cython.py` 构建） | **`verify_cykernels.py`**（分语义级/数值级两档，见 §9.2）+ `verify_cython_switch.py`（开关不变量）。⚠ **不得声称逐位等价**（`fastmath` 差 ~1 ulp） |
 | 加一个数据源 | `phdnet/corpus.py`（统一接口）+ `train/corpus_stream.py` | `verify_stream_tokenize.py`、`verify_ms_stream.py` |
 | 加一个训练阶段（SFT/RL） | `tools/train_rl.py` 模式 + `phdnet/rl.py` | 阶段语义对拍 + fast 9/9 |
 | 加一个 CLI 参数 | `train/train.py` argparse | **`--help` 实际能跑**（§5，含 6 次踩坑） |
@@ -65,10 +66,15 @@ train/
   ckpt_1b.py              检查点保存/恢复
   config_1b.py            四档预设 + 容量账
   tokenizer_core.py       分词热路径（numba nogil）
-tests/verifiers/          26 个专项验证器（P110–P124 新增：verify_m2_kernels /
-                           verify_cann_env / verify_lang_semantics /
-                           verify_powlaw_readout / verify_p116_sched）
+tests/verifiers/          专项验证器（以 verify_*.py 清单与实际输出为准）
+                           P192：cykernels / cython_switch / cython_loader /
+                           cann_dispatch / overlap_contract
 tools/                    工具脚本
+
+phdnet/_cykernels.pyx      P192：Cython nogil 计算核（源码，**入库**）
+setup_cython.py           P192：构建脚本（**故意不接进 pyproject/PEP 517**
+                           —— 零编译器的机器仍要能训练；`--cython-kernels off`）
+phdnet/cykernels.py       P192：加载 + 回落（仓库里**唯一**的构建入口）
 ```
 
 ### M1–M6 在 `step` 里的接入顺序
@@ -324,7 +330,7 @@ P111 恰恰是要取消这个回落。改代码前若不看清断言，**会把�
 | 要求 | 原因 |
 |---|---|
 | 只测量**不推荐** | 建议会变成无实测支撑的论断 |
-| 读出精度**锁 fp32** 并说明理由 | 否则构成「bf16 稠密 vs fp32 稀疏」的混淆对比 |
+| 读出精度**锁死并在脚本报出**（A/B 两臂同档），并说明为何选它 | 精度不锁 →「稠密 vs 稀疏」的差异里混着精度差，构成不可归因的混淆对比。⚠ 现行**默认是 fp8**（P189）：若比的是稀疏结构效应，两臂都留默认 fp8 即可；若比的是精度效应，就显式锁同一档（惯例 fp32，因为 fp8 的非目标行更新保留率最低，见 §4.2） |
 | 数字一律 **best-of-N** | 本机单次噪声可达 3× |
 | 注明**平台 + 档位 + commit** | 脱离口径的数字无意义 |
 | 消融计时**不可信** | 会被 JIT 编译时间污染（需先预热） |
@@ -363,7 +369,7 @@ P111 恰恰是要取消这个回落。改代码前若不看清断言，**会把�
 | `--sparse-fwd-kernel` | 稀疏前向算子（默认 `mulsum`） | `mulsum`=物化 (n_out,k) 临时张量；`einsum` 不物化但**非逐位**且昇腾未实测 |
 | `--ltm-imprint-amortize` | ⚠ **已于 P122 移除**，只接受 1 | 传 >1 直接 `ValueError`（实测收益为 0 且N≥2 污染权重）|
 | `--lang` | 终端输出语言（默认 **en**） | ⚠ **对训练结果零影响**。语料过滤是 `--data-lang`（会改变结果）|
-| `--readout-dtype` | 读出计算精度（默认 **fp32**） | 低精度破坏 p − t 规则（§4.2） |
+| `--readout-dtype` | 读出计算精度（默认 **fp8**，P189；`choices` = `fp32`/`fp16`/`bf16`/`fp8`） | ⚠ 默认 fp8 = **fp8 e4m3fn 位模式（uint8 承载）存储 + fp16 迭代**：访存收益完整，但非目标行 `p − t` 更新保留率最低 → 学习偏向纯 Hebbian（§4.2）。要精确 `p − t` 显式 `fp32`。int 族显式请求仍禁（P163）、fp4/int4 仍禁（P152） |
 | `--encoder-dtype` | M1 权重存储精度（默认 fp32） | 昇腾走平台自适应 GEMV，与 dtype 无关 |
 | `--m2-kernel` | M2 推理核（默认 **`plain`**） | 三态见下方 §9.1。**`plain` 在昇腾赢 5.41×**（P113 实测）；`fused` 在昇腾退化 3–4×（已否）。门禁 `verify_m2_kernels.py` |
 | `--nll-sync-every` | nll 同步周期（默认 8） | N>1 时消除每步硬同步 |
@@ -399,7 +405,7 @@ P111 恰恰是要取消这个回落。改代码前若不看清断言，**会把�
 昇腾上赢 5.41×。这印证了性能文档的铁律③：
 **x86 的性能结论不构成昇腾的证据，连「无差别」也不构成。**
 
-**门禁**：新增机制改到 M2 的核时必须跑 `tests/verifiers/verify_m2_kernels.py`（**11 例**）：
+**门禁**：新增机制改到 M2 的核时必须跑 `tests/verifiers/verify_m2_kernels.py`（**13 例**）：
 A1 fused vs serial、A2 plain vs serial（容差 1e-7 量级——plain 是非融合路径，
 内部 `np.tanh`/`np.clip` 的归约顺序与融合核的 `math.tanh` 不同）、
 A3 `n_steps=1/2/3`、B 类断言行级 prange **不改变求和顺序**。
@@ -411,9 +417,63 @@ P113 的零回归证据见性能文档 §2.1（四个采样点 sliding PPL 与 s
 
 ---
 
+## 9.2 P192：怎么加一个新的 Cython 核（含四个必踩的坑）
+
+Cython 臂是**第二套数值实现**。加核不是「写个函数」，而是**同时欠下一笔等价性债**。
+以下是 P192 实际踩到的，按踩坑顺序写。
+
+### 步骤
+
+1. 在 `phdnet/_cykernels.pyx` 写核：文件头已有全局
+   `boundscheck=False / wraparound=False / cdivision=True / initializedcheck=False / nonecheck=False`，
+   **函数体 `with nogil:`**，参数用 **typed memoryview**（`float[::1]`、`float[:,::1]`）。
+2. 在 `selftest()` 里加**真值断言**（不是「跑通即过」）。
+3. 在 `verify_cykernels.py` 里加一组对拍，并**明确它属语义级还是数值级**。
+4. 若要接到生产：在所属模块加 `cyk_init(mode)` 分派，默认 `off`。
+
+构建：`python setup_cython.py build_ext --inplace`（或直接 `--cython-kernels auto`，首次会就地构建）。
+
+### 四个必踩的坑（全部是 P192 真实踩到的）
+
+| 坑 | 症状 | 正确做法 |
+|---|---|---|
+| **参考值用 BLAS** | 自检恒假失败：`W @ x` 给 `1.1000001`，手算给 `1.1`，**两者都不是错的** | 参考必须**逐字复刻** fp32 顺序累加。BLAS 用 FMA + 分块归约，结合顺序不同 |
+| **用 fp64 算再转 fp32 当参考** | 同样恒假失败（上面那条的变体） | fp64 只舍入**一次**，而 fp32 顺序累加**每步都舍入** → 两者本就不等 |
+| **`nogil` 里索引 buffer** | 编译期报错或运行期诡异行为 | `np.ndarray[...]` buffer 是 **Python 对象**，`nogil` 内不可碰。**只用 typed memoryview** |
+| **常数 2.0 提升到 double** | MSVC `C4244`（double→float） | Cython 会把 Python 浮点字面量 `2.0` 发射成 **C double**。要 fp32 就写成 `cdef float _TWO = 2.0`，**不能**写 C 的 `2.0f`（Cython 不认，会报 `Expected ')', found 'f'`） |
+
+### ⚠ 最重要的一条：**不要声称「逐位等价」
+
+numba 核**全部带 `fastmath=True`** → LLVM 开启 **FMA 收缩 + 重结合**；
+Cython 用 `/O2`（**无** `/fp:fast`）→ **严格 IEEE-754**。
+两者在同一表达式上**必然可差 ~1 ulp**（P192 实测 `max|d|` 1e-8~1e-5，视规模）。
+
+故 `verify_cykernels.py` 的判据**分两档**，加新核时必须归到其中一档：
+
+| 档 | 用什么 | 例 |
+|---|---|---|
+| **语义级**（必须严） | 结构/索引口径/clip/事件驱动分支；**整数用例可真正逐位**（无舍入歧义） | `csr_add_outer` 的 `a[i]` vs `a[idx[p]]` —— 首版写错，门禁以 `max\|d\| = 0.339` 抓住 |
+| **数值级**（容差 + 如实报告） | 浮点累加顺序；**打印 `max\|d\|`**（管道须转义，否则多切一列），不谎称逐位 | `csr_matvec` vs fastmath numba |
+
+### ⚠ 自检的价值：它当场抓到了两个真 bug
+
+首版 `wm_decay_read` 漏了「衰减 `slots`」（只衰减了 `strength`）与「清零 `out`」，
+自检分别报出 `max|d| = 9.1e-2`（≈ 一个 `gamma` 因子）与 `out[0] = -5.6e17`（读到了
+调用方缓冲区的残留值）。**若没有自检，这两个 bug 会带着「跑得通」的假象进生产。**
+
+### ⚠ OpenMP 必须自证
+
+Cython 官方文档明写：**忘了传 OpenMP 参数，`prange` 照样编译通过，但退化为串行**。
+所以「编译成功」**不是**并行的证据。P192 提供 `openmp_enabled()`（读 C 宏 `_OPENMP`），
+门禁 A3 断言它为真。MSVC 用 `/openmp` **只加在 `extra_compile_args`**
+（当前官方并行指南说**不要**加进 `extra_link_args`；旧教程页已过时）。
+
+---
+
 ## 10. 收尾四步（fhz 固定要求）
 
 1. **对拍 / 回归 / 冒烟验证**——fast 9/9 + 相关 verifier + `py_compile` + `--help` 实跑。
+   ⚠ 若改了 argparse，**必跑** `tests/verifiers/verify_help_percent.py`（裸 `%` 会让 `--help` 崩，已犯 5 次）。
 2. **写记忆日志**——当天做的事追加到 `.workbuddy/memory/YYYY-MM-DD.md`；
    跨会话硬约束才写进 `MEMORY.md`。
 3. **commit + push**。⚠ **push 必须绕过凭据助手**，否则永久挂起：

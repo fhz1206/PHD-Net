@@ -66,8 +66,11 @@ def section_a() -> None:
         "\nwith contextlib.redirect_stdout(buf):\n    a=apply_cann_env(verbose=False)\n"
         "print(json.dumps({k:v for k,v in a.items()}))"
     ) % (str(_ROOT),)
+    # ⚠ 2026-10-07：显式 UTF-8 解码，避免区域编码（cp936）在 reader 线程
+    #   抛 UnicodeDecodeError → stdout=None → 下一行 json.loads(None) 崩。
     r = subprocess.run([sys.executable, "-c", code], capture_output=True,
-                       text=True, cwd=str(_ROOT), timeout=120)
+                       text=True, cwd=str(_ROOT), timeout=120,
+                       encoding="utf-8", errors="replace")
     got = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 else {}
 
     check(got.get("TASK_QUEUE_ENABLE") == "2",
@@ -105,7 +108,8 @@ def section_a() -> None:
         "'ce_env':os.environ['COMBINED_ENABLE']}))"
     ) % (str(_ROOT),)
     r3 = subprocess.run([sys.executable, "-c", code3], capture_output=True,
-                        text=True, cwd=str(_ROOT), timeout=120)
+                        text=True, cwd=str(_ROOT), timeout=120,
+                        encoding="utf-8", errors="replace")
     got3 = json.loads(r3.stdout.strip().splitlines()[-1]) if r3.returncode == 0 else {}
     check(got3.get("tq") == "0" and got3.get("tq_env") == "0",
           "A3 用户显式设的 TASK_QUEUE_ENABLE=0 **不被覆盖**",
@@ -233,7 +237,7 @@ def section_d() -> None:
     for flag in ("0", "1"):
         r = subprocess.run([sys.executable, "-c", code % flag],
                            capture_output=True, text=True, cwd=str(_ROOT),
-                           timeout=600)
+                           timeout=600, encoding="utf-8", errors="replace")
         if r.returncode != 0:
             check(False, f"D 环境 {flag} 跑失败", r.stderr[-120:])
             return

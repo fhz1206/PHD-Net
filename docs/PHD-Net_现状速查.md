@@ -8,15 +8,15 @@
 - 逐 token 流式语义：状态跨 token/shard/epoch 连续，**禁止批处理**（预训练不可批；仅 RL rollout 可批）。
 - 新增行为一律 config 开关默认关闭、默认路径逐位不变；例外（fhz 拍板）：`sparse_conn=True`、`k_sparse=16`、读出 `conn_k=128`。
 - 表征冻结 `eta_pc=0`（可塑性改进多轮全负）；PPL 增益只来自检索/记忆通路。
-- **分层定案（P170）**：Python 顶层（编排/门禁/回落/日志），Rust 编译 cdylib 作无状态算子库（`phdnet_rs/`，`top.py` 唯一接入点，`build.sh` 构建）。
+- 🔴 **分层定案（P170，曾）**：Python 顶层（编排/门禁/回落/日志）+ Rust 编译 cdylib 作无状态算子库。⚠ **`phdnet_rs/` 已整体删除（P188「删除 rust 版本，默认全部改回 python」）** —— 现为纯 Python + numba（+ 可选 Cython nogil 核，P192）。
 - 稠密 PC 栈已删：`SparsePCStack` 唯一实现，`sparse_conn=False` config 期 fail-fast。
 
 ## 2. 工程 / 目录现状
 
 - 训练入口 **`train/train.py`**（train_1b/ 已改名 train/）；推理 `train/infer.py`；容量验证 `tools/train_1b_capacity.py`；torch 轨已删（P30）。
-- 产物 `outputs/{test,experiments,smoke,models}`；对话 `chat/`；验证 `tests/verifiers/`（26 个 verifier，fast 门禁 9/9）。
+- 产物 `outputs/{test,experiments,smoke,models}`；对话 `chat/`；验证 `tests/verifiers/`（**别写死数量**，`ls tests/verifiers/*.py` 现查；fast 门禁 9/9）。
 - 版本 v0.1.0-alpha（已并入 main）；历史 force push 过，**旧 hash 全失效，服务器 clone 须 reset --hard**。
-- CI 三套并存：`.gitcode/workflows/` + Jenkinsfile + `.github/workflows/`；曾因引用已删 verify_torch_lm.py 长期红（已修）。
+- CI **两套**：`.gitcode/workflows/ci.yml`（GitCode）+ `.github/workflows/ci.yml`（GitHub 镜像）。⚠ **仓库没有 Jenkinsfile** —— 旧版本这里写「三套并存」，是错的。GitHub 侧当前仍红（无日志权限，待 traceback）
 - `requirements.txt`：numpy>=2.0 / numba>=0.60 / psutil / pyarrow 必装，torch 可选。
 - 词表快照唯一权威 = **JSON**（words+seg_vocab+max_len+sha1）；`tok_vocab≠tok_tokens`，推理校验比 tok_tokens。
 - `tools/bench_local.py` 只测本机 CPU 相对变化，**不产出文档数字**。
@@ -40,7 +40,7 @@
 | `--csr-online` | 开 | |
 | torch_compile | 关 | P58 指令；P128 放开稀疏融合核，待服务器 A/B |
 | `--lang` | en | 只管终端文案；语料过滤是 `--data-lang {all,zh,en}` |
-| `--fp8-conv` | torch | P189：fp8→int8 转换核；x86 实测 rust LUT 核 **8.44× 快**（3.73 vs 31.5ms @1b 档），默认暂留 torch 待昇腾 A/B |
+| `--fp8-conv` | torch | P189：fp8→int8 转换核（**torch/nogil**）。🔴 **`rust` 选项已随 P188「删除 rust 版本」整体删除**，传旧值**静默按 torch 处理**（不报错，两条 Python 路径逐位一致）；~~x86 实测 rust LUT 核 8.44× 快（3.73 vs 31.5ms @1b 档）~~ **该数字已随实现删除而作废**，不可作为选型依据。⚠ torch/nogil 的 x86 口径昇腾待 A/B |
 
 ### P189 默认精度表（读出 M6，请求 fp8 时）
 
@@ -58,23 +58,67 @@
 - CANN 环境治理（`cann_env.py`，须在 import numpy/torch 前 importlib 加载）：TASK_QUEUE_ENABLE=2 / COMBINED_ENABLE=1 / expandable_segments / MULTI_STREAM_MEMORY_REUSE；不覆盖用户显式值。ROCm 默认 `TORCH_BLAS_PREFER_HIPBLASLT=1`（零实测，诚实标注）。
 - `OMP_PROC_BIND=close`、无 OMP_PLACES（P74 已撤）；BLAS 线程 cap 8（import numpy 前）。
 - 20 个 parallel=True numba 核已加 nogil=True（x86 实测负收益 −7.8%~−14%，**待服务器 A/B 定去留**）。
-- P122 imprint 摊销（方案 B）已整体移除（fail-fast ValueError）；方案 C（`--sparse-fwd-kernel`，默认 mulsum）待服务器 A/B；方案 A（CPU/NPU 重叠）决定不做（真实收益仅 ~1.09×）。
+- **P192（2026-10-08）三开关，全部默认关闭**：
+  | 开关 | 默认 | 实际是什么 |
+  |---|---|---|
+  | `--cython-kernels {off,auto,force}` | `off` | **真换实现**：M2/M3 走 `phdnet/_cykernels.pyx` 的 nogil 核。⚠ 有 fp32 级漂移（~1 ulp，**非逐位等价**） |
+  | `--readout-pipeline` | 关 | **已停用，传了即报错退出**（fail-fast）。P117 已把读出做成异步（`forward_dev` 零同步 + `nll_sync_every=8`），额外流水没有保持语义的实现或 NPU 收益实测；贸然前移学习会改变逐 token 时序 |
+  | `--cann-dispatch` | 关 | **不新增行为**，只核对 P120 已默认开的 `TASK_QUEUE_ENABLE=2`/`COMBINED_ENABLE=1` 是否**真的生效**（官方列了两个静默失效条件，都不打日志） |
+
+  ⚠ **P192 推翻了一个旧结论**：本表早期版本写「方案 A（CPU/NPU 重叠）决定不做（真实收益仅 ~1.09×）」。
+  那个 1.09× 的依据是「NPU 在等 CPU」，但**代码核对（P192）发现训练步设备路径本就没有阻塞式
+  `.item()`/`.cpu()`** —— 唯一显式同步被 `nll_sync_every` 门控。故「12.09 = 4.26 + 7.83 完全串行」
+  若真存在，成因是**运行时下发/队列背压**，**不是**代码里的显式同步。
+  要证实这一点需要服务器 `msprof`，**本机（x86、无昇腾）无法验证**，故不给结论。
+  门禁把这一事实钉死：`tests/verifiers/verify_overlap_contract.py`（23/23）。
+
+  ⚠ **P192 同时更正了「推理侧也要重叠」这个提法**（当前自回归推理有跨 token 数据依赖）：
+  | | 训练步 | 推理步 `sample_next` |
+  |---|---|---|
+  | 读出 | `forward_dev` → 设备张量、**零同步** | `readout(h)` → `y.float().cpu().numpy()` **硬 D2H** |
+  | 下一步输入依赖上一步输出？ | 否 | **是**（自回归） |
+  → 推理的 CPU 与 NPU **天然串行**，且 NPU 必须等 CPU 回读 y 才能采样
+  （`infer.py:172`）——不能直接并行处理相邻生成 token。
+  但全量 logits D2H 与 host 采样是当前实现选择，不是数学上必须如此；
+  设备端采样等仍是候选，须独立验证采样语义与端到端收益。
+  实测 host 采样段（x86、V=51,962、top-k=8）约 **0.77 ms/token**，仅占训练 CPU 侧
+  4.26 ms 的 ~18%，**不是主要矛盾**（⚠ x86 口径、未含 D2H 与 NPU GEMV）。
 
 ## 4. 评测口径与锚点
 
-- 字符归一 PPL = exp(总 NLL / 评估段字符数)；冻结语料 `eval_corpus/`（internal_corpus 27,405 字符 + ood_wiki 20,214，不随文档编辑漂移）。
-- 现行锚点（eval_corpus v2 中文维基）：**4K 394.4687 / 全语料 359.2603**，P126 复测逐位一致；复测 `tools/rebaseline.py`。旧锚点（90.2480/73.1166 等）全部作废。
+- 字符归一 PPL = exp(总 NLL / 评估段字符数)；冻结语料 `eval_corpus/`（internal_corpus **27,034** 字符 + ood_wiki **20,187**，不随文档编辑漂移）。
+- **历史 fp32 锚点在干净 HEAD `da8f294` 上仍可复现**，不能写成「HEAD 已回归」或「锚点作废」。
+  当前工作区包含尚未提交的 STDP 学习语义修正，实测 PPL 与该历史口径不同；
+  默认 fp8 与历史显式 fp32 也不是同一比较口径。
+- **归因边界**：η 缩放修正让 STDP 核的 LTP/LTD 两项同乘学习率，纠正旧调用仅缩放
+  LTP 的错误。这是学习行为修正，不能冒充 Cython `off` 下的无数值变化优化。
+  有效隔离对照中仅反转 η 即精确恢复锚点；全工作区的微小残差未进一步分解。
+  时序反转在 BASE 中无影响是因为 dual_trace=False，不可外推到 dual=True。
+- **完整实测值、平台、配置及归因记录**集中在
+  [性能评估与迭代方案 §10.1](PHD-Net_性能评估与迭代方案.md#101-评测锚点)。
+  这些是 x86 本机结果，**不是昇腾/NPU 测量**；修正后须另建版本化基线，历史锚点不覆盖。
+- 复测命令 `tools/rebaseline.py`。⚠ 该脚本**只对比不更新** `ANCHOR`；更新锚点前必须先
+  定性「是回归还是口径变更」，并写明是两者中的哪一个。
 - 容量口径（带 readout_conn_k 与词表）：生产 conn_k=128 → 1.217e9；稠密读出同词表 1.370e9；30b preset big_n 2^29 × big_m 56。
 - 1B 档读出规模：vocab 73,958 × n_h 3,072；稀疏 k=128 = 113.6 MB/步（稠密 fp32 866.7 MiB，8.0× 省）；稀疏后每步字节流量 229.15 MiB。
 - 判定口径：256 维「相当（达标）」非「更强」；256 维 / 128 维消融不可比；`evaluate()` OOV 步跳 NLL 但字符照计 → 高 OOV 文本 ppl_char 被压低（探针用 ppl_pen）。
 
 ## 5. 性能定性结论（P179–P183 修正后现行口径）
 
-- 「CPU numba 核已饱和、无优化空间」**已推翻**。三个真因已修：①M1 一直走 BLAS 而非已存在的 `simd::gemv_row_avx2`（AVX2 比 BLAS 快 1.09–1.75×）；②M2 瓶颈是 Python 校验层 `idx.min()/max()` 全扫 9.47M 元素 = 6.05ms = 65.8%；③Rust M2 融合核长期损坏（idx 漏 int64→i32，P182 已修，门禁 5FAIL→0FAIL）。
-- 修后：M2 SpMV 9.18→**3.8ms（2.4×）**、带宽 9.6→**18.8 GB/s**（仍仅 DDR4 上限 ~44%）。
-- 换核一律按规模门限：M2 `rs_fused_min_nnz` 默认 393216；M1 `PHDNET_M1_MIN_CELLS` 默认 1<<23；低于门限回落 Python 核（逐位），高于走 Rust（relerr ~2e-07）。融合核必须缓存 int32 idx 视图（转换 1.85ms/次 > 核本身 1.01ms），按 `(tag, id(indptr), id(idx), size)` 缓存。
-- i32 idx 是 Rust SpMV 关键（P178）：i64 时 idx 流量翻倍 + SIMD gather 前须转换，压在 8.5 GB/s；i32 + 原生 gather → 2.98ms / ≈38 GB/s（x86）。
-- P180 负结果：动态 work-stealing 池无收益，已回退（负载不均不是瓶颈；剩余差距是访存带宽下的 SMT 行为）。
+⚠⚠ **本节有一半是 Rust 臂的历史记录，而 `phdnet_rs/` 已整体删除**（P182 修 bug、
+P188 fhz「删除 rust 版本，默认全部改回 python」）。下面标 🔴 的条目**代码里已不存在**，
+保留仅为解释当年结论的由来，**不可作为现行选型依据**。
+
+- 「CPU numba 核已饱和、无优化空间」**已推翻**。三个真因已修：①M1 一直走 BLAS 而非已存在的 `simd::gemv_row_avx2`（AVX2 比 BLAS 快 1.09–1.75×，🔴 该 Rust 核已删，现为 `_prefer_blas_gemv` 运行时探测）；②M2 瓶颈是 Python 校验层 `idx.min()/max()` 全扫 9.47M 元素 = 6.05ms = 65.8%；③Rust M2 融合核长期损坏（idx 漏 int64→i32，P182 已修，门禁 5FAIL→0FAIL，🔴 整个 Rust 臂随后按 P188 删除）。
+- 🔴 修后（Rust 臂口径）：M2 SpMV 9.18→**3.8ms（2.4×）**、带宽 9.6→**18.8 GB/s**。
+- 🔴 换核按规模门限：M2 `rs_fused_min_nnz` 默认 393216；M1 `PHDNET_M1_MIN_CELLS` 默认 1<<23。⚠ **这两个配置项已随 P188 删除**，`config.py` 不再有 `rs_*` 字段。
+- 🔴 i32 idx 是 Rust SpMV 关键（P178）：i64 时 idx 流量翻倍 + SIMD gather 前须转换，压在 8.5 GB/s。
+- P180 负结果：动态 work-stealing 池无收益，已回退（负载不均不是瓶颈）。
+- **读出瓶颈的现行定性**：msprof（P144）显示 `aclnnIndex` 占 89.3% 但 `aicore_time=0`、`wait` 是耗时的 **6.8×** → NPU 空转等 CPU；有效带宽仅 8.1 GB/s；实测读出 7.83 ms = 带宽下界 0.300 ms 的 **26.1×** → **不是访存受限，是算子下发/算子效率**。诊断 `tools/diag_readout_npu.py`。
+  ⚠ **P192 的修正**：这条「wait = 6.8×」是**运行时下发/队列背压**层面的证据，
+  **不是**代码里某行显式同步造成的（训练步设备路径已零同步，见 §3 P192 条）。
+  二者不矛盾，但**不可混用**：前者说「NPU 在等」，后者说「代码没写同步」——
+  等的是**下发队列**，不是 `.item()`。
 - 读出是 GEMV、带宽受限：NPU 50% 利用率是结构性上限；看**字节流量**不看利用率。msprof（P144）：aclnnIndex 占 89.3% 但 aicore_time=0、wait 是耗时的 6.8× → **NPU 空转等 CPU**，方向是流水线而非换算子；有效带宽仅 8.1 GB/s；实测读出 7.83ms = 带宽下界的 26.1×，瓶颈是算子效率/launch 非带宽；诊断 `tools/diag_readout_npu.py`。
 - CPU 侧收口：M4b_ltm <1ms/tok（P70/P78）；分词/词表扫描 ~0% 不要优化。
 - 本机测量环境限制：`process_time()`/`GetProcessTimes` 均 0；跨进程绝对值与缩放率不可比（cargo 2.38× vs Python 1.2-1.3×），只能同进程交错比 + best-of-3；x86 结论不是昇腾证据（已四次方向反转：M1 fp32、M2 融合核、OMP_PLACES、fused/plain）。
@@ -87,7 +131,7 @@
 - 远程数据 `ms://owner/dataset/path`（ModelScope 直连 API，HTTP Range 流式零落盘，勿 lfs pull）；生产仓 `ms://fhzfhz/Mixture-General-Mini/`（pretrain 52 分片 / sft 178MB）；`--data pretrain|pretrain_zh|sft` 自动走远程。
 - 本机 `datasets/` 已删（32.28 GiB，git LFS 历史可恢复）；`tools/fetch_l3.py` / `fetch_ms.py` 三源采样（994 GB 源，统一 schema text/lang/src）。
 - 语料角色：UltraInteract 英文 SFT、deepctrl 中文 SFT、Magpie-R1 与 Ultra-FineWeb-L3 = 预训练。
-- `phdnet_rs/src/acl.rs` 是纯传输层（无计算核）；NPU 计算实际走 Python torch_npu（`accel_readout.py`）；CANN Rust 库（cann/cann-sys、rust-ascend、ascend-rs）调研完成，均需 aarch64 + CANN SDK 在服务器做。
+- 🔴 `phdnet_rs/src/acl.rs` 曾是纯传输层（无计算核）；NPU 计算实际走 Python torch_npu（`accel_readout.py`）。CANN Rust 库（cann/cann-sys、rust-ascend、ascend-rs）调研完成，均需 aarch64 + CANN SDK 在服务器做 —— ⚠ **但 P188 已删掉 `phdnet_rs/`，故 CANN 若要接只能走 Cython（`libacl_rt.so`）或 ctypes，不是 Rust**。
 
 ## 7. 未解问题 / 仍有效待办
 
@@ -96,7 +140,7 @@
 3. 幂律变长 CSR 的稀疏读出（加速器只支持均匀 k，非均匀行宽 fail-fast）。
 4. fp32 化（P173 + P176 融合核 fp32 统一）后须重新 rebaseline。
 5. stepfun 报告两方向：列稀疏 update（次级杠杆，forward 319MB 不可省）、CSR idx 压缩 uint16（1.43×，val 不能降 bf16）。
-6. `bench_local.py` 测 fp64 而生产 fp32 的门禁盲点待修；verifier 门禁会腐烂 → 定期全量跑 26 个。
+6. `bench_local.py` 测 fp64 而生产 fp32 的门禁盲点待修；verifier 门禁会腐烂 → 定期全量跑（`ls tests/verifiers/*.py` 现查数量，⚠ 别写死）。
 7. `phdnet/generate.py` 字符级老接口清理待 fhz 确认。
 8. GitHub Actions 状态待确认绿（根因已修）。
 

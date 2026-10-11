@@ -1,0 +1,41 @@
+【A】向量化 vs 朴素参考 逐位对拍（3 规模 × tie-heavy）
+  PASS  A 128x96 random k=64  [idx/indptr/val+dense 逐位]
+  PASS  A 128x96 all-zeros k=7  [idx/indptr/val+dense 逐位]
+  PASS  A 128x96 all-zeros k=1 k=1  [idx/indptr/val+dense 逐位]
+  PASS  A 128x96 heavy-repeats k=48  [idx/indptr/val+dense 逐位]
+  PASS  A 128x96 two-valued k=1 k=1  [idx/indptr/val+dense 逐位]
+  PASS  A 128x96 int-repeats k=n_cols k=96  [idx/indptr/val+dense 逐位]
+  PASS  A 128x96 nan-row k=8  [idx/indptr/val+dense 逐位]
+  PASS  A 512x384 random k=64  [idx/indptr/val+dense 逐位]
+  PASS  A 512x384 all-zeros k=7  [idx/indptr/val+dense 逐位]
+  PASS  A 512x384 all-zeros k=1 k=1  [idx/indptr/val+dense 逐位]
+  PASS  A 512x384 heavy-repeats k=192  [idx/indptr/val+dense 逐位]
+  PASS  A 512x384 two-valued k=1 k=1  [idx/indptr/val+dense 逐位]
+  PASS  A 512x384 int-repeats k=n_cols k=384  [idx/indptr/val+dense 逐位]
+  PASS  A 512x384 nan-row k=8  [idx/indptr/val+dense 逐位]
+  PASS  A 1024x1000 random k=64  [idx/indptr/val+dense 逐位]
+  PASS  A 1024x1000 all-zeros k=7  [idx/indptr/val+dense 逐位]
+  PASS  A 1024x1000 all-zeros k=1 k=1  [idx/indptr/val+dense 逐位]
+  PASS  A 1024x1000 heavy-repeats k=500  [idx/indptr/val+dense 逐位]
+  PASS  A 1024x1000 two-valued k=1 k=1  [idx/indptr/val+dense 逐位]
+  PASS  A 1024x1000 int-repeats k=n_cols k=1000  [idx/indptr/val+dense 逐位]
+  PASS  A 1024x1000 nan-row k=8  [idx/indptr/val+dense 逐位]
+  PASS  A _dense 空行 CSR (3 行含 0 度行)  [逐位]
+  -- A 小结: 22/22 tie-heavy 对拍逐位一致
+【B】固定 seed infer/learn 输出对拍 golden（%TEMP%）
+  PASS  B1 重建输出 vs %TEMP% golden 逐数组 np.array_equal  [115 数组]
+  PASS  B2 重建 sha256 == 存档 golden sha256  [24a49ec87ae70c66...]
+  PASS  B2b 同进程重建两遍逐位一致（确定性）
+  PASS  B3 朴素版自比对：朴素重建 == 向量化重建（逐位）
+  PASS  B3b 对拍后现场恢复（未污染模块状态）
+  PASS  B4 朴素版 sha256 == 存档 golden sha256  [24a49ec87ae70c66...]
+【C】性能断言（预热 + best-of-7；阈值 = 优化后实测 × 2）
+  PASS  C _from_dense_csr 1024x1024 k=64 <= 141 ms  [实测 88.0 ms（优化后基准 70.5 ms，阈值 2×）]
+  PASS  C _from_dense_csr 2048x2048 k=128 <= 582 ms  [实测 350.8 ms（优化后基准 290.9 ms，阈值 2×）]
+  PASS  C _dense 2048x2048 k=128 <= 40 ms  [实测 29.4 ms（优化后基准 19.8 ms，阈值 2×）]
+  PASS  C _dense 4096x4096 k=256 <= 160 ms  [实测 117.1 ms（优化后基准 79.6 ms，阈值 2×）]
+
+== verify_perf_no_regression: 32/32 PASS ==
+全部通过：逐位不变 + 无性能回归。
+
+[stderr]

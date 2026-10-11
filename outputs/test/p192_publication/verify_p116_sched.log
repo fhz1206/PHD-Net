@@ -1,0 +1,43 @@
+==============================================================================
+P116 方案 B（M4b imprint 摊销）+ 方案 C（稀疏前向算子）对拍
+==============================================================================
+
+[A] 零回归：amortize=1 = 旧行为（逐位）
+[ltm-diag] imprints=10 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=176 k_hash=4
+[ltm-diag] imprints=10 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=176 k_hash=4
+  PASS  A1 amortize=1 两次调用结果逐位相同  [keys 179==179 max|Δ|=0.000e+00]
+  PASS  A2 step_count 每步递增（未被摊销吞掉）  [12 vs 12（期望 12）]
+  PASS  A3 表确实生长了（对拍非空）  [n_keys=179]
+
+[B] 方案 B（M4b imprint 摊销）**已于 P122 移除** —— 验证 fail-fast
+  PASS  B1 amortize=1（默认）正常工作，step_count 每步递增  [step_count=8/8]
+  PASS  B2 amortize=2 → ValueError fail-fast
+  PASS  B2 amortize=3 → ValueError fail-fast
+  PASS  B2 amortize=8 → ValueError fail-fast
+  PASS  B2 amortize=64 → ValueError fail-fast
+  PASS  B3 无摊销缓冲区残留（旧实现会永久滞留尾部对 = 持续丢数据）
+[ltm-diag] imprints=10 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,016 k_hash=4
+[ltm-diag] imprints=10 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,016 k_hash=4
+  PASS  B4 生产尺寸（n_dim=1024/m_out=72）两臂逐位相同  [共同键 3796，max|Δw|=0.000e+00]
+  PASS  B5 键数相同  [3796 vs 3796]
+  PASS  B6 config.ltm_imprint_amortize 默认=1
+
+[C] 方案 C：einsum vs mulsum（容差判据，**非逐位**）
+  PASS  C0 两个实例的算子设置正确  [mulsum / einsum]
+  PASS  C1 einsum 输出非零（防「丢权重」静默错误）  [max|y|=2.3717]
+  PASS  C2 einsum 与 mulsum 在 1e-4 相对容差内（**非逐位**）  [max|Δ|=3.576e-07 相对=2.02e-07]
+  PASS  C3 einsum 臂更新路径生效
+  PASS  C4 config 默认 sparse_fwd_kernel='einsum'（P131 起）  [实际='einsum']
+
+[D] 配置与 CLI 默认值一致（防 default 与实际不符）
+  PASS  D1 config.sparse_fwd_kernel 默认 einsum（P131）
+  PASS  D2 config.ltm_imprint_amortize 默认 1
+  PASS  D3 CLI --sparse-fwd-kernel 默认 einsum（与 config 一致）
+  PASS  D4 CLI --ltm-imprint-amortize 默认 1（与 config 一致）
+  PASS  D5 新参数出现在 --help 且不崩  [exit=0]
+
+==============================================================================
+结果：22/22 通过 | 失败 0
+==============================================================================
+
+[stderr]

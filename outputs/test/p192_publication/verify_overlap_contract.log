@@ -1,0 +1,45 @@
+P192 CPU/NPU overlap contract gate
+  PASS A1 readout_pipeline 默认 False  [实际 False]
+  PASS A2 cann_dispatch 默认 False  [实际 False]
+  PASS B1 训练步走 forward_dev（返回设备张量、零同步）
+  PASS B2 训练步不需要 numpy 化 y（y=None）
+  PASS B3 NLL 同步门控存在（不证明它是唯一同步点）
+  PASS C1 step() 内无 y_dev 的显式 D2H（异步契约未被破坏）  [forward_dev 直通]
+  PASS D1 PC_learn 不引用 y/y_dev  [pc.learn(cache, eta_scale=pc_scale, homeostasis=cfg.homeosta]
+  PASS D2 STDP_learn 不引用 y/y_dev  [self.stdp.step(self._prev_rate, rate, eta_scale=stdp_scale)]
+  PASS E1 readout_recurrence 默认 False  [实际 False]
+  PASS E2 该依赖确实存在（word_lm 从 d['y'] 取线索）
+  PASS F1 P117 的拒绝理由仍在代码里（防止后人误加）
+  PASS F2 STDP_learn 确实用 _prev_rate（上一步的 rate）
+
+  [结论] 读出流水（跨 token 提前提交）本轮**不实现**，理由三条：
+    ① 训练已有 forward_dev 异步提交（P117/P36），额外流水是在已有
+       异步之上重新调度**，收益未测，不能静态断言为零；
+    ② 12.09 = 4.26 + 7.83 的**完全串行**若真存在，其成因是运行时
+       下发/队列背压，不是显式同步 —— 要证实它需服务器 msprof，
+       **本机无法验证**（不得凭 x86 结果下结论）；
+    ③ 唯一的跨 token y 依赖 readout_recurrence 默认关，但一旦打开，
+       流水会导致 recur_cue 拿到**上一步**的 y —— 静默的语义错误，
+       比它可能带来的收益更危险。
+    → 真正值得做的是 CANN 侧下发（--cann-dispatch）与 Cython 核
+       （--cython-kernels），两者都不动时序语义。
+  PASS G1 readout_pipeline 保留为配置项但**未接线**（显式留白，非半实现）  [config 有字段、model 未消费]
+  PASS G2 传 --readout-pipeline 会 fail-fast（不静默接受）  [raise SystemExit → 退出码 1，不假装生效]
+  PASS G3 fail-fast 发生在模型构造之前（无副作用）  [报错行 38350 < 建模行 1000000000]
+  PASS I1 推理步走 readout(h) 硬 D2H（learn=False → _dev_readout 恒 False）  [model.py:391 判定含 learn → 推理不取设备直通]
+  PASS I2 AccelReadout.forward 末尾是硬 D2H（推理的同步点）  [accel_readout.py:1089]
+  PASS I3 forward_dev 是零同步版本，且只被训练步调用  [forward_dev 返回设备张量，仅 _dev_readout 分支用]
+  PASS I4 推理的采样数学在 host 上跑（sample_next 消费 numpy y）  [infer.py:172 sample_next 拿 y.astype(float64)]
+  [结论] 推理**不加**流水：自回归下 token t+1 的输入依赖 token t 的
+       采样结果；当前实现走硬 D2H，设备端采样仍是未验证候选。
+       P192 的 CPU/NPU 工作只针对**训练**路径。
+  PASS H1 verify_dispatch() 可调用且返回结构完整
+  PASS H2 不适用或未知状态不被宣称已生效  [非 torch_npu 环境（无昇腾）→ 下发流水不适用，本项不算失败]
+  PASS H3 verify_dispatch 不修改任何环境变量（幂等只读）
+  PASS H4 TASK_QUEUE_ENABLE/COMBINED_ENABLE 本就默认开（--cann-dispatch 只核对不新增）  [P120 起默认开启]
+
+==============================================================
+overlap contract: 23/23 passed
+==============================================================
+
+[stderr]

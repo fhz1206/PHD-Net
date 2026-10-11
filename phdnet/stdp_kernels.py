@@ -54,6 +54,100 @@ def _stdp_delta(W, post_idx, t_pre, t_post, pre, post, eta, w_max):
                 W[i, j] = w
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# **P192：Cython 分派**（默认关闭，铁律④ —— `off` 时下方两个函数即原实现）
+# ══════════════════════════════════════════════════════════════════════════
+# ⚠ **诚实边界**：本文件的 numba 核用 `@njit(cache=True)`（**无 fastmath**）
+#   → 语义上比 `sparse_pc.py` 的核更接近 Cython 的严格 IEEE。但
+#   `_stdp_delta` 里的 `2.0` 是 Python float → numba 提升为 fp64 参与
+#   `2.0*t_pre[i]*post[k]`，而 Cython 版用 `cdef float`（fp32）→ 仍有
+#   ~1 ulp 差异（门禁 B4 实测 max|d| ~6e-8）。
+#   故本开关**同样不构成「逐位等价」**，只保证**语义等价**（同序、同 clip、
+#   同事件驱动分支）。门禁：`tests/verifiers/verify_cykernels.py`。
+try:                                        # pragma: no cover - 纯导入分支
+    from .cykernels import get_kernels as _get_cyk
+except Exception:                           # noqa: BLE001
+    _get_cyk = None
+
+_CYK = None          # 激活时是 `phdnet._cykernels` 模块；否则 None
+_CYK_MODE: str | None = None
+_CYK_DEFAULT = object()
+
+
+def cyk_init(mode: str = "off") -> bool:
+    """按 `mode` 初始化本文件的 Cython 分派；返回是否生效。
+
+    与 `phdnet/sparse_pc.py::cyk_init` 同名同义：仅设置直接构造机制的
+    兼容默认值。PHDNet 显式传同一个实例句柄，已有机制的分派不会被本
+    函数或随后构造的另一模型改写。force 失败不得静默回落。
+    """
+    global _CYK, _CYK_MODE
+    if mode == _CYK_MODE and (mode == "off" or _CYK is not None):
+        return _CYK is not None
+    _CYK_MODE = mode
+    if mode == "off" or _get_cyk is None:
+        _CYK = None
+        if mode == "force":
+            raise RuntimeError("Cython loader 不可用（force）")
+        return False
+    try:
+        _CYK = _get_cyk(mode)       # None 即未激活（模块本身，无 `.active`）
+        if _CYK is None and mode == "force":
+            raise RuntimeError("Cython 扩展未激活（force）")
+    except Exception:                # noqa: BLE001
+        _CYK = None
+        if mode == "force":
+            raise
+    return _CYK is not None
+
+
+def predict_edges(W, post_idx, pre, n, *, cython_module=_CYK_DEFAULT):
+    """稀疏拓扑前向（scatter 语义）—— 分派入口。
+
+    ⚠ **必须是 scatter 而非 gather**：多个 `(i,j)` 可映射到同一 `post_idx`，
+    gather 会改变累加顺序 → 非逐位。故 Cython 版也用 `out[k] += ...`。
+    ⚠ numba 版 `p = np.zeros(n)` 是 **fp64**（`0.0` 是 Python float）；
+    Cython 版要求调用方给 fp32 缓冲。两者的 dtype 差异由调用点
+    （`phdnet/plasticity.py`）显式承担，**本层不做隐式转换**。
+    """
+    mod = _CYK if cython_module is _CYK_DEFAULT else cython_module
+    if mod is not None:
+        out = np.zeros(n, dtype=np.float32)
+        mod.predict_edges(np.ascontiguousarray(W, dtype=np.float32),
+                            np.ascontiguousarray(post_idx, dtype=np.int32),
+                            np.ascontiguousarray(pre, dtype=np.float32), out)
+        return out
+    return _predict_edges(W, post_idx, pre, n)
+
+
+def stdp_delta(W, post_idx, t_pre, t_post, pre, post, eta, w_max,
+               *, cython_module=_CYK_DEFAULT):
+    """事件驱动 STDP —— 分派入口（原地改 `W`）。
+
+    ⚠ `W`/`post_idx` 必须是 **C-contiguous 且 dtype 精确匹配**
+    （`float32` / `int32`）：Cython 侧是 typed memoryview，dtype 不符会
+    抛 `ValueError: Buffer dtype mismatch`。本层**主动转换并拷回**
+    （因为 numba 版对非连续数组也能跑，为保持兼容度值得这点开销）；
+    生产数据本就是连续的，故正常路径下转换是**零拷贝**（`ascontiguousarray`
+    对已连续的数组返回原对象）。
+    """
+    mod = _CYK if cython_module is _CYK_DEFAULT else cython_module
+    if mod is not None:
+        Wc = np.ascontiguousarray(W, dtype=np.float32)
+        mod.stdp_delta(
+            Wc,
+            np.ascontiguousarray(post_idx, dtype=np.int32),
+            np.ascontiguousarray(t_pre, dtype=np.float32),
+            np.ascontiguousarray(t_post, dtype=np.float32),
+            np.ascontiguousarray(pre, dtype=np.float32),
+            np.ascontiguousarray(post, dtype=np.float32),
+            np.float32(eta), np.float32(w_max))
+        if Wc is not W:              # 发生了转换 → 写回
+            W[...] = Wc
+        return W
+    return _stdp_delta(W, post_idx, t_pre, t_post, pre, post, eta, w_max)
+
+
 def _selftest_numba() -> bool:
     """numba 核运行时正确性自检（行为级 + 数值等价级）。
 

@@ -32,6 +32,15 @@ class PHDNet:
 
     def __init__(self, cfg: PHDNetConfig):
         self.cfg = cfg
+        # P192：两个机制绑定同一实例句柄；构造另一个 off/auto 模型不能
+        # 改写已有模型的分派。off 不加载/构建扩展，force 失败直接传播。
+        _cy_mod = None
+        _cy_mode = getattr(cfg, "cython_kernels", "off")
+        if _cy_mode != "off":
+            from .cykernels import get_kernels
+            _cy_mod = get_kernels(_cy_mode)
+            print(f"[p192] cython kernels: requested={_cy_mode!r} active={_cy_mod is not None}"
+                  f"（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）", flush=True)
         rng = np.random.default_rng(cfg.seed)
         self.encoder = SparseEncoder(cfg.n_input, cfg.n_sdr, cfg.k_sparse, rng,
                                      dtype=getattr(cfg, "encoder_dtype", "fp32"))  # M1
@@ -44,10 +53,7 @@ class PHDNet:
                                 lognormal_init=cfg.lognormal_init,                # O1-4
                                 exc_ratio=cfg.exc_ratio,
                                 fused=getattr(cfg, "pc_fused_kernel", True),       # P75
-                                # P181：M2 算子后端默认 Rust + 8 线程（Python 核保留）
-                                m2_backend=getattr(cfg, "m2_backend", "rust"),
-                                rs_threads=getattr(cfg, "rs_threads", 8),
-                                rs_fused_min_nnz=getattr(cfg, "rs_fused_min_nnz", 393216))
+                                cython_module=_cy_mod)
         # M3 关联核：默认 numpy(+numba)；显式指定或检测到加速器时改用 torch 后端
         # （同一算子语义，覆盖 CPU / CUDA / ROCm(HIP) / 昇腾 NPU）
         # M3 关联核：**只走 numpy(+numba) CPU**（P30 定稿）。
@@ -70,7 +76,7 @@ class PHDNet:
                              metaplasticity=cfg.metaplasticity,
                              bcm_tau=cfg.bcm_tau,
                              ei_synapses=cfg.ei_synapses,
-                             ei_ratio=cfg.ei_ratio)
+                             ei_ratio=cfg.ei_ratio, cython_module=_cy_mod)
         self.wm = WorkingMemory(cfg.n_top, cfg.n_wm_slots, cfg.gamma_wm,          # M4a
                                 content_address=cfg.wm_content_address,           # T3.4
                                 sim_thresh=cfg.wm_sim_thresh)

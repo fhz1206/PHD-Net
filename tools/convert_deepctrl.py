@@ -37,6 +37,14 @@ import urllib.request
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
+
+# 控制台编码容错（2026-10-07 修复）：与 train/train.py 同源 —— 中文 Windows 的
+# GBK 控制台打不出 ⚠/emoji → `UnicodeEncodeError` 让 `--help` 直接崩。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(errors="replace")
+    except Exception:
+        pass
 URL = ("https://www.modelscope.cn/api/v1/datasets/deepctrl/deepctrl-sft-data/repo"
        "?Revision=master&FilePath=sft_data_{lang}.jsonl")
 

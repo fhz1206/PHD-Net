@@ -240,8 +240,14 @@ def section_d() -> None:
     check(ok_amort, "D4 CLI --ltm-imprint-amortize 默认 1（与 config 一致）")
 
     # --help 可执行（含新参数）
+    # ⚠ 2026-10-07：必须显式 encoding/errors —— `text=True` 默认按**区域编码**
+    #   （中文 Windows = cp936）解码子进程输出；子进程一旦打出 UTF-8 字节就在
+    #   reader 线程里抛 UnicodeDecodeError，`r.stdout` 留成 None，本断言随之
+    #   变成 "argument of type 'NoneType' is not a container"（本机实测）。
+    #   断言只比对 ASCII 参数名，两种编码下字节一致，故 decode 用 utf-8+replace 即可。
     r = subprocess.run([sys.executable, str(_ROOT / "train" / "train.py"), "--help"],
-                       capture_output=True, text=True, cwd=str(_ROOT), timeout=180)
+                       capture_output=True, text=True, cwd=str(_ROOT), timeout=180,
+                       encoding="utf-8", errors="replace")
     check(r.returncode == 0 and "--sparse-fwd-kernel" in r.stdout
           and "--ltm-imprint-amortize" in r.stdout,
           "D5 新参数出现在 --help 且不崩",

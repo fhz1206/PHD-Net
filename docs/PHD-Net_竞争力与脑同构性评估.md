@@ -344,7 +344,13 @@ PHD-Net **不存在**任何反向传播路径（§二.2）。与Transformer 的�
 
 ### 6.4 精度语义代价：速度 vs 学习规则正确性
 
-读出默认 **fp32**（P110）**不是为了访存，是因为低精度会破坏学习规则语义**。
+读出默认 **fp8**（P189，fhz 2026-10-07「模型 fp8、迭代 fp16」）。
+**取舍的真实位置不是「访存 vs 语义」，而是「访存收益 vs 语义」**：
+W 以 fp8 e4m3fn 位模式（uint8 承载，1 B/元素）存储、迭代在 **fp16 域**完成后
+RNE 舍回 fp8 位模式——访存收益是完整的，**代价落在学习规则语义上**。
+fp8 的量化步长比 fp16 **粗约 4 倍**，非目标行更新保留率因此**最低**（下表）：
+「只提升目标行」的抑制项被吞掉，学习偏向纯 Hebbian。
+⚠ 这是**知情取舍，不是缺陷**；如需精确 `p − t`，显式 `--readout-dtype fp32`。
 实测非目标行更新保留率（`tools/probe_readout_precision.py`，判据=同精度舍入后元素是否真变了）：
 
 | 精度 | 非目标行保留率 | 目标行保留率 | 语义后果 |
@@ -408,10 +414,10 @@ PHD-Net **不存在**任何反向传播路径（§二.2）。与Transformer 的�
 | M5 调制（`σ(a·z)` 门控） | `phdnet/modulator.py:1-16` |
 | M6 读出感知器 `ΔW = −η(p−t)⊗h` | `phdnet/readout.py:1147-1155` |
 | M6 稀疏读出仅均匀 k | `phdnet/readout.py:806-809` |
-| 幂律分配器**未接入** | `phdnet/sparse_alloc.py`（docstring 自陈）+ `readout.py` 无 import + `tools/bench_readout_sparse.py:113` 过期注释 |
+| 幂律分配器**已接入**（P124，`alpha=0` 逐位等价均匀 k） | `phdnet/readout.py:574-579` import `sparse_alloc.build_powlaw_csr`。⚠ `tools/bench_readout_sparse.py:113` 仍写「预留接口 / 由另一位同事并行实现中」= **过期注释** |
 | 加速器非均匀 CSR fail-fast | `phdnet/backends/accel_readout.py:148-153` |
-| M6 CLI 默认 `conn_k=128`（4.2%） | `train/train.py:296`（P108 / fhz 2026-10-01）；库默认 0 = `phdnet/config.py:194` |
-| M2 CLI 默认核 = `plain`（行级 prange） | `train/train.py:250` `default="plain"`（P113 实测后改）；门禁 `tests/verifiers/verify_m2_kernels.py`（11 例）。⚠ 库默认 `pc_fused_kernel=True` = `phdnet/config.py:198`，是另一条路径 |
+| M6 CLI 默认 `conn_k=128`（4.2%） | `train/train.py:467`（P108 / fhz 2026-10-01）；库默认 0 = `phdnet/config.py:197` |
+| M2 CLI 默认核 = `plain`（行级 prange） | `train/train.py:394` `default="plain"`（P113 实测后改）；门禁 `tests/verifiers/verify_m2_kernels.py`（13 例）。⚠ 库默认 `pc_fused_kernel=True` 是另一条路径 |
 | 无反向传播 | `grep backward/autograd/requires_grad/torch.optim` 于 `phdnet/ train/ tools/` 无命中 |
 | 逐 token 语义 / 状态不重置 | `train/train.py:719, 805`；`phdnet/model.py:204` |
 | 各机制默认开关 | `phdnet/config.py`（铁律④） |

@@ -75,6 +75,20 @@ class SparseSynapseTable:
             trace.pop(i, None)
             stamp.pop(i, None)
 
+    def _decay_read(self, trace: dict, stamp: dict, i: int) -> float:
+        """读侧 λ^Δt 补偿：迹只在 _touch 里衰减，未被触碰的旧行直接读出的是
+        「上次触碰时刻」的值 → 学习读值偏大（稳态 dt=1、λ=0.7 时 η_eff≈1.43η）。
+        读处补 λ^(step_count − stamp) 才等于「每步急切衰减」的参考值；
+        stamp 缺省 step_count ⇒ 指数 0 ⇒ 无补偿（安全，与旧行为逐位一致）。
+        step_count 在 learn **之后**才自增（bigltm.py imprint），故读侧用当前
+        step_count 语义正确；_touch 刚触碰过的键 stamp==step_count ⇒ 指数同样为 0。
+        """
+        v = trace.get(i, 0.0)
+        if v == 0.0:
+            return 0.0
+        dt = self.step_count - stamp.get(i, self.step_count)
+        return v if dt == 0 else v * (self.lam ** dt)
+
     # ---------- 预测：p[k] = Σ_i w(i,k)（只遍历活跃神经元的出边） ----------
     def predict(self, active: list[int]) -> dict[int, float]:
         p: dict[int, float] = {}
@@ -95,10 +109,26 @@ class SparseSynapseTable:
 
     # ---------- 学习：LTP 生长/强化 + LTD 稳态（仅在已存在突触上） ----------
     def learn(self, prev: list[int], cur: list[int]) -> None:
-        if not prev or not cur:
+        if not cur:
             return
+        # ── 漏报2修复：prev 为空（首次 imprint / begin_episode 之后）也必须先
+        # 积累 cur 的突触后迹 —— 否则下一次 learn 的 prev 侧 t_pre==0 → 整行
+        # continue，第一对配对静默丢失（实测连续 imprint [0,1]/[2,3]/[4,5] 后
+        # out rows = [] / [] / [2,3]）。
         self._touch(cur, self.t_post, self.stamp_post)
-        self._touch(cur, self.t_pre, self.stamp_pre)   # 同时开始积累 pre 迹
+        if not prev:
+            return
+        # ── 漏报1修复：突触前迹**只在神经元充当突触前（出现在 prev）时**累积。
+        # 原实现把 t_pre/t_post **同刻同键** _touch ⇒ 两迹键、值、stamp 逐位全等
+        # ⇒ 对已存在边 LTP = η·t_pre[i]·t_post[k] 与 LTD = η·t_post[i]·t_pre[k]
+        # 是同一串浮点运算 ⇒ 位级相等 ⇒ 净 Δw 恒 0：权重只在首次生长那一刻定格，
+        # 之后仅剩 w+ltp−ltd 的 ~1e-17 舍入抖动（实测 7 步内最大步长 6.9e-18），
+        # 且与 stdp_kernels 的 2·LTP − LTD 非对称参考式背离。
+        # 现在：LTP 用**当前迹**（i 的 pre 迹、k 的 post 迹均含当步事件），
+        # LTD 用**滞后/突触后历史迹**（i 的 post 历史、k 的 pre 历史，均非当步）
+        # → 两式不再恒等；读侧仍走 _decay_read 的 λ^Δt 惰性补偿，未触碰的
+        # 滞后迹在读取时补到当前时刻（惰性扫描语义不变）。
+        self._touch(prev, self.t_pre, self.stamp_pre)
         out, eta, w_max = self.out, self.eta, self.w_max
         int8 = self.int8_store
         q = self._q
@@ -108,18 +138,19 @@ class SparseSynapseTable:
         if self.growth_guidance and len(cur) > 1:
             grow_order = sorted(cur, key=lambda k: self.in_deg.get(k, 0))
         for i in prev:
-            tpi = self.t_pre.get(i, 0.0)
+            tpi = self._decay_read(self.t_pre, self.stamp_pre, i)   # λ^Δt 读侧补偿
             if tpi <= 0.0:
                 continue
             bucket = out.get(i)
             for k in grow_order:
-                tpk = self.t_post.get(k, 0.0)
+                tpk = self.t_post.get(k, 0.0)   # k∈cur，本步刚 _touch ⇒ stamp==step_count
                 ltp = eta * tpi * tpk
                 if ltp <= 0.0:
                     continue
                 if bucket is not None and k in bucket:
                     w_now = bucket[k] / q if int8 else bucket[k]
-                    ltd = eta * self.t_post.get(i, 0.0) * self.t_pre.get(k, 0.0)
+                    ltd = (eta * self._decay_read(self.t_post, self.stamp_post, i)
+                           * self.t_pre.get(k, 0.0))
                     bucket[k] = self._enc(min(max(w_now + ltp - ltd, 0.0), w_max))
                 else:                                   # 结构可塑性：生长新突触
                     if bucket is None:
@@ -131,28 +162,34 @@ class SparseSynapseTable:
 
     # ---------- T5.3 CSR 扁平快照（读密集阶段的紧凑表示） ----------
     def compact_csr(self) -> dict:
-        """把邻接表快照为 CSR（indptr/indices/data），int8 模式下 data 为量化的
-        np.int8 数组（同内存容量进一步 ×8↓）。快照只读，不改变在线结构；
+        """把邻接表快照为 CSR（indptr/indices/data）。快照只读，不改变在线结构；
         供分析/导出/读密集阶段使用（在线生长仍走 dict 事件驱动路径）。
+
+        data / scale 语义（快照保真度）：
+          · int8 模式 —— data 为量化码 np.int8 数组（内存进一步 ×8↓），
+            scale = 1/_q（反量化乘子），旧行为保持不变；
+          · float 模式 —— data **直存表内原 float**（逐位保真，不做
+            round(w·q)/q 重量化），scale 固定 1.0。
+            （曾对非 int8 也按 round(w·q)/q 量化 → float 快照静默有损；
+             "scale" 全仓库无消费者，ckpt_1b.py 直接把 data 当真值写回。）
         """
         n_with_out = sorted(self.out.keys())
         indptr = np.zeros(len(n_with_out) + 1, dtype=np.int64)
         indices: list[int] = []
-        data: list[int] = []
+        data: list[float] = []
         for r, i in enumerate(n_with_out):
             bucket = self.out[i]
             for k in sorted(bucket.keys()):
                 indices.append(k)
-                data.append(int(bucket[k]) if self.int8_store
-                            else int(round(bucket[k] * self._q)))
+                data.append(int(bucket[k]) if self.int8_store else float(bucket[k]))
             indptr[r + 1] = len(indices)
         return {
             "row_ids": np.asarray(n_with_out, dtype=np.int64),
             "indptr": indptr,
             "indices": np.asarray(indices, dtype=np.int64),
             "data": (np.asarray(data, dtype=np.int8) if self.int8_store
-                     else np.asarray(data, dtype=np.float64) / self._q),
-            "scale": 1.0 / self._q,
+                     else np.asarray(data, dtype=np.float64)),
+            "scale": (1.0 / self._q) if self.int8_store else 1.0,
         }
 
     def stats(self) -> dict:
@@ -303,10 +340,15 @@ class OnlineCSRTable(SparseSynapseTable):
 
     # ---------- 学习（LTP 生长/强化 + LTD 稳态；语义与 dict 版逐键一致） ----------
     def learn(self, prev: list[int], cur: list[int]) -> None:
-        if not prev or not cur:
+        if not cur:
             return
+        # 与 dict 版同步（漏报1/漏报2）：①cur 无条件先 touch（prev 为空时只
+        # touch 就返回）；②t_pre 只按 prev（突触前角色）touch —— 原来两迹
+        # 同刻同键 ⇒ LTP≡LTD ⇒ 已存在突触永不更新。详见 dict 版注释。
         self._touch(cur, self.t_post, self.stamp_post)
-        self._touch(cur, self.t_pre, self.stamp_pre)
+        if not prev:
+            return
+        self._touch(prev, self.t_pre, self.stamp_pre)
         eta, w_max, int8, q = self.eta, self.w_max, self.int8_store, self._q
         # 与 dict 版一致：生长顺序在 prev 循环外确定一次（按当前入度升序）
         grow_order = cur
@@ -321,7 +363,7 @@ class OnlineCSRTable(SparseSynapseTable):
             self._learn_batch(prev, grow_order, eta, w_max, int8, q)
             return
         for i in prev:
-            tpi = self.t_pre.get(i, 0.0)
+            tpi = self._decay_read(self.t_pre, self.stamp_pre, i)   # λ^Δt 读侧补偿
             if tpi <= 0.0:
                 continue
             row = self.keys.get(i)
@@ -335,7 +377,8 @@ class OnlineCSRTable(SparseSynapseTable):
                 slot = self._find_slot(i, k)
                 if slot is not None:
                     w_now = (int(self.vals[i][slot]) / q) if int8 else float(self.vals[i][slot])
-                    ltd = eta * self.t_post.get(i, 0.0) * self.t_pre.get(k, 0.0)
+                    ltd = (eta * self._decay_read(self.t_post, self.stamp_post, i)
+                           * self.t_pre.get(k, 0.0))
                     self._write_slot(i, slot, w_now + ltp - ltd)
                 elif self.size[i] < self.m_out:          # 结构可塑性：生长新突触
                     self._append(i, k, min(ltp, w_max))
@@ -380,8 +423,10 @@ class OnlineCSRTable(SparseSynapseTable):
             K[r, :sz] = self.keys[i][:sz]
             V[r, :sz] = self.vals[i][:sz]
             S[r] = sz
-            tpi[r] = float(self.t_pre.get(i, 0.0))
-            tpi_post[r] = float(self.t_post.get(i, 0.0))
+            # λ^Δt 读侧补偿：与 Python 单条路径的 _decay_read 同式（i∈prev，
+            # 未被本步 _touch ⇒ stamp 是旧步），否则批量路径读值偏大。
+            tpi[r] = float(self._decay_read(self.t_pre, self.stamp_pre, i))
+            tpi_post[r] = float(self._decay_read(self.t_post, self.stamp_post, i))
         ks = np.asarray(grow_order, dtype=np.int64)
         g_tpost = np.asarray([self.t_post.get(k, 0.0) for k in grow_order],
                              dtype=np.float64)
@@ -409,7 +454,11 @@ class OnlineCSRTable(SparseSynapseTable):
     # ---------- CSR 快照（与本类内部表示同构，直接导出） ----------
     def compact_csr(self) -> dict:
         """与 dict 版逐位一致：每行按目标索引**排序**输出（语义对齐
-        `SparseSynapseTable.compact_csr` 的 `for k in sorted(bucket.keys())`）。"""
+        `SparseSynapseTable.compact_csr` 的 `for k in sorted(bucket.keys())`）。
+
+        data / scale：int8 模式存量化码 np.int8、scale=1/_q（旧行为不变）；
+        float 模式**直存表内原 float64**（逐位保真，不 round(w·q)/q 重量化）、
+        scale=1.0 —— 详见父类 `SparseSynapseTable.compact_csr` docstring。"""
         rows = sorted(self.keys.keys())
         R = len(rows)
         indptr = np.zeros(R + 1, dtype=np.int64)
@@ -421,6 +470,8 @@ class OnlineCSRTable(SparseSynapseTable):
         cap = int(szs.max()) if R else 0
         K = np.empty((R, cap), dtype=np.int64)
         Vq = np.empty((R, cap), dtype=np.int64)
+        # float 模式走 Vf（原值直存）；Vq 仅 int8 模式有意义
+        Vf = None if self.int8_store else np.empty((R, cap), dtype=np.float64)
         for r, i in enumerate(rows):            # 仅 R 次 Python 循环（行拷贝）
             sz = self.size[i]
             K[r, :sz] = self.keys[i][:sz]
@@ -428,9 +479,10 @@ class OnlineCSRTable(SparseSynapseTable):
             if self.int8_store:
                 Vq[r, :sz] = v.astype(np.int64)
             else:
-                Vq[r, :sz] = np.round(v.astype(np.float64) * self._q).astype(np.int64)
+                Vf[r, :sz] = v.astype(np.float64)
         flat_k = K.ravel()[: R * cap]
         flat_q = Vq.ravel()[: R * cap]
+        flat_f = None if Vf is None else Vf.ravel()[: R * cap]
         row_of = np.repeat(np.arange(R, dtype=np.int64), cap)
         flat_slot = np.tile(np.arange(cap, dtype=np.int64), R)
         valid = flat_slot < szs[row_of]         # 每行只保留真实槽位
@@ -438,15 +490,15 @@ class OnlineCSRTable(SparseSynapseTable):
         # np.lexsort 的**最后一个 key 是主排序键**：行升序为主、键次之、槽位末
         sel = sel[np.lexsort((flat_slot[sel], flat_k[sel], row_of[sel]))]
         indices = flat_k[sel]
-        data = (flat_q[sel].astype(np.int8) if self.int8_store else flat_q[sel])
+        data = (flat_q[sel].astype(np.int8) if self.int8_store else flat_f[sel])
         indptr[1:] = np.cumsum(szs)
         return {
             "row_ids": np.asarray(rows, dtype=np.int64),
             "indptr": indptr,
             "indices": np.asarray(indices, dtype=np.int64),
             "data": (np.asarray(data, dtype=np.int8) if self.int8_store
-                     else np.asarray(data, dtype=np.float64) / self._q),
-            "scale": 1.0 / self._q,
+                     else np.asarray(data, dtype=np.float64)),
+            "scale": (1.0 / self._q) if self.int8_store else 1.0,
         }
 
     def stats(self) -> dict:
@@ -473,6 +525,12 @@ class OnlineCSRTable(SparseSynapseTable):
 
         每片一个 `.npz`（元数据）+ 一组定长数组；写回后 `import_shards` 可
         逐位恢复。返回各片条目数统计。
+
+        除 keys/vals/size 外，还导出**全局在线状态**（in_deg / t_pre / t_post /
+        stamp_pre / stamp_post / step_count，随 shard_00 落盘）：缺它们时
+        in_deg 不重建（growth_guidance 的 T5.2 静默失效）、迹与时间戳不恢复
+        （首轮 learn 因 t_pre<=0 整行 continue → 学习静默失效）。
+        import 侧用「if key in z」逐键恢复 → 旧分片（无这些键）仍兼容。
         """
         from pathlib import Path
         d = Path(out_dir)
@@ -480,6 +538,15 @@ class OnlineCSRTable(SparseSynapseTable):
         shards: list[list[int]] = [[] for _ in range(n_shards)]
         for i in sorted(self.keys.keys()):
             shards[i % n_shards].append(i)
+        # 全局在线状态（仅 shard_00 承载；键名 st_ 前缀，便于 if-key-in-z 探测）
+        state: dict = {"st_step_count": np.asarray(self.step_count, dtype=np.int64)}
+        for nm, dd, dt in (("st_tpre", self.t_pre, np.float64),
+                           ("st_tpost", self.t_post, np.float64),
+                           ("st_spre", self.stamp_pre, np.int64),
+                           ("st_spost", self.stamp_post, np.int64),
+                           ("st_indeg", self.in_deg, np.int64)):
+            state[nm + "_i"] = np.fromiter(dd.keys(), dtype=np.int64, count=len(dd))
+            state[nm + "_v"] = np.fromiter(dd.values(), dtype=dt, count=len(dd))
         counts = []
         for si, rows in enumerate(shards):
             arrs_k, arrs_v, sizes, indptr = [], [], [], [0]
@@ -496,13 +563,19 @@ class OnlineCSRTable(SparseSynapseTable):
                      row_ids=np.asarray(rows, dtype=np.int64),
                      sizes=np.asarray(sizes, dtype=np.int64),
                      indptr=np.asarray(indptr, dtype=np.int64),
-                     keys=flat_k, vals=flat_v)
+                     keys=flat_k, vals=flat_v,
+                     **(state if si == 0 else {}))
             counts.append(int(len(flat_k)))
         return {"shards": n_shards, "entries_per_shard": counts,
                 "total_entries": int(sum(counts)), "dir": str(d)}
 
     def import_shards(self, in_dir: str) -> None:
-        """从 `export_shards` 产物逐位恢复在线 CSR 状态（覆盖当前 keys/vals/size）。"""
+        """从 export_shards 产物逐位恢复在线 CSR 状态（覆盖当前 keys/vals/size）。
+
+        同时用「if key in z」逐键恢复 shard_00 携带的全局状态：
+        step_count / t_pre / t_post / stamp_pre / stamp_post / in_deg。
+        旧分片没有这些键 → 全部跳过（兼容旧行为，不做半恢复）。
+        """
         from pathlib import Path
         d = Path(in_dir)
         self.keys, self.vals, self.size = {}, {}, {}
@@ -515,3 +588,21 @@ class OnlineCSRTable(SparseSynapseTable):
                     self.keys[i] = np.array(keys[a:b], dtype=np.int64)
                     self.vals[i] = np.array(vals[a:b], dtype=vals.dtype)
                     self.size[i] = int(sizes[r])
+                # ── 全局在线状态（if-key-in-z ⇒ 旧分片自动跳过） ──
+                if "st_step_count" in z:
+                    self.step_count = int(z["st_step_count"])
+                if "st_tpre_i" in z:
+                    self.t_pre = dict(zip(z["st_tpre_i"].tolist(),
+                                          map(float, z["st_tpre_v"].tolist())))
+                if "st_tpost_i" in z:
+                    self.t_post = dict(zip(z["st_tpost_i"].tolist(),
+                                           map(float, z["st_tpost_v"].tolist())))
+                if "st_spre_i" in z:
+                    self.stamp_pre = dict(zip(z["st_spre_i"].tolist(),
+                                              map(int, z["st_spre_v"].tolist())))
+                if "st_spost_i" in z:
+                    self.stamp_post = dict(zip(z["st_spost_i"].tolist(),
+                                               map(int, z["st_spost_v"].tolist())))
+                if "st_indeg_i" in z:
+                    self.in_deg = dict(zip(z["st_indeg_i"].tolist(),
+                                           map(int, z["st_indeg_v"].tolist())))

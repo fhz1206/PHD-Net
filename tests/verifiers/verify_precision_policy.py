@@ -37,8 +37,6 @@ from phdnet.precision_policy import (candidate_order,             # noqa: E402
                                      resolve_precision, resolve_precision_cached,
                                      clear_cache, FAMILIES)
 from phdnet.backends.accel_readout import (AccelReadout,           # noqa: E402
-                                           _pack4, _unpack4,
-                                           _FP4_E2M1_LUT, _INT4_LUT,
                                            _unsupported_reason)
 
 _RESULTS: list = []
@@ -185,32 +183,6 @@ def main() -> int:
         check("D8 访存阶梯 fp32 >= fp16 == bf16（同字节）",
               mems[0] >= mems[1] >= mems[2],
               " | ".join(f"{m:.2f} MiB" for m in mems))
-
-    # ── E. 4-bit 打包契约 ────────────────────────────────────────────
-    print("\n[E] 4-bit 打包（这是 P151 踩坑最多的地方）")
-    check("E1 e2m1 LUT **恰好 16 格**（我曾写成 14 →误差 46.7%）",
-          _FP4_E2M1_LUT.size == 16, f"实际 {_FP4_E2M1_LUT.size}")
-    check("E2 int4 LUT 恰好 16 格", _INT4_LUT.size == 16,
-          f"实际 {_INT4_LUT.size}")
-    rng = np.random.default_rng(0)
-    v = rng.normal(0, 0.3, (128, 64)).astype(np.float32)
-    for name, lut, fam, tol in (("fp4", _FP4_E2M1_LUT, "fp", 0.25),
-                                ("int4", _INT4_LUT, "int", 0.10)):
-        pk, sc = _pack4(v, lut, family=fam)
-        pk2 = pk.reshape(v.shape[0], -1)
-        up = _unpack4(torch.from_numpy(pk2), v.shape[1], lut,
-                      sc).float().numpy()
-        rel = float(np.abs(up - v).max() / np.abs(v).max())
-        check(f"E3 {name} 打包往返误差在 {tol:.0%} 内（4-bit 只有 16 格）",
-              rel <= tol, f"相对={rel:.2%} scale={sc:.4g}")
-        check(f"E4 {name} 打包后**字节数减半**",
-              pk2.shape[1] * 2 == v.shape[1],
-              f"{v.shape[1]} → {pk2.shape[0]}×{pk2.shape[1]}")
-        # 打包语义：高半字节 = 偶数列（numba `_ro_q_matvec_fp4` 的约定）
-        c0 = int(pk2[0, 0])
-        check(f"E5 {name} 高半字节=偶数列、低半字节=奇列（numba 语义）",
-              abs(float((lut * sc)[c0 >> 4]) - up[0, 0]) < 1e-5,
-              f"byte=0x{c0:02x} 偶={c0>>4}→{up[0,0]:.4f}")
 
     # ── E2. P163：4-bit + int 族禁用，fp8/fp4 移出候选链 ─────────────────
     print("\n[E2] P163：int 族禁用 + fp8/fp4 移出候选链")

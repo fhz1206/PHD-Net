@@ -50,7 +50,9 @@ class PHDNetLM:
         return nlls
 
     def evaluate(self, text: str) -> float:
-        """字符级困惑度（PPL = exp(平均 NLL)）。只推理、不学习。
+        """字符级困惑度（PPL = exp(平均 NLL)）。只推理、不学习、**零状态副作用**。
+
+        2026-10-07 P0-1：评估必须 readonly=True —— 详见下方 step 调用处注释。
 
         2026-09-18 修复：NLL 直接取自 step() 返回的读出输出 y —— 与训练同款特征、
         同款状态；旧实现每步都走 `_nll` 回退（在状态推进后重算一遍前向），
@@ -60,7 +62,21 @@ class PHDNetLM:
         total = 0.0
         n = max(1, len(text) - 1)
         for t in range(len(text) - 1):
-            y = self.net.step(self.tok.encode(text[t]), learn=False)["y"]
+            # 2026-10-07 P0-1 修复：**评估必须零状态副作用**。
+            # 光传 learn=False 不够——那只关「权重学习」；readonly=False 时
+            # model.step 仍会执行 modulator.observe、wm.decay/write、
+            # LTM 检索/印迹、step_count+=1、_last_rate/_prev_rate/STDP 迹推进。
+            # 复核者实测的两个后果：
+            #   ① 同文本连评两次 PPL 9.741009 vs 9.660860（相对差 8.228e-3），
+            #      net.step_count 4399→4917（+518）——评估不可复现；
+            #   ② A 模型在两段训练之间只多跑 1 次 evaluate，与 B（不评估）在
+            #      **完全相同数据**上继续训练后权重分叉：net.stdp.W maxΔ=0.0225、
+            #      net.wm.slots maxΔ=1.19，heldout PPL 9.5564 vs 9.8475（−3.0%）
+            #      ——「评估」污染了训练，A/B 对照全部失效。
+            # 对照实现：phdnet/word_lm.py:227（B5 修复，早就传了 readonly=True）。
+            # 门禁：tests/verifiers/verify_eval_readonly.py（(a) 连评逐位相等、
+            # (b) 快照零副作用、(c) 评估后再训练与不评估等权）。
+            y = self.net.step(self.tok.encode(text[t]), learn=False, readonly=True)["y"]
             y = y - y.max()
             p = np.exp(y)
             p /= p.sum()
@@ -68,7 +84,13 @@ class PHDNetLM:
         return float(np.exp(total / n))
 
     def _nll(self, x: np.ndarray, target: np.ndarray) -> float:
-        """（保留兼容，主评估路径已不再使用；见 evaluate 的说明。）"""
+        """（保留兼容，主评估路径已不再使用；见 evaluate 的说明。）
+
+        2026-10-07 P0-1 同步：本路径**不调用 step()**，只走 encoder.encode /
+        pc.infer / wm.read / stdp.predict / readout 五个纯函数（不写任何持久状态），
+        与 evaluate 的 readonly 契约一致 —— **零状态副作用**。
+        门禁 tests/verifiers/verify_eval_readonly.py (b*) 会对它做快照核验。
+        """
         s0, _ = self.net.encoder.encode(x)
         cache = self.net.pc.infer(s0, self.net.cfg.n_infer_steps)
         h_parts = [cache["r2"], self.net.wm.read()]

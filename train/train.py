@@ -75,6 +75,19 @@ for p in (str(_HERE), str(_ROOT), str(_ROOT / "tools")):
 os.environ.setdefault(  # P39：numba 缓存持久化（不被 __pycache__ 清理波及）
     "NUMBA_CACHE_DIR", str(_ROOT / "outputs" / "numba_cache"))
 
+# 控制台编码容错（2026-10-07 修复）：`--help` 与运行日志里有 ⚠ / emoji /
+# 制表符，中文 Windows 的默认控制台编码是 GBK（cp936）→ 打印时
+# `UnicodeEncodeError: 'gbk' codec can't encode character '⚠'`，argparse 直接崩
+# （BUGS.md A2 族：「--help 必须真的跑出来」）。**只把不可编码字符降级为 '?'**，
+# 编码本身不动（中文仍正常显示），且 Python 3.7+ 的 PYTHONIOENCODING/utf-8 模式
+# 不受影响。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(errors="replace")
+    except Exception:
+        pass
+
+
 # P120：CANN / torch_npu 环境变量（**同样必须在 import numpy / torch 之前**）：
 # TASK_QUEUE_ENABLE=2（算子下发队列 Level 2，掩盖 CPU 下发开销）、
 # COMBINED_ENABLE=1（非连续算子合并下发）、
@@ -314,7 +327,7 @@ def main() -> None:
                          "「模型 fp8，迭代 fp16」）。设备有原生 fp8 算子时直接用；"
                          "910B4 无 fp8 算子但有 int8 算子 → 自动走"
                          "「fp8 位模式存储（uint8）+ 每步 CPU 转换 int8 计算」"
-                         "（P154/P155 路径，转换核可用 --fp8-conv 切换 rust/torch）。"
+                         "（P154/P155 路径，转换核可用 --fp8-conv 在 torch/nogil 间切换）。"
                          "int 族显式请求仍禁用（P163）；fp4/int4 维持禁用（P152）。"
                          "保留率代价见 tools/probe_readout_precision.py（P110）")
     ap.add_argument("--torch-compile", dest="torch_compile",
@@ -354,11 +367,12 @@ def main() -> None:
                          "量化 1.6 亿元素是一次设备算子，摊到 N 步；N 越大越省，"
                          "但 forward 用的 fp8 副本越旧")
     ap.add_argument("--fp8-conv", default="torch",
-                    choices=["torch", "nogil", "rust"],
+                    choices=["torch", "nogil"],
                     help="P189：fp8 位模式 → int8 码本的 CPU 转换核。"
-                         "torch=向量化（默认）；nogil=numba 标量（0 中间张量）；"
-                         "rust=phdnet_rs 多核核（数值逐位一致，"
-                         "不可用时回落 torch 并告警一次）")
+                         "torch=向量化（默认，快 5.1x）；nogil=numba 标量"
+                         "（0 中间张量 + 释放 GIL，慢）。"
+                         "⚠ 2026-10-07：rust 选项已随 rust 版本删除（fhz 指令），"
+                         "传旧值会按 torch 处理")
     ap.add_argument("--ltm-imprint-amortize", type=int, default=1,
                     help="⚠ **已于 P122 移除，仅保留 1**（审计证明净负面："
                          "实测收益为 0——摊销只推迟 learn 时机不减少次数，"
@@ -412,6 +426,28 @@ def main() -> None:
                          "｜P62 默认 8：服务器实测（2026-09-29 读出 12.9 ms/tok、"
                          "CPU 仅 1.3-3.2/191 核、CS/s 250 万+ = 线程空转等同步）"
                          "确认每步 .item() 是主要暴露点")
+    # ── P192：CPU/NPU 重叠三开关（全部默认关闭，铁律④）─────────────────────
+    ap.add_argument("--cython-kernels", default="off",
+                    choices=["off", "auto", "force"],
+                    help="P192：Cython nogil 计算核（默认 off = 现行 numba 路径"
+                         "逐位不变）。auto=加载已编译扩展、否则就地构建，失败"
+                         "静默回落 numba；force=同 auto 但失败 raise（门禁用）。"
+                         "构建：python setup_cython.py build_ext --inplace。"
+                         "⚠ 本机无昇腾，收益无昇腾实测；且 Cython(/O2 严格"
+                         "IEEE) 与 numba(fastmath=True) 差 ~1 ulp/累加 → 开后"
+                         "训练轨迹有 fp32 级微小漂移，不得称逐位等价")
+    ap.add_argument("--readout-pipeline", action="store_true",
+                    help="（P192 已停用）**传了会直接报错退出**。原拟做跨 token "
+                         "流水，但训练已有 forward_dev 异步提交；额外流水"
+                         "尚无保持语义的实现或 NPU 收益实测，"
+                         "贸然前移学习会改变铁律③的逐 token 时序。"
+                         "证据见 verify_overlap_contract.py")
+    ap.add_argument("--cann-dispatch", action="store_true",
+                    help="P192：**不新增任何行为**，只核对 TASK_QUEUE_ENABLE=2 + "
+                         "COMBINED_ENABLE=1 是否真的生效（这两项 P120 起已默认开）。"
+                         "官方列了两个静默失效条件且都不打日志：仅二进制场景生效"
+                         "（JIT 路径下等于没开）、ASCEND_LAUNCH_BLOCKING=1 会强制关闭"
+                         "task_queue。本项目无实测，属官方文档推荐 + 默认无害")
     ap.add_argument("--accel", default="auto",
                     help="读出计算设备（P19，fhz「有 cuda/cann(npu)/rocm 就跑"
                          "对应设备」）：auto = 有加速器就用（昇腾→ROCm→CUDA→"
@@ -457,7 +493,8 @@ def main() -> None:
                          "（= 在预训练权重上做 SFT）；与 --resume（继续同一状态"
                          "并保留步数）不同")
     ap.add_argument("--prefetch-depth", type=int, default=0,
-                    help="预取队列深度（批数，P25：缺省 8192）。注意深度受"
+                    help="预取队列深度（批数，P25：0=用缺省 8192，队列 maxsize "
+                         "恒有界）。注意深度受"
                          "**按文件序归并**约束——单生产者时囤积≈0，depth 不是"
                          "数据供给的主杠杆（见 --prefetch-workers / --prefetch-batch）")
     ap.add_argument("--prefetch-batch", type=int, default=0,
@@ -474,10 +511,14 @@ def main() -> None:
                     help="context 里程碑间隔 tokens（0=关闭；默认 1M）")
     ap.add_argument("--ckpt-dtype", default="fp16",
                     choices=["", "fp8", "bf16", "fp16", "int8", "int16", "int32"],
-                    help="P46: checkpoint storage precision for the big matrices "
-                         "(readout W etc). fp8/bf16 are stored as raw bit patterns "
-                         "and decoded losslessly on load. NOT the training "
-                         "precision: torch cannot do fp8 matmul, and fp8 would "
+                    help="P46: checkpoint storage precision for every big float "
+                         "matrix (encoder/stdp/readout W, dense pc W — all arrays "
+                         "are downcast after assembly, so readout W IS compressed; "
+                         "2026-10-07 fix). fp8/bf16 store raw uint8/uint16 bit "
+                         "patterns and are decoded bit-exactly on load "
+                         "(meta ckpt_dtype_keys; decode failure refuses the load). "
+                         "Values are rounded to storage precision — this is "
+                         "STORAGE only: torch cannot do fp8 matmul, and fp8 would "
                          "flush the perceptron's non-target-row updates to zero.")
     ap.add_argument("--ckpt-every", type=int, default=50000,
                     help="每 N token 存一次检查点（P36：默认 50,000；"
@@ -559,9 +600,13 @@ def main() -> None:
                       "(env matrix / trial allocation / real-load timing)")
     except Exception:                                       # noqa: BLE001
         pass
-    _inflight_samples = min(PREFETCH_DEPTH or 8192, 8192) * (PREFETCH_BATCH or 64)
+    # 2026-10-07 修复（审计 4）：打印**真实**队列 maxsize——与两处 PrefetchChars
+    # 构造的 depth=(PREFETCH_DEPTH or 8192) 用同一表达式（原 depth=0 会建无界
+    # mp.Queue 却在日志里打 8192，打印值≠实际值）。
+    _q_depth = PREFETCH_DEPTH or 8192
+    _inflight_samples = min(_q_depth, 8192) * (PREFETCH_BATCH or 64)
     print(f"[parallel] tokenisation thread (numba nogil)={vw} | prefetch processes={_pf}"
-          f" | prefetch depth={PREFETCH_DEPTH or 8192}, batch={PREFETCH_BATCH or 64} samples"
+          f" | prefetch depth={_q_depth} (queue maxsize={_q_depth}), batch={PREFETCH_BATCH or 64} samples"
           f" (queue capacity≈{_inflight_samples:,} samples ≈ millions of tokens;"
           f" in-flight ≈ producers × lead batches — multiple producers needed to fill the queue)"
           f" (decode cores/process≈{max(1, _cpu // _pf)}, total≈{_pf * max(1, _cpu // _pf)})"
@@ -680,6 +725,51 @@ def main() -> None:
     cfg.step_profiling = args.step_profiling           # P35 step 分段计时（默认关）
     cfg.torch_compile = args.torch_compile             # P38 kernel 融合（默认开）
     cfg.torch_compile_mode = args.torch_compile_mode   # P44 模式（default=无 cudagraph）
+    # ── P192：CPU/NPU 重叠三开关（默认全关，铁律④）───────────────────────
+    cfg.cython_kernels = args.cython_kernels         # off(默认) | auto | force
+    cfg.readout_pipeline = args.readout_pipeline     # 读出流水（P192：保留位，未接线）
+    if cfg.readout_pipeline:
+        # ⚠ fail-fast 而非静默接受：额外流水未实现、NPU 收益未测。
+        # 已有 forward_dev 异步并不能证明额外流水收益为零；前移学习须严格保序。
+        # 留一个「开了没反应」的开关是最坏的一种
+        # API —— 用户会以为自己在跑一个优化。故显式报错并指路。
+        raise SystemExit(
+            "--readout-pipeline 已被 P192 关闭：训练步的设备路径本就走 "
+            "forward_dev（零同步）+ nll_sync_every（摊薄 .item()），"
+            "额外流水尚无保持语义的实现或 NPU 收益实测，贸然前移学习会改变逐 token 时序。"
+            "\n证据见 tests/verifiers/verify_overlap_contract.py 与 "
+            "docs/PHD-Net_性能评估与迭代方案.md §8.3。"
+            "\n真正相关的开关是 --cython-kernels 与 --cann-dispatch。")
+    cfg.cann_dispatch = args.cann_dispatch           # CANN 下发流水（默认关）
+
+    # P192 启动自检：**三开关的生效状态必须打进日志**，否则事后无法区分
+    # 「开了没效果」与「根本没开」。Cython 走 `phdnet.cykernels` 的唯一入口。
+    # ⚠ `get_kernels()` 返回的是**原始扩展模块**（不是 `Kernels` 门面），
+    #   所以判断生效要看 `is not None`，**不能读 `.active`**（原始模块没有该属性）。
+    try:
+        from phdnet import cykernels as _cyk
+        _ck = _cyk.get_kernels(cfg.cython_kernels)
+        _active = _ck is not None
+        print(f"[p192] cython_kernels={cfg.cython_kernels!r} → "
+              f"active={_active} | {_cyk.cykernels_status()}", flush=True)
+    except Exception as e:                                   # noqa: BLE001
+        if cfg.cython_kernels == "force":
+            raise
+        print(f"[p192] cython_kernels={cfg.cython_kernels!r} 未生效："
+              f"{type(e).__name__}: {e}", flush=True)
+    print(f"[p192] readout_pipeline={cfg.readout_pipeline}"
+          f" | cann_dispatch={cfg.cann_dispatch}"
+          f"（均默认 False；开启动效值与回落原因见 [pipeline]/[cann-dispatch] 行）",
+          flush=True)
+    if cfg.cann_dispatch:
+        # 核对 TASK_QUEUE_ENABLE=2 / COMBINED_ENABLE=1 是否**真的生效**
+        # （官方文档列了两个静默失效条件，都不打日志 —— 见 cann_env.verify_dispatch）
+        try:
+            from phdnet.backends.cann_env import verify_dispatch
+            verify_dispatch(report=True)
+        except Exception as e:                               # noqa: BLE001
+            print(f"[cann-dispatch] 核对未完成：{type(e).__name__}: {e}",
+                  flush=True)
     _tel = Telemetry()                                 # P41：系统/设备遥测
 
     data_path = DATA_FILES[args.data]
@@ -811,7 +901,10 @@ def main() -> None:
                                                    lang=("zh"
                                                         if args.data == "pretrain_zh"
                                                         else None),
-                                                   depth=PREFETCH_DEPTH,
+                                                   # 2026-10-07 修复（审计 4）：
+                                                   # 缺省 0 → 无界队列，且与日志
+                                                   # depth=8192 不符 → 同口径取 or 8192
+                                                   depth=(PREFETCH_DEPTH or 8192),
                                                    batch_samples=PREFETCH_BATCH or 64,
                                                    workers=_scan_w),
                                                vw, progress=_scan_prog)
@@ -1025,7 +1118,9 @@ def main() -> None:
             _pw = min(PREFETCH_W or REMOTE_MAX_PROCS, REMOTE_MAX_PROCS)
         src = PrefetchChars(data_path, SEP,
                             lang=_lang_filter,
-                            depth=PREFETCH_DEPTH,
+                            # 2026-10-07 修复（审计 4）：缺省 0 → 无界队列（与日志
+                            # depth=8192 不符）→ 与 batch_samples 的 or 64 同口径
+                            depth=(PREFETCH_DEPTH or 8192),
                             batch_samples=PREFETCH_BATCH or 64,
                             workers=_pw)
         stream = StreamingTokenizer(lm.tok.seg, src,

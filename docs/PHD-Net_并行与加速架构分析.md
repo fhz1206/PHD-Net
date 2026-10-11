@@ -127,7 +127,7 @@ P99 因此新增了第一条（去掉 `parallel=True`，保留融合的「一次
 | `M2_infer` | 6.92 → **1.28 ms/tok（5.41×）** | 1b 档，昇腾 191 核 + NPU，`[日志]` |
 | 端到端 | 17.63 → **12.09 ms/tok（1.46×）** | 同上 |
 | 零回归 | 四个采样点（10250/20250/30250/40250 token）sliding PPL **逐位相同**：38101.949 / 25042.421 / 22693.449 / 19602.394 | `[日志]` 跨 run 观测 |
-| 受控门禁 | `tests/verifiers/verify_m2_kernels.py` **11 例三态对拍** | 同进程、同输入 |
+| 受控门禁 | `tests/verifiers/verify_m2_kernels.py` **13 例三态对拍** | 同进程、同输入 |
 
 ⚠ **历史值标注**：上表 6.92 / 17.63 是 **serial 口径（历史对照）**。
 另有一组更早的 plain 值 6.7–11.9 ms/tok（P76 A/B 期间，**线程配置未标**），
@@ -647,7 +647,7 @@ msprof 昇腾实测曾让我下错两次结论，**两次都是读指标的方�
 | **4** | **CPU/NPU 流水重叠** | CPU 侧 **4.26 ms** vs NPU 侧 **7.83 ms** → **NPU 是 CPU 的 1.84 倍**；完全重叠理论上限 = `max` = **7.83 ms**（12.09 → 7.83，**1.55×**） | 两侧时间是否可叠加。⚠ **违反逐 token 语义**：状态跨 token 连续演化，不能批处理、不能回溯重算 → 必须靠前瞻机制。**三方案 A/B/C 与执行顺序建议见 `docs/PHD-Net_CPU-NPU重叠执行计划.md`** | **大**（架构级） |
 | **5** | **层间线程池用在训练稳态** | 现有层间 `ThreadPoolExecutor` 只在**词表构建/扫描**阶段（`vocab_parallel.py:120,275`） | 稳态分词已被 `tokenizer_core.py` 的 nogil 核覆盖；M4b 的 `_recall_project` 因写竞态**结构性串行**。稳态路径上是否还有 nogil 化的空间？ | 待评估 |
 | **6** | **M4b 批量核的服务器侧复测** | `BATCH_MIN_COMBOS = 4096` 门槛（`sparse_table.py:209`）；本机计时仅 1.0–1.1× | 收益完全押在服务器侧，**至今未复测**（性能文档 §4.3）。`M4b_ltm` 当前 0.40 ms/tok，收益上界已被端到端占比限制 | 小（跑一次） |
-| **7** | **NPU 侧脱离 torch_npu**（fhz 指示：C++/Rust 专属核，config 开关并存） | 现状 **torch_npu 2.9 + `accel_readout.py` 1668 行**；Rust `acl.rs` 只有传输层（**未加载 `aclrtLaunchKernel`/`aclnn*`**，`Graph::compile` 是恒返回 `None` 的占位）。**Rust CANN 库已调研**：`cann`/`cann-sys`（RAII + 两段式 aclnn 算子树 + GE 图）、`rust-ascend`（公共 IR→CCE 编译器）、`ascend-rs`（AscendC→Rust 路线） | ⚠ **三者均需 aarch64 + CANN SDK，本机 Windows 无法编译验证** → 只能「写了不能验」，违反项目验证纪律 → **必须在昇腾服务器上做**。建议先在本机只写接口层（config 开关 + 与 torch_npu 并存的抽象），逐个核在服务器实现 + 对拍 | 大（新后端） |
+| **7** | **NPU 侧脱离 torch_npu**（fhz 指示：设备侧专属核，config 开关并存） | 现状 **torch_npu 2.9 + `accel_readout.py` 1668 行**。🔴 **原计划的 Rust 路径已作废**：`phdnet_rs/src/acl.rs` 当时只有传输层（**未加载 `aclrtLaunchKernel`/`aclnn*`**，`Graph::compile` 是恒返回 `None` 的占位），且该文件**随 `phdnet_rs/` 于 P188 整体删除**；调研过的 Rust CANN 库（`cann`/`cann-sys` RAII+两段式 aclnn 算子树+GE 图、`rust-ascend` 公共 IR→CCE 编译器、`ascend-rs` AscendC→Rust 路线）**不再是候选**。**现路径：Cython（`cdef extern` 对 `libacl_rt.so`）或 ctypes 调 `aclrt*`/`aclnn*`**，与 torch_npu 并存 | ⚠ **torch_npu 没有已验证的 Python ACL 图捕获封装**（动态 shape 与内存复用要自己管），本机 Windows 也无法编译验证 → 只能「写了不能验」，违反项目验证纪律 → **必须在昇腾服务器上做**。建议先在本机只写接口层（config 开关 + 与 torch_npu 并存的抽象），逐个核在服务器实现 + 对拍 | 大（新后端） |
 
 ⚠ **候选 4 的诚实边界**：它是**收益最大、代价也最大**的一条。
 「CPU 与 NPU 重叠」在别的项目里是常规工程问题，在这里被铁律③直接封住。

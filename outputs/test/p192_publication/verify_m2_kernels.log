@@ -1,0 +1,32 @@
+==============================================================================
+P113 M2 推理核三态数值等价对拍（fused / serial / plain）
+==============================================================================
+
+[A] 三态等价（同一 s0、同一 CSR）
+  PASS  A1 fused vs serial  [max|Δ|=1.508e-07 (尺度 1.000)]
+  PASS  A2 plain vs serial（非融合 vs 融合）  [max|Δ|=4.441e-16 (尺度 1.000)]
+  PASS  A3 plain vs fused  [max|Δ|=1.508e-07]
+
+[B] n_steps = 1/2/3（多步递推，E1 家族教训）
+  PASS  B n_steps=1 plain vs serial 相对偏差  [max rel|Δ|=2.220e-16]
+  PASS  B n_steps=2 plain vs serial 相对偏差  [max rel|Δ|=3.331e-16]
+  PASS  B n_steps=3 plain vs serial 相对偏差  [max rel|Δ|=2.220e-16]
+
+[B2] plain 的行级 prange 是否逐位等价于 serial
+  PASS  B2 plain vs serial 非逐位（已在容差内）  [max|Δ|=4.441e-16—— 若在昇腾上出现非逐位，需在文档注明「plain 与 serial 非逐位」，不可宣称零回归]
+
+[C5] parallel 核的 nogil 覆盖（P123）
+  PASS  C5 所有 parallel=True 的核都带 nogil=True  [共 19 个，缺 0]
+  PASS  C5b M2 的 5 个 CSR 核都带 nogil（plain 默认路径）  [实际 5 个]
+
+[C] 三态映射与零回归
+  PASS  C1 fused 参数三态映射正确  [True→True / 'serial'→'serial' / False→False]
+  PASS  C2 三态输出形状一致且无 batch 维  [shape=(256,)]
+  PASS  C3 plain 连续两次同输入 → 同输出（无隐藏状态）
+  PASS  C4 e0 = s0 − dn0·r1（自由能定义未变）  [max|Δ|=0.000e+00]
+
+==============================================================================
+结果：13/13 通过 | 失败 0
+==============================================================================
+
+[stderr]

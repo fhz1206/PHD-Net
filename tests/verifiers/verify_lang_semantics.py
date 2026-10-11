@@ -176,14 +176,18 @@ def section_d() -> None:
         ok = '"--lang", choices=["en", "zh"], default="en"' in flat
         check(ok, f"D --{label} 的 --lang 默认 en", rel if not ok else "")
 
+    # ⚠ 2026-10-07：显式 encoding/errors（同 verify_p116_sched D5 的说明）——
+    #   区域编码解码失败会让 r.stdout 变 None，断言直接 TypeError。
     r = subprocess.run([sys.executable, str(_ROOT / "train" / "train.py"), "--help"],
-                       capture_output=True, text=True, cwd=str(_ROOT), timeout=180)
+                       capture_output=True, text=True, cwd=str(_ROOT), timeout=180,
+                       encoding="utf-8", errors="replace")
     check(r.returncode == 0 and "--lang" in r.stdout and "--data-lang" in r.stdout,
           "D4 train.py --help 可执行且两个参数都在",
           f"exit={r.returncode}")
 
     r2 = subprocess.run([sys.executable, str(_ROOT / "train" / "infer.py"), "--help"],
-                        capture_output=True, text=True, cwd=str(_ROOT), timeout=180)
+                        capture_output=True, text=True, cwd=str(_ROOT), timeout=180,
+                        encoding="utf-8", errors="replace")
     check(r2.returncode == 0, "D5 infer.py --help 可执行", f"exit={r2.returncode}")
 
 

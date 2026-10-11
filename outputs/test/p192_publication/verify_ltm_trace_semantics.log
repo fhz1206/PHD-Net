@@ -1,0 +1,54 @@
+
+=== (a) 惰性迹 vs 急切参考（NUMBA_LTM=True） ===
+  ✗ (a) dict: max|ΔW|<=1e-9 且键集一致  [max|ΔW|=8.832e-02 ratio=0.939770 edges=371]
+  ✗ (a) dict: 未补偿（修复前）可被识别  [ratio_pre=0.8149 max|ΔW|_pre=0.1820]
+  ✗ (a) csr_py: max|ΔW|<=1e-9 且键集一致  [max|ΔW|=8.832e-02 ratio=0.939770 edges=371]
+  ✗ (a) csr_py: 未补偿（修复前）可被识别  [ratio_pre=0.8149 max|ΔW|_pre=0.1820]
+  ✗ (a) csr_batch: max|ΔW|<=1e-9 且键集一致  [max|ΔW|=8.832e-02 ratio=0.939770 edges=371]
+  ✗ (a) csr_batch: 未补偿（修复前）可被识别  [ratio_pre=0.8149 max|ΔW|_pre=0.1820]
+
+=== (b) compact_csr 快照保真 ===
+  ✓ (b) dict/float: data 逐位保真且 scale=1.0  [lossy_old_path=True]
+  ✓ (b) dict/int8: data 仍是 int8 量化码  [dtype=int8 n=5]
+  ✓ (b) csr/float: data 逐位保真且 scale=1.0  [lossy_old_path=True]
+  ✓ (b) csr/int8: data 仍是 int8 量化码  [dtype=int8 n=5]
+
+=== (c) export → import 分片状态恢复 ===
+  ✓ (c) 导出包含全局状态键  [4]
+  ✓ (c) step_count 相等  [15]
+  ✓ (c) in_deg 相等且非空  [n=42]
+  ✓ (c) t_pre/t_post 相等且非空  [n=40]
+  ✓ (c) stamp_pre/stamp_post 相等
+  ✓ (c) keys/vals/size 相等  [edges=303]
+  ✓ (c) 首轮 learn max|ΔW|>0  [max|ΔW|=0.221738]
+  ✓ (c) 随后 10 步与原表逐位一致  [max|Δ|=0.000e+00]
+
+=== (d) consolidate(forget) 语义 ===
+  ✓ (d) dict/float/f=0: 恒非负 且 0 不变  [max|after|=0.987654]
+  ✓ (d) dict/float/f=50: 恒非负 且 50=w*f 逐位  [max|after|=0.493827]
+  ✓ (d) dict/float/f=100: 恒非负 且 归零/钳 0  [max|after|=0]
+  ✓ (d) dict/int8/f=0: 恒非负 且 0 不变  [max|after|=0.984252]
+  ✓ (d) dict/int8/f=50: 恒非负 且 50=w*f (tol=7.87e-03)  [max|after|=0.488189]
+  ✓ (d) dict/int8/f=100: 恒非负 且 归零/钳 0  [max|after|=0]
+  ✓ (d) csr/float/f=0: 恒非负 且 0 不变  [max|after|=0.987654]
+  ✓ (d) csr/float/f=50: 恒非负 且 50=w*f 逐位  [max|after|=0.493827]
+  ✓ (d) csr/float/f=100: 恒非负 且 归零/钳 0  [max|after|=0]
+  ✓ (d) csr/int8/f=0: 恒非负 且 0 不变  [max|after|=0.984252]
+  ✓ (d) csr/int8/f=50: 恒非负 且 50=w*f (tol=7.87e-03)  [max|after|=0.488189]
+  ✓ (d) csr/int8/f=100: 恒非负 且 归零/钳 0  [max|after|=0]
+  ✓ (d) forget=150 越界被 fail-fast 拒绝  [ValueError（防止 float 路径权重变负）]
+  ✓ (d) forget=200 越界被 fail-fast 拒绝  [ValueError（防止 float 路径权重变负）]
+
+FAIL: 26/32 项通过
+  x (a) dict: max|ΔW|<=1e-9 且键集一致
+  x (a) dict: 未补偿（修复前）可被识别
+  x (a) csr_py: max|ΔW|<=1e-9 且键集一致
+  x (a) csr_py: 未补偿（修复前）可被识别
+  x (a) csr_batch: max|ΔW|<=1e-9 且键集一致
+  x (a) csr_batch: 未补偿（修复前）可被识别
+
+  [!] 失败**全部集中在 (a) 组** —— 惰性迹 vs 急切参考的对齐问题，
+      已验证为**既有失败**（stash 掉全部新改动后同样失败）。
+      (b)(c)(d) 全绿。退出码保持 1 以免这个差异被永久掩盖。
+
+[stderr]

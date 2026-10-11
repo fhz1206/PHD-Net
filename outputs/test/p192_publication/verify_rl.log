@@ -1,0 +1,25 @@
+[A] 提示集 / 奖励来源
+  [PASS] A JSONL 条数 —— 4
+  [PASS] A prompt 字段 —— '机器学习'
+  [PASS] A 内联 reward 解析 —— 1.0
+  [PASS] A 缺 reward → None
+  [PASS] A 缺 prompt 报错 —— ValueError
+[B] rollout（采样不学习 + 状态守卫）
+  [PASS] B 轨迹长度 —— tokens=12
+  [PASS] B logprob 合法（≤0 且有限） —— min=-3.71 max=-3.51
+  [PASS] B 文本拼接一致
+  [PASS] B 状态守卫恢复 step_count —— 15 -> 27 -> 15
+[C] REINFORCE 更新
+  [PASS] C 采样打分 —— rewards=[0.0, 0.0, 0.5, 0.5]
+  [PASS] C 更新步数 > 0 —— steps=40
+  [PASS] C 统计字段齐备 —— {'steps': 40, 'reward': 0.25, 'baseline': 0.025, 'adv_abs': 1.0, 'nll': 3.7202}
+  [PASS] C 权重确实变化 —— max|ΔW|=3.906e-03
+[D] 学习有效性（玩具奖励应上升）
+    奖励轨迹: [0.4, 0.375, 0.3, 0.35, 0.475, 0.4, 0.4, 0.6, 0.85, 0.825, 1.0, 1.275]
+  [PASS] D 训练后期奖励 > 早期（3 轮均值） —— 前三 0.358 → 后三 1.033
+  [PASS] D 评估奖励为正 —— eval reward=1.375 (目标 '强化')
+  [PASS] D stats 可读 —— reward_mean=0.604 nll=3.687
+----------------------------------------------------------------------
+结果：全部 PASS（RL 闭环可用：数据集 → rollout → 奖励 → 策略梯度更新）
+
+[stderr]

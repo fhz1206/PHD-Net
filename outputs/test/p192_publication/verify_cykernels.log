@@ -1,0 +1,48 @@
+Cython 核门禁（P192）
+  PASS A1 mode=off 时扩展未激活（铁律④：默认关闭）  [mode=off | ext=未加载]
+  PASS A2 扩展已加载并通过 import-time 自检  [mode=auto | ext=已加载 | cython-kernels: cp314 openmp=yes]
+  PASS A3 OpenMP 确实链接（_OPENMP 宏，非「设了没生效」）  [openmp=yes]
+  PASS B0 csr_matvec 整数用例**逐位** vs numba（无舍入歧义）  [max|d|=0.000e+00]
+  PASS B1 csr_matvec 数值等价 vs numba (3×1/8)  [max|d|=0.000e+00（fastmath 档，~1 ulp）]
+  PASS B1b csr_matvec 线程/串行**逐位**一致 (3×1)
+  PASS B1 csr_matvec 数值等价 vs numba (17×5/64)  [max|d|=2.980e-08（fastmath 档，~1 ulp）]
+  PASS B1b csr_matvec 线程/串行**逐位**一致 (17×5)
+  PASS B1 csr_matvec 数值等价 vs numba (511×4/512)  [max|d|=2.980e-08（fastmath 档，~1 ulp）]
+  PASS B1b csr_matvec 线程/串行**逐位**一致 (511×4)
+  PASS B1 csr_matvec 数值等价 vs numba (512×4/512)  [max|d|=2.980e-08（fastmath 档，~1 ulp）]
+  PASS B1b csr_matvec 线程/串行**逐位**一致 (512×4)
+  PASS B1 csr_matvec 数值等价 vs numba (513×4/1024)  [max|d|=2.980e-08（fastmath 档，~1 ulp）]
+  PASS B1b csr_matvec 线程/串行**逐位**一致 (513×4)
+  PASS B1 csr_matvec 数值等价 vs numba (2000×8/2048)  [max|d|=5.960e-08（fastmath 档，~1 ulp）]
+  PASS B1b csr_matvec 线程/串行**逐位**一致 (2000×8)
+  PASS B2 csr_add_outer 整数用例**逐位** vs numba（索引口径）  [max|d|=0.000e+00]
+  PASS B2b csr_add_outer 数值等价 vs numba  [max|d|=2.980e-08]
+  PASS B3 csr_oja_up 数值等价 vs numba  [max|d|=1.490e-08]
+  PASS B4 stdp_delta 数值等价 vs numba (16×4)  [max|d|=0.000e+00（fastmath 档）]
+  PASS B4 stdp_delta 数值等价 vs numba (257×8)  [max|d|=5.960e-08（fastmath 档）]
+  PASS B4 stdp_delta 数值等价 vs numba (512×8)  [max|d|=5.960e-08（fastmath 档）]
+  PASS B4 stdp_delta 数值等价 vs numba (1024×16)  [max|d|=5.960e-08（fastmath 档）]
+  PASS B4b stdp_delta 事件驱动：pre=0 的行**逐位不变**  [行1 before=[0.5 0.5] after=[0.5 0.5]]
+  PASS B4c stdp_delta：pre>0 的行确实更新（不是空转）
+  PASS B5a gemv_rows 线程/串行**逐位**一致 (16×32)
+  PASS B5 gemv_rows 数值等价 vs numba (16×32)  [max|d|=2.384e-07（fp32 大规模，容差 1e-4）]
+  PASS B5b gemv_rows_ilp4 相对误差有界 (16×32)  [relerr=2.23e-07（非逐位，P165 同款）]
+  PASS B5a gemv_rows 线程/串行**逐位**一致 (512×1024)
+  PASS B5 gemv_rows 数值等价 vs numba (512×1024)  [max|d|=1.144e-05（fp32 大规模，容差 1e-4）]
+  PASS B5b gemv_rows_ilp4 相对误差有界 (512×1024)  [relerr=2.36e-04（非逐位，P165 同款）]
+  PASS B5a gemv_rows 线程/串行**逐位**一致 (2048×2048)
+  PASS B5 gemv_rows 数值等价 vs numba (2048×2048)  [max|d|=2.289e-05（fp32 大规模，容差 1e-4）]
+  PASS B5b gemv_rows_ilp4 相对误差有界 (2048×2048)  [relerr=4.22e-03（非逐位，P165 同款）]
+  PASS C1 csr_matvec vs 手算  [got=[  9. 118.  12.]]
+  PASS C2 csr_clip 到 ±w_max  [got=[-1.  -0.5  0.   0.5  1. ]]
+  PASS C3 wm_decay_read strength 衰减值逐位  [max|d|=0.000e+00]
+  PASS C3b wm_decay_read slots 衰减值逐位（首版漏衰减，被抓）  [max|d|=0.000e+00]
+  PASS C4 wm_decay_read 读出值与 numpy 两趟数值等价  [max|d|=0.000e+00（numpy 向量化归约、顺序不同 → 容差非逐位）]
+  PASS D1 nogil 核与 Python 线程可并发（GIL 未被独占）  [40 次 gemv 墙钟 407.7 ms，spin tick=3501793]
+  PASS E1 mode=off 门面不提供核属性（不会静默改道）
+
+==============================================================
+Cython kernel gate: 41/41 passed
+==============================================================
+
+[stderr]

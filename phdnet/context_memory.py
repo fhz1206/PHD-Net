@@ -35,7 +35,8 @@ class ContextMemory:
         self.n = n_dim
         self.rho = rho                      # 上下文漂移率（越大=漂移越慢=保持越久）
         self.eta = eta                      # 印迹学习率
-        self.k = k_clean                    # 清理时保留的活跃位数（k-WTA 侧抑制）
+        # 2026-10-07 修复（审计 6）：k_clean>n_dim 会在首次 _clean 的 argpartition 抛越界、k<=0 返回全零使漂移链静默退化；构造期 clamp 到 [1, n_dim]。
+        self.k = int(max(1, min(k_clean, n_dim)))  # 清理时保留的活跃位数（k-WTA 侧抑制）
         self.forget = forget                # 每段情节结束后的轻微遗忘（近因加权）
         self.sep = sep                      # 模式分离强度（0=关闭）
         self.kappa = kappa                  # 再入强度（0=关闭；CMR 的 item→context 反馈）
@@ -58,6 +59,10 @@ class ContextMemory:
 
     # ---------- k-WTA 清理（稀疏化，对应侧抑制竞争） ----------
     def _clean(self, v: np.ndarray) -> np.ndarray:
+        # 2026-10-07 修复（审计 7）：全零激活时旧实现凭 top-k 造出任意 k 位伪「回忆」；
+        # 显式返回全零——无信号就是无信号（下游按空读出处理）。
+        if not np.any(v):
+            return np.zeros_like(v)
         idx = np.argpartition(-v, self.k - 1)[: self.k]
         s = np.zeros_like(v)
         s[idx] = 1.0
@@ -90,6 +95,13 @@ class ContextMemory:
                 self.W_ic *= self.forget
 
     # ---------- 检索（串行回忆） ----------
+    def _retrieval(self, c: np.ndarray) -> np.ndarray:
+        """context→item 检索算子，recall 与 recall_scored 共用。
+        2026-10-07 修复（审计 1）：scored 原来对 clean_steps>=2 用另一套多步递推
+        （对固定 c 反复加漂移、clean 在 W 之前），评分轨迹≠状态轨迹、同参两 API 分叉；
+        抽成公共算子后两者的评分与状态推进走同一 operator。"""
+        return self._clean(self.W @ c)
+
     def _advance(self, c: np.ndarray, item: np.ndarray,
                  clean_steps: int) -> np.ndarray:
         """上下文推进：漂移律 +（可选）再入校正 +（可选）多步清理。"""
@@ -106,7 +118,7 @@ class ContextMemory:
         out: list[np.ndarray] = []
         c = self.slot.copy()
         for _ in range(steps):
-            item = self._clean(self.W @ c)
+            item = self._retrieval(c)       # 2026-10-07 修复（审计 1）：与 recall_scored 共用同一算子
             out.append(item)
             c = self._advance(c, item, clean_steps)
         return out
@@ -149,6 +161,9 @@ class ContextMemory:
         两条通路都支持才胜出）。单通路下漂移噪声可推高假候选，而假候选难以
         同时通过两条通路的检验 → 抑制"自洽漂移"型误差。
         """
+        if not candidates:
+            # 2026-10-07 修复（审计 7）：空候选显式报错，不再在 np.stack 处以晦涩 ValueError 崩溃
+            raise ValueError("recall_scored: candidates 为空，无可评分候选")
         names = list(candidates.keys())
         mat = np.stack([candidates[k] for k in names])     # (V, n)
         out = []
@@ -158,15 +173,17 @@ class ContextMemory:
         for t in range(steps):
             if segment > 0 and t > 0 and t % segment == 0:
                 c_seg_start = c.copy()
-            v = self.W @ c
-            for _ in range(max(0, clean_steps - 1)):       # 多步清理
-                v = self.W @ (self.rho * c + (1.0 - self.rho) * self._clean(v))
+            v = self._retrieval(c)    # 2026-10-07 修复（审计 1）：与 recall 共用同一算子（原多步递推是另一套，cs>=2 时评分轨迹≠状态轨迹）
             sims = mat @ v                                  # 与候选 token 的重合度
             if vote:                                       # O5-opt：双通路 AND 融合
                 v2 = self.W @ self._clean(self.W @ c)
                 sims = sims * (mat @ v2)
             if cons is not None and self.bidir_w > 0.0:
                 sims = sims * (cons ** self.bidir_w)        # 双向校验降权
+            if not np.any(sims):
+                # 2026-10-07 修复（审计 7）：sims 全 0 = 无读出信号，显式停止，
+                # 不再让 argmax 恒选 names[0]（静默假读出）
+                break
             best = names[int(np.argmax(sims))]
             out.append(best)
             c = self._advance(c, candidates[best], clean_steps)

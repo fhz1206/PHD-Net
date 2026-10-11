@@ -223,7 +223,7 @@
       <div class="tags">
         <span class="tag">无自注意力 / 位置编码 / 无堆叠层</span>
         <span class="tag">逐 token 流式</span>
-        <span class="tag">Python + numba + Rust 算子库 / 昇腾 NPU</span>
+        <span class="tag">Python + numba（+ 可选 Cython nogil 核）/ 昇腾 NPU</span>
         <span class="tag">总容量 ≈ 1.217e9（生产 conn_k=128 口径）</span>
       </div>
     </div>
@@ -394,7 +394,7 @@
         <h3>读出：<b>fp8</b>（默认，P189）—— 位模式存储 + fp16 迭代</h3>
         <p>fhz 2026-10-07 决策「模型 fp8，迭代 fp16」：W 以 <b>fp8 e4m3fn 位模式（uint8 承载）存储</b>（1 B/元素，访存收益完整保留），迭代走 fp16 域 rank-1 更新后 RNE cast 回位模式。感知器 <code>p − t</code> 的<b>非目标行</b>更新量 ≈1e-6 会被粗步长舍入吞掉（学习部分退化为纯 Hebbian），这是知情取舍，验收靠 probe_PPL。实测非目标行更新保留率（<code>tools/probe_readout_precision.py</code>，|W|~1e-2 / |dp|~1e-6 档）：</p>
         <div class="meta"><span>fp32 99.95%（精确 p − t）｜fp16 26.67%｜bf16 5.79%；目标行全部 100%（目标更新 ~1e-2 ≫ 半 ULP）。fp8 步长比 fp16 粗约 4 倍 → 保留率更低。<b>低精度不是免费的速度收益。</b></span></div>
-        <div class="meta"><span>910B 无 fp8 matmul 算子（ERR01007）→ 前向可选每步 CPU 转换 int8 码本走 int8 算子（<code>--fp8-conv</code> 选 torch/nogil/rust；x86 实测 rust 量化 LUT 核快 8.44×）。int 族显式请求仍禁用（P163）；fp4/int4 仍禁用（P152）</span></div>
+        <div class="meta"><span>910B 无 fp8 matmul 算子（ERR01007）→ 前向可选每步 CPU 转换 int8 码本走 int8 算子（<code>--fp8-conv</code> 选 torch/nogil）。⚠ <b>原 <code>rust</code> 选项已随 <code>phdnet_rs/</code> 整体删除（P188）</b>，传旧值会<b>按 torch 处理</b>（不报错，因为两条 Python 路径逐位一致）。int 族显式请求仍禁用（P163）；fp4/int4 仍禁用（P152）</span></div>
       </div>
       <div class="card" style="--ac:var(--m1)">
         <h3>编码器与分词</h3>
@@ -417,10 +417,10 @@
       <div class="card" style="--ac:var(--m5)"><h3>191 核用不满</h3><p><b>架构性 + 配置性各半</b>：逐 token 语义禁止数据并行（架构性）；M2 曾跑单核 6.92 ms（配置性，已由 <code>--m2-kernel plain</code> 解决 → 1.28 ms，5.41×）。剩余 CPU 侧 4.26 ms 中<b>只有 M1 可安全与读出重叠</b>（M2 依赖 PC 权重、PC_learn 在读出之后）。</p></div>
     </div>
     <div class="note ok">
-      <b>门禁与 CI：</b><code>python tests/run_tests.py fast</code> = 9/9（零回归门槛），专项 verifier <b>23 个</b>（<code>tests/verifiers/</code>）；<code>verify_ms_stream</code> 会对改动文件 <code>py_compile</code> 并真跑 <code>train.py --help</code>。CI 两套：<code>.gitcode/workflows/ci.yml</code> 与 <code>.github/workflows/ci.yml</code>（镜像）——仓库<b>没有 Jenkinsfile</b>。
+      <b>门禁与 CI：</b><code>python tests/run_tests.py fast</code> = 9/9（零回归门槛），专项 verifier 按 <code>tests/verifiers/verify_*.py</code> 实计（不含基准脚本 <code>bench_accel_path.py</code>）；<code>verify_ms_stream</code> 会对改动文件 <code>py_compile</code> 并真跑 <code>train.py --help</code>。CI 两套：<code>.gitcode/workflows/ci.yml</code> 与 <code>.github/workflows/ci.yml</code>（镜像）——仓库<b>没有 Jenkinsfile</b>。
     </div>
     <div class="note">
-      <b>评测基线：</b>口径 256 维栈、<code>eta_readout=0.15</code>；现行锚点 <b>4K 段 394.4687 / 全语料 359.2603</b>（评测语料 2026-09-28 起换为中文维基条目合集，<code>eval_corpus/internal_corpus.txt</code> 实测 27,034 字符）。复测入口 <code>python tools/rebaseline.py</code>（无命令行参数）。旧口径 78.16 / 90.2480 / 73.1166 只存于 git 历史，<b>不可混用</b>。
+      <b>评测基线：</b>口径 256 维栈、<code>eta_readout=0.15</code>；现行锚点 <b>4K 段 394.4687 / 全语料 359.2603</b>（评测语料 2026-09-28 起换为中文维基条目合集，<code>eval_corpus/internal_corpus.txt</code> 实测 27,034 字符）。复测入口 <code>py -3.14 tools/rebaseline.py --json</code>（默认显式 fp32；<code>--readout-dtype fp8</code> 不判历史锚点一致）。P192 STDP 修正后实测质量变化见性能文档 §10.1，不覆盖历史锚点。旧口径 78.16 / 90.2480 / 73.1166 只存于 git 历史，<b>不可混用</b>。
     </div>
     <div class="note warn">
       <b>已知开放项：</b>M4b 复测归因 · fp16 下 PPL 是否下降 · 数据集语种（远程分片实测中文仅 2%、unk 47%，是代码问题，与旧记录矛盾）· 检查点 <code>compact_csr</code> 向量化后仍 3.9 s/10 万行 · <b>M6 幂律稀疏化（架构欠账）</b> · GitHub Actions 仍红。
@@ -520,7 +520,7 @@ python chat/tui.py</pre>
 </main>
 
 <footer>
-  本页内容整理自 PHD-Net 仓库 README（数据截止 2026-09-30）· 3D 视图为结构示意，节点数与连接为等比缩样，非真实规模<br>
+  本页内容整理自 PHD-Net 仓库 README（数据截止 2026-10-08 / P192）· 3D 视图为结构示意，节点数与连接为等比缩样，非真实规模<br>
   PHD-Net · 预测编码 × Hebbian/STDP × 双记忆 · 不依赖自注意力的类脑架构
 </footer>
 

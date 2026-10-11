@@ -347,7 +347,36 @@ def main() -> int:
              dtype="fp32", conn_k=k, csr=_csr3, compile=False)
     _c = _AR(n_h, n_out, np.random.default_rng(37), device="cpu",
              dtype="fp32", conn_k=k, csr=_csr3, compile=True)
-    check(_c._compiled, "C4d1 稀疏路径**可以**启用 torch.compile（P128 前被排除）")
+    if _c._compiled:
+        check(True, "C4d1 稀疏路径**可以**启用 torch.compile（P128 前被排除）",
+              "compiled=True")
+    else:
+        # ⚠ 2026-10-07：本机 torch.compile 起不来时**不能判 FAIL** —— 两个与
+        #   P128 无关的环境因素：① Windows 上 torch/_inductor 用区域编码读 UTF-8
+        #   模板 → UnicodeDecodeError（上游问题，实测 `-X utf8` 可绕过）；
+        #   ② 本机没有 C++ 编译器 → InductorError（"cl is not found"）。
+        #   P128 要钉的是「**稀疏没有被 if 条件挡在编译开关之外**」这个**结构**
+        #   事实，与本机能不能真编译无关 → 改用**探针**断言：把 torch.compile
+        #   换成记录调用的桩，构造一个稀疏实例（compile=True），看它是否走到
+        #   编译开关。这比读源码可靠，也比「编译成功」更贴合被测命题。
+        import torch as _t_probe
+        _orig_compile = _t_probe.compile
+        _calls = {"n": 0}
+
+        def _probe_compile(fn, *a, **k):
+            _calls["n"] += 1
+            return fn                      # 原样返回 → 无副作用、无环境依赖
+
+        _t_probe.compile = _probe_compile
+        try:
+            _AR(n_h, n_out, np.random.default_rng(37), device="cpu",
+                dtype="fp32", conn_k=k, csr=_csr3, compile=True)
+        finally:
+            _t_probe.compile = _orig_compile
+        check(_calls["n"] > 0,
+              "C4d1 稀疏实例**进入** torch.compile 开关（P128 结构断言；"
+              "本机 compile 不可用 → 改用探针）",
+              f"torch.compile 被调用 {_calls['n']} 次（桩返回原函数，零环境依赖）")
     _ye = _e.forward_dev(_h4)
     _ne = _e.learn_softmax(_h4, _tgt, 0.15, y_pre=_ye)
     _yc = _c.forward_dev(_h4)
