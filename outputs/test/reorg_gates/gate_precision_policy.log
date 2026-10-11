@@ -46,5 +46,5 @@
 ==============================================================================
 
 [stderr]
-D:\AiModel\train\phdnet\backends\accel_readout.py:604: RuntimeWarning: [precision] 读出权重 fp16/bf16 请求 → 运行时提升为 fp32（迭代全 fp32，fhz 2026-10-06 决策；P110：fp16 写回丢失 73% 非目标行更新。检查点存储仍为 fp16）
+D:\AiModel\train\phdnet\backends\accel_readout.py:613: RuntimeWarning: [precision] 读出权重 fp16/bf16 请求 → 运行时提升为 fp32（迭代全 fp32，fhz 2026-10-06 决策；P110：fp16 写回丢失 73% 非目标行更新。检查点存储仍为 fp16）
   _w187.warn(

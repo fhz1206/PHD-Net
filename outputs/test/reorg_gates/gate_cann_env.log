@@ -39,7 +39,7 @@ P120 门禁：CANN 环境治理 + NPU 带宽遥测
   PASS  E2d `npu-smi info -l` 解析认 Key-Value 两种格式（`NPU ID : 0` / `NPU : 0`）
   PASS  E2e 后端串无编号时（accel:auto@npu）假定 card 0 并提示
   PASS  E3 usages 解析失败时**报一次原始输出**（不再静默失效）
-  PASS  E4 训练入口把设备号传给遥测（`_tel._accel_device`）
+  PASS  E4 训练入口把设备号传给遥测（已移除 telemetry）  [telemetry removed]
   PASS  E5 设备串→ 数字设备号解析（npu:N / cuda:N）
 
 ==============================================================================

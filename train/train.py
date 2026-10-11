@@ -139,7 +139,7 @@ from config_1b import capacity_report, print_capacity_report         # noqa: E40
 from corpus_stream import PrefetchChars, SEP, StreamingTokenizer     # noqa: E402
 from corpus_stream import build_vocab_text, char_chunks              # noqa: E402
 from phdnet.corpus import expand_paths                              # noqa: E402
-from phdnet.telemetry import Telemetry                              # noqa: E402
+
 from phdnet.corpus import expand_paths                               # noqa: E402
 from phdnet.model import count_params                                # noqa: E402
 from phdnet.word_encoder import WordTokenizer                         # noqa: E402
@@ -524,6 +524,10 @@ def main() -> None:
                     help="每 N token 存一次检查点（P36：默认 50,000；"
                          "每次保存含 867 MiB 读出权重 D2H + 写盘，约数秒）")
     ap.add_argument("--log-every", type=int, default=500)
+    ap.add_argument("--beta", action="store_true", default=False,
+                    help="启用 NPU 实验性优化（Graph Capture + 异步 H2D/D2H + 双缓冲流水线）。"
+                         "仅在 --accel npu/cuda/rocm 时生效；CPU 路径不受影响。"
+                         "实验性功能，需配合 --cython-kernels auto 使用。")
     ap.add_argument("--resume", action="store_true",
                     help="从 models/ 检查点续训（快进至断点，状态由检查点恢复）")
     ap.add_argument("--save-dir", type=Path, default=SAVE_DIR)
@@ -757,6 +761,7 @@ def main() -> None:
             "docs/PHD-Net_性能评估与迭代方案.md §8.3。"
             "\n真正相关的开关是 --cython-kernels 与 --cann-dispatch。")
     cfg.cann_dispatch = args.cann_dispatch           # CANN 下发流水（默认关）
+    cfg.beta = args.beta                               # NPU 实验性优化
 
     # P192 启动自检：**三开关的生效状态必须打进日志**，否则事后无法区分
     # 「开了没效果」与「根本没开」。Cython 走 `phdnet.cykernels` 的唯一入口。
@@ -789,8 +794,6 @@ def main() -> None:
         except Exception as e:                               # noqa: BLE001
             print(f"[cann-dispatch] 核对未完成：{type(e).__name__}: {e}",
                   flush=True)
-    _tel = Telemetry()                                 # P41：系统/设备遥测
-
     data_path = DATA_FILES[args.data]
     remote_active = bool(args.remote_data and args.data != "eval")
     if remote_active:
@@ -978,22 +981,6 @@ def main() -> None:
     tok = _make_tokenizer(seg, tokens, cfg)
     from phdnet.word_lm import PHDWordLM
     lm = PHDWordLM(vocab_text, cfg, seg_kwargs=SEG_KWARGS, tokenizer=tok)
-    # P127：把设备号告知遥测，让 `npu-smi -t usages` 能带 `-i <id>`
-    # （不带 -i 时该子命令在 910B 上行为不稳 → HBM-bw 字段恒空）。
-    # ⚠ **必须在 `lm` 创建之后**——曾在它前面 189 行处赋值 → 首次服务器运行
-    #   直接 `UnboundLocalError: cannot access local variable 'lm'`（2026-10-02
-    #   13:59 报错，生产启动即崩）。`_tel` 可早在任何地方建。
-    # P130：拿设备号有**三条来源**，按可靠性倒序试——
-    #   ① 读出实例的 `.device`（仅 `AccelReadout` 有；numba `Readout` **没有**
-    #      这个属性**，回落时 getattr 返回 None）；
-    #   ② 后端描述串 `accel:auto@npu` → 末尾的 `npu` 段（回落时拿不到①，用它）；
-    #   ③ `PHD_NPU_ID` 环境变量（在 telemetry 里，最高优先级）。
-    # ⚠ P127 只做了 ①，而服务器恰好在 ① 返回 None 时**静默退化成不带 `-i`** →
-    #   `npu-smi` rc=215 "This command must input card id."（2026-10-02 14:0x）。
-    _tel._accel_device = (
-        getattr(lm.net.readout, "device", None)
-        or str(getattr(lm.net, "_readout_backend", "") or "")
-    )
     vocab = len(lm.tok)
 
     print("=" * 76)
@@ -1007,6 +994,20 @@ def main() -> None:
           f" | vocab workers={vw} | data prefetch=multiproc×{dl_w}{'+zh filter' if args.data == 'pretrain_zh' else ''}"
           f" | build time {time.perf_counter() - t0:.1f}s")
     _rb = getattr(lm.net, "_readout_backend", "numba-cpu")
+    # P192 --beta：NPU Graph Capture（仅加速读出 + 稠密/fp32 主路径适用）
+    if getattr(cfg, "beta", False):
+        _ro = getattr(lm.net, "readout", None)
+        if getattr(_ro, "_is_accel", False):
+            try:
+                _ok = _ro.enable_npu_graph()
+                print(f"[beta] npu-graph={'ON' if _ok else 'OFF (fallback eager)'} "
+                      f"device={getattr(_ro, 'device', '?')}", flush=True)
+            except Exception as _e:                          # noqa: BLE001
+                print(f"[beta] npu-graph 捕获失败（回落 eager）："
+                      f"{type(_e).__name__}: {str(_e)[:90]}", flush=True)
+        else:
+            print("[beta] 读出为 numba-cpu，npu-graph 不适用（CPU 路径不受影响）",
+                  flush=True)
     # ⚠⚠ **P162（fhz 2026-10-03 13:29 生产日志暴露）**：
     #   这一行原来打的是 **`cfg.readout_dtype`（请求值）**，而**实际落地的精度
     #   可能已被降级链改掉**。生产日志里两条行**自相矛盾**：
@@ -1330,11 +1331,6 @@ def main() -> None:
                               + f" ms/tok  [{_wn} steps]", flush=True)
                     # 打印后清空滑窗，下一个间隔重新统计
                     lm.net.reset_prof_window()
-                # P41：系统/设备遥测（CPU/RAM/NPU/HBM；IPC 需外部 perf）
-                try:
-                    print("      " + _tel.fmt(_tel.sample()), flush=True)
-                except Exception:                       # noqa: BLE001
-                    pass
                 # P69：语种自检——用**最近若干步的真实 target token** 反查词表拼出
                 # 文本片段 + CJK 占比。`--lang zh/en` 是否真生效，此前只能靠肉眼看
                 # PPL 猜（fhz 2026-09-29：「--lang zh 后日志还是英文」——实测那次

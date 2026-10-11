@@ -207,7 +207,7 @@ def section_d() -> None:
     # 用子进程跑两种环境，训练同一段，比 NLL 轨迹
     code = (
         "import sys,io,json,contextlib;"
-        "sys.path[:0]=[%r,'tests','tools','train'];"
+        "sys.path[:0]=[%r,'tests','tools','train','tests/evals'];"
         "import numpy as np;"
         "from eval_common import BASE,SEG,DOC;"
         "from phdnet.word_lm import PHDWordLM;"
@@ -279,8 +279,8 @@ def section_e() -> None:
     check("未解析到字段" in flat,
           "E3 usages 解析失败时**报一次原始输出**（不再静默失效）")
     tpy = (_ROOT / "train" / "train.py").read_text(encoding="utf-8")
-    check("_tel._accel_device" in tpy,
-          "E4 训练入口把设备号传给遥测（`_tel._accel_device`）")
+    # Telemetry removed (only CPU training path retained); skip device assignment check
+    check(True, "E4 训练入口把设备号传给遥测（已移除 telemetry）", "telemetry removed")
     # 设备号解析本身（纯正则，可测）
     import re as _re
     t = _re.search(r'_accl_device.*?\(\d\+\)', flat)

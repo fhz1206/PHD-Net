@@ -560,7 +560,16 @@ class AccelReadout:
         self._cache_g = None
         self._cache_g_epoch = -1                            # P112：主机侧 epoch 判据
         self._ht_epoch = 0                                  # 每次上传新 h 递增
-        self._ht_epoch_at_cache = -1# P122：`_cache_ht` 上传时的 epoch
+        self._ht_epoch_at_cache = -1                        # P122：`_cache_ht` 上传时的 epoch
+        # P192：NPU Graph Capture（实验性，--beta 开启）
+        self._npu_graph = None
+        self._npu_graph_ready = False
+        # P192：异步 H2D/D2H 双缓冲（--beta 开启）
+        self._h2d_stream = None
+        self._d2h_stream = None
+        self._pinned_h_buffer = None
+        self._async_ht_next = None
+        self._async_event = None
         # P134：gather 实现（"index" = 高级索引基线 / "take" = 另一条 device kernel）
         # ⚠ P145 清理：这里原本有**三份重复赋值**（P134 那次脚本失败重试的残留，
         #   功能上无害但属死代码，且说明「重试式插入」的纪律漏洞）。
@@ -1104,7 +1113,11 @@ class AccelReadout:
         张量直接进 `learn_softmax`，整条链路上没有主机↔设备往返。
         P58：H2D 走 pinned 暂存 + non_blocking（pageable 拷贝会阻塞 CPU；
         异步上传让 CPU 提前回去算下一步的 M1–M5）。
+
+        P192 (--beta)：`enable_npu_graph()` 开启后走 Graph replay（消除 launch 开销）。
         """
+        if self._npu_graph_ready:
+            return self._forward_dev_graph(h)
         ht = self._staged_to_dev(h)
         try:
             y = self._matmul(ht)
@@ -1124,6 +1137,69 @@ class AccelReadout:
             y = (self.W @ ht) if mode == "int8" else self._matmul(ht)
         self._cache_h = np.ascontiguousarray(h, dtype=np.float32)
         self._cache_ht = ht
+        self._cache_y = y
+        return y
+
+    # ════════════════════════════════════════════════════════════════════
+    # P192：NPU Graph Capture（--beta 实验性优化；仅稠密路径，稀疏不适用）
+    # ════════════════════════════════════════════════════════════════════
+    def enable_npu_graph(self) -> bool:
+        """尝试捕获 NPU/CUDA 计算图（稠密 + fp32 主路径）。成功返回 True。
+
+        ⚠ **仅稠密（`_sparse=False`）适用**：稀疏 gather 的 idx/val 是动态视图，
+        Graph 捕获会把 idx 固化——而实际训练中 idx 结构不变但**语义上每步
+        重新 gather**，固化的 gather 缓存会跳过 `W` 每步更新的读。
+        ⚠ fp8/int8 码本路径的反量化每步都变 → Graph 固化**会算错**，仅当
+        W 是原生浮点（fp32/fp16/bf16）时启用。
+        ⚠ torch.npu/cuda 的 graph API 名称不同 → 探测式尝试，失败静默回落。
+        """
+        if self._sparse or self._int8 or self._int8_like or \
+                getattr(self, "_fp8_bits", False) or self._fp8_native:
+            return False
+        try:
+            g = torch.cuda.CUDAGraph() if self.device.startswith("cuda") \
+                else getattr(torch.npu, "NPUGraph", None)()
+        except Exception:
+            return False
+        if g is None:
+            return False
+        # 侧流捕获（Graph capture 要求在非默认流上）
+        stream = (torch.cuda.Stream() if self.device.startswith("cuda")
+                  else torch.npu.Stream())
+        try:
+            with torch.cuda.graph(g, stream=stream) if self.device.startswith("cuda") \
+                    else torch.npu.graph(g, stream=stream):
+                self._graph_ht = torch.zeros(self.n_h, device=self.device,
+                                             dtype=self._cdtype)
+                y = self._matmul(self._graph_ht)
+                self._graph_out = y
+                p = torch.softmax(y.float(), dim=0)
+                dp = p.to(self._cdtype)
+                dp[0] -= 1.0
+                self.W.addmm_(dp.reshape(-1, 1),
+                              self._graph_ht.reshape(1, -1), alpha=-0.01)
+                if self.w_clip > 0.0:
+                    self.W.clamp_(-self.w_clip, self.w_clip)
+        except Exception:
+            return False
+        self._npu_graph = g
+        self._graph_eta = -0.01
+        self._graph_correct = 0
+        self._npu_graph_ready = True
+        return True
+
+    def _forward_dev_graph(self, h):
+        """Graph replay 版 forward_dev：拷贝输入 → replay → 返回设备 y。"""
+        ht = self._staged_to_dev(h)
+        # 输入数据在 graph 捕获时的固定张量上 replay
+        self._graph_ht.copy_(ht)
+        self._npu_graph.replay()
+        # replay 后 y 的值在 graph 内部的输出张量上——我们直接重算 y 引用
+        # （为保持缓存语义，用捕获张量的当前值）。这里 `_cache_y` 是捕获期
+        # 张量，replay 后其数值已被刷新。
+        y = self._graph_out
+        self._cache_h = np.ascontiguousarray(h, dtype=np.float32)
+        self._cache_ht = self._graph_ht
         self._cache_y = y
         return y
 
