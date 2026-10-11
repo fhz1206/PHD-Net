@@ -17,14 +17,14 @@
 | 你要做的事 | 改哪些文件 | 必过门禁 |
 |---|---|---|
 | 加一个新机制（如 M7） | 新模块 + `phdnet/model.py::step` 接入 + 计时段 | fast 9/9 + **新写数值对拍**（§2.3） |
-| 加一个读出后端 / 换设备 | `phdnet/backends/accel_readout.py` + `resolve_accel_device()` | `verify_accel_readout.py`（全PASS）+ `verify_accel_sparse.py`（22/22，若涉及稀疏） |
-| 加一种 dtype | **三处**（见 §4.1） | `verify_accel_readout.py` + `verify_ms_stream.py`（检查点往返） |
-| 改一个 numba 核 | `phdnet/ltm_kernel.py` 等 | 对拍（**逐位优先**）+ `verify_ltm_kernels.py` |
-| **改/加一个 Cython 核** | `phdnet/_cykernels.pyx`（+ `setup_cython.py` 构建） | **`verify_cykernels.py`**（分语义级/数值级两档，见 §9.2）+ `verify_cython_switch.py`（开关不变量）。⚠ **不得声称逐位等价**（`fastmath` 差 ~1 ulp） |
-| 加一个数据源 | `phdnet/corpus.py`（统一接口）+ `train/corpus_stream.py` | `verify_stream_tokenize.py`、`verify_ms_stream.py` |
-| 加一个训练阶段（SFT/RL） | `tools/train_rl.py` 模式 + `phdnet/rl.py` | 阶段语义对拍 + fast 9/9 |
+| 加一个读出后端 / 换设备 | `phdnet/backends/accel_readout.py` + `resolve_accel_device()` | `gate_accel_readout.py`（全PASS）+ `gate_accel_sparse_readout.py`（22/22，若涉及稀疏） |
+| 加一种 dtype | **三处**（见 §4.1） | `gate_accel_readout.py` + `gate_ms_stream.py`（检查点往返） |
+| 改一个 numba 核 | `phdnet/ltm_kernel.py` 等 | 对拍（**逐位优先**）+ `gate_ltm_kernels.py` |
+| **改/加一个 Cython 核** | `phdnet/_cykernels.pyx`（+ `setup_cython.py` 构建） | **`gate_cython_kernels.py`**（分语义级/数值级两档，见 §9.2）+ `gate_cython_switch.py`（开关不变量）。⚠ **不得声称逐位等价**（`fastmath` 差 ~1 ulp） |
+| 加一个数据源 | `phdnet/corpus.py`（统一接口）+ `train/corpus_stream.py` | `gate_stream_tokenize.py`、`gate_ms_stream.py` |
+| 加一个训练阶段（SFT/RL） | `tools/train/train_rl.py` 模式 + `phdnet/rl.py` | 阶段语义对拍 + fast 9/9 |
 | 加一个 CLI 参数 | `train/train.py` argparse | **`--help` 实际能跑**（§5，含 6 次踩坑） |
-| 加一个 verifier | `tests/verifiers/verify_*.py` | 自己先跑；别把自己扫进去（§6.4） |
+| 加一个 verifier | `tests/gates/gate_*.py` | 自己先跑；别把自己扫进去（§6.4） |
 | 加一个工具脚本 | `tools/`（标注生产轨/非生产轨） | 注明平台 + commit（§7） |
 | 调一个已有开关 | 见 §9 速查表 | 对应 verifier |
 
@@ -66,10 +66,21 @@ train/
   ckpt_1b.py              检查点保存/恢复
   config_1b.py            四档预设 + 容量账
   tokenizer_core.py       分词热路径（numba nogil）
-tests/verifiers/          专项验证器（以 verify_*.py 清单与实际输出为准）
-                           P192：cykernels / cython_switch / cython_loader /
-                           cann_dispatch / overlap_contract
-tools/                    工具脚本
+tests/
+  run_tests.py              分层回归总入口（fast 9/9）
+  checks_*.py               fast 门禁实现
+  run_gates.py              逐个跑完 tests/gates/ 全部门禁并汇总
+  demos/                    机制演示（demo_*.py）
+  evals/                    评测任务（run_eval_suite / eval_tasks_* / nano_gpt 对照）
+  gates/                    专项门禁（gate_*.py）
+tools/
+  data/                     语料：获取 → 转换 → 合并/打包/上传
+  eval/                     评测、基线、消融、审计
+  bench/                    性能基准
+  probe/                    诊断探针
+  train/                    非生产训练辅助轨
+  scripts/                  shell 维护脚本
+  legacy/                   已归档、不再维护
 
 phdnet/_cykernels.pyx      P192：Cython nogil 计算核（源码，**入库**）
 setup_cython.py           P192：构建脚本（**故意不接进 pyproject/PEP 517**
@@ -96,7 +107,7 @@ phdnet/cykernels.py       P192：加载 + 回落（仓库里**唯一**的构建�
 | 3 | 接入编排 + 计时段 | `phdnet/model.py::step` | `run_tests.py fast` |
 | 4 | 铁律声明（这个机制的神经认知对应物是什么） | `docs/PHD-Net_架构设计.md` 机制表 | 人工评审 |
 | 5 | fast 测试断言 | `tests/checks_*.py` | fast 9/9 |
-| 6 | 专项 verifier | `tests/verifiers/verify_<新机制>.py` | 新写的对拍 |
+| 6 | 专项 verifier | `tests/gates/gate_<新机制>.py` | 新写的对拍 |
 
 ### 2.1 命名与默认值
 
@@ -161,7 +172,7 @@ phdnet/cykernels.py       P192：加载 + 回落（仓库里**唯一**的构建�
    `pick_readout_backend` 的 `except Exception` 兜底回落，且
    **`_accel_fallback_reason=None`（原因丢失）**。已于 P112 修：在能力表显式拒绝并说明原因。
 
-**改dtype 时三处一起改，并跑 `verify_accel_readout.py` 的能力表用例。**
+**改dtype 时三处一起改，并跑 `gate_accel_readout.py` 的能力表用例。**
 
 ### 3.3 未实现的配置：回落 + 记原因
 
@@ -211,7 +222,7 @@ torch CPU 与 numpy BLAS 的**归约顺序不同**，fp32 下 `max|Δ| ≈ 4e-06
 
 ### 4.2 ⚠ 低精度不是免费的速度收益：它会破坏学习规则
 
-这是本项目最重要的精度结论（实测 `tools/probe_readout_precision.py`）。
+这是本项目最重要的精度结论（实测 `tools/probe/probe_readout_precision.py`）。
 判据：**同精度舍入后，元素是否真的变了**（变了 = 更新被保留）。
 
 | 精度 | 非目标行更新保留率（`\|W\|~1e-2, \|dp\|~1e-6`） | 目标行 |
@@ -252,7 +263,7 @@ argparse 在 `train/train.py`（生产）、`train/infer.py`、`tools/*.py`。
 `argparse._expand_help` 会对 help 文本做 `help % params`。任何未转义的 `%` 都会抛
 `ValueError: unsupported format character`。必须写 `%%`。
 
-**门禁已升级**：`tests/verifiers/verify_ms_stream.py` 现在会**跑遍全仓库每个 argparse 入口的
+**门禁已升级**：`tests/gates/gate_ms_stream.py` 现在会**跑遍全仓库每个 argparse 入口的
 `--help`**（36 个文件），任何入口崩了都会被抓到。
 （另有静态扫描辅助，但**只作提示不作判据**——AST 片段提取在跨行格式化表达式上会误报。）
 
@@ -282,7 +293,7 @@ python train/train.py --help ; echo "exit=$?"
 
 ## 6. 检查单：加一个验证器
 
-放 `tests/verifiers/verify_*.py`。`python tests/verifiers/verify_<名>.py` 即可运行。
+放 `tests/gates/gate_*.py`。`python tests/gates/gate_<名>.py` 即可运行。
 
 ### 6.1 分层结构（照这个写）
 
@@ -305,9 +316,9 @@ python train/train.py --help ; echo "exit=$?"
 
 ### 6.4 ⚠ 写门禁时别把自己扫进去
 
-真实事故：给 `verify_ms_stream.py` 加「跑遍所有 argparse 入口」的检查，
+真实事故：给 `gate_ms_stream.py` 加「跑遍所有 argparse 入口」的检查，
 而它自己含 `add_argument` 文本且有 `__main__` → **自我递归调用把自己跑超时**。
-排除 `os.path.abspath(__file__)` 与 `tools/archive/`（归档脚本不是活代码入口）。
+排除 `os.path.abspath(__file__)` 与 `tools/legacy/`（归档脚本不是活代码入口）。
 子进程调用要加 `try/except TimeoutExpired`。
 
 ### 6.5 ⚠ 门禁红了先归因
@@ -315,7 +326,7 @@ python train/train.py --help ; echo "exit=$?"
 `门禁红了必须归因，不能等它变绿`。先问两个问题：
 ① 它什么时候开始红的？② **它断言的是不是已废弃的行为？**
 
-真实案例：`verify_accel_readout.py` 的 A3 长期断言「稀疏必须回落 numba」——
+真实案例：`gate_accel_readout.py` 的 A3 长期断言「稀疏必须回落 numba」——
 P111 恰恰是要取消这个回落。改代码前若不看清断言，**会把正确的修复当成回归**，
 或者反过来——为了让门禁绿而把修复改回去。
 
@@ -337,7 +348,7 @@ P111 恰恰是要取消这个回落。改代码前若不看清断言，**会把�
 | 检测发散并标 `diverged` | 不能把爆掉的数字当正常结果打出去 |
 | **欠训练告警必须打** | 小 token 预算下稀疏臂「PPL 更优」是**预算不足的伪影**，不是稀疏的结构优势 |
 
-`tools/bench_local.py` 已明确「**不产出文档数字**」并提供三个 A/B 开关——
+`tools/bench/bench_cpu_local.py` 已明确「**不产出文档数字**」并提供三个 A/B 开关——
 这是「x86 结论不构成昇腾证据」纪律的落地。
 
 ---
@@ -371,7 +382,7 @@ P111 恰恰是要取消这个回落。改代码前若不看清断言，**会把�
 | `--lang` | 终端输出语言（默认 **en**） | ⚠ **对训练结果零影响**。语料过滤是 `--data-lang`（会改变结果）|
 | `--readout-dtype` | 读出计算精度（默认 **fp8**，P189；`choices` = `fp32`/`fp16`/`bf16`/`fp8`） | ⚠ 默认 fp8 = **fp8 e4m3fn 位模式（uint8 承载）存储 + fp16 迭代**：访存收益完整，但非目标行 `p − t` 更新保留率最低 → 学习偏向纯 Hebbian（§4.2）。要精确 `p − t` 显式 `fp32`。int 族显式请求仍禁（P163）、fp4/int4 仍禁（P152） |
 | `--encoder-dtype` | M1 权重存储精度（默认 fp32） | 昇腾走平台自适应 GEMV，与 dtype 无关 |
-| `--m2-kernel` | M2 推理核（默认 **`plain`**） | 三态见下方 §9.1。**`plain` 在昇腾赢 5.41×**（P113 实测）；`fused` 在昇腾退化 3–4×（已否）。门禁 `verify_m2_kernels.py` |
+| `--m2-kernel` | M2 推理核（默认 **`plain`**） | 三态见下方 §9.1。**`plain` 在昇腾赢 5.41×**（P113 实测）；`fused` 在昇腾退化 3–4×（已否）。门禁 `gate_m2_infer_kernels.py` |
 | `--nll-sync-every` | nll 同步周期（默认 8） | N>1 时消除每步硬同步 |
 | `--numba-threads` | prange 线程上限（默认 8） | 191 核上 P22 实测 1→6 线程仅 1.16×（带宽饱和） |
 | `--accel` | 读出设备（默认 auto） | `cpu/off/numba` = 强制 numba 路径 |
@@ -405,7 +416,7 @@ P111 恰恰是要取消这个回落。改代码前若不看清断言，**会把�
 昇腾上赢 5.41×。这印证了性能文档的铁律③：
 **x86 的性能结论不构成昇腾的证据，连「无差别」也不构成。**
 
-**门禁**：新增机制改到 M2 的核时必须跑 `tests/verifiers/verify_m2_kernels.py`（**13 例**）：
+**门禁**：新增机制改到 M2 的核时必须跑 `tests/gates/gate_m2_infer_kernels.py`（**13 例**）：
 A1 fused vs serial、A2 plain vs serial（容差 1e-7 量级——plain 是非融合路径，
 内部 `np.tanh`/`np.clip` 的归约顺序与融合核的 `math.tanh` 不同）、
 A3 `n_steps=1/2/3`、B 类断言行级 prange **不改变求和顺序**。
@@ -428,7 +439,7 @@ Cython 臂是**第二套数值实现**。加核不是「写个函数」，而是
    `boundscheck=False / wraparound=False / cdivision=True / initializedcheck=False / nonecheck=False`，
    **函数体 `with nogil:`**，参数用 **typed memoryview**（`float[::1]`、`float[:,::1]`）。
 2. 在 `selftest()` 里加**真值断言**（不是「跑通即过」）。
-3. 在 `verify_cykernels.py` 里加一组对拍，并**明确它属语义级还是数值级**。
+3. 在 `gate_cython_kernels.py` 里加一组对拍，并**明确它属语义级还是数值级**。
 4. 若要接到生产：在所属模块加 `cyk_init(mode)` 分派，默认 `off`。
 
 构建：`python setup_cython.py build_ext --inplace`（或直接 `--cython-kernels auto`，首次会就地构建）。
@@ -448,7 +459,7 @@ numba 核**全部带 `fastmath=True`** → LLVM 开启 **FMA 收缩 + 重结合*
 Cython 用 `/O2`（**无** `/fp:fast`）→ **严格 IEEE-754**。
 两者在同一表达式上**必然可差 ~1 ulp**（P192 实测 `max|d|` 1e-8~1e-5，视规模）。
 
-故 `verify_cykernels.py` 的判据**分两档**，加新核时必须归到其中一档：
+故 `gate_cython_kernels.py` 的判据**分两档**，加新核时必须归到其中一档：
 
 | 档 | 用什么 | 例 |
 |---|---|---|
@@ -473,7 +484,7 @@ Cython 官方文档明写：**忘了传 OpenMP 参数，`prange` 照样编译通
 ## 10. 收尾四步（fhz 固定要求）
 
 1. **对拍 / 回归 / 冒烟验证**——fast 9/9 + 相关 verifier + `py_compile` + `--help` 实跑。
-   ⚠ 若改了 argparse，**必跑** `tests/verifiers/verify_help_percent.py`（裸 `%` 会让 `--help` 崩，已犯 5 次）。
+   ⚠ 若改了 argparse，**必跑** `tests/gates/gate_cli_help_percent.py`（裸 `%` 会让 `--help` 崩，已犯 5 次）。
 2. **写记忆日志**——当天做的事追加到 `.workbuddy/memory/YYYY-MM-DD.md`；
    跨会话硬约束才写进 `MEMORY.md`。
 3. **commit + push**。⚠ **push 必须绕过凭据助手**，否则永久挂起：

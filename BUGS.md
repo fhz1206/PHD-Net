@@ -23,15 +23,15 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 
 - **Cython 首次构建死锁**：加载函数持有非重入锁后调用再次持锁的构建函数；本机已有扩展掩盖了缺扩展路径。
   改为重入锁并用带超时的独立子进程 mock 构建验证；完整恢复 `sys.argv`，auto 回落、force 传播错误。
-  门禁：`tests/verifiers/verify_cython_loader.py`。
+  门禁：`tests/gates/gate_cython_loader.py`。
 - **跨模型开关泄漏**：模块全局分派让先建 auto 再建 off 的模型错误执行 Cython；模型现在绑定实例句柄，
   创建其他模型或切换兼容全局开关不影响已有实例。门禁同时覆盖 auto→off 与 off→auto。
 - **旧 STDP 学习率调用错误**：只缩放 pre 迹而未缩放 post 迹，使 LTD 不乘学习率。
   修正两项统一缩放、覆盖生产超参数对拍；但训练质量发生变化，不把公式正确当作质量没有回归。
   精确归因与 PPL 数字仅记录于《性能评估与迭代方案》§10.1，历史锚点不覆盖。
 - **CANN 核对器虚报生效**：JIT 状态读不到却判成功、blocking=0 却判禁用。
-  改为未知状态不宣称生效、显式 0 不阻塞；门禁 `verify_cann_dispatch.py` 使用 mock，非 NPU 实测。
-- **仍未修复**：`verify_ltm_trace_semantics.py` 的 (a) 组既有失败，保留失败退出码和原始记录；
+  改为未知状态不宣称生效、显式 0 不阻塞；门禁 `gate_cann_dispatch.py` 使用 mock，非 NPU 实测。
+- **仍未修复**：`gate_ltm_trace_semantics.py` 的 (a) 组既有失败，保留失败退出码和原始记录；
   不移除断言、不宣称全 verifier 或远端 CI 全绿。
 
 ## A. 训练入口与可选依赖边界
@@ -49,7 +49,7 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 ### A3 fast 门禁 9/9 但训练入口是坏的（**流程漏洞**，`afdd5a2`）
 - **症状**：A1/A2 都没被 `python tests/run_tests.py fast` 拦住。
 - **根因**：fast 门禁只跑 `tests/` 下的检查，**从不 import `train/train.py`**。
-- **修复**：`tests/verifiers/verify_ms_stream.py` 加两道真门禁 —— ① 对全部改动文件 `py_compile`；② subprocess 真跑 `train.py --help`，断言 `returncode == 0` 且新参数出现在 stdout。
+- **修复**：`tests/gates/gate_ms_stream.py` 加两道真门禁 —— ① 对全部改动文件 `py_compile`；② subprocess 真跑 `train.py --help`，断言 `returncode == 0` 且新参数出现在 stdout。
 - **门禁缺口（仍存在）**：⚠ fast 门禁**本身**仍不 import 训练入口，靠 verifier 兜。**改 `train/*.py` 后必须单独 `py_compile` + 跑一次 `--help`**，否则等于没测。
 
 ### A4 编辑时截断 `try` 的配对 `except` → SyntaxError（`87cdcbf`）
@@ -76,7 +76,7 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 - **门禁缺口**：⚠ **bf16 round-trip 用例有 torch，但 fast 门禁（9/9）没有** → 本地全绿、服务器崩。该用例应并入 fast 集合（未做）。
 
 ### A8 P80 的 `F.cross_entropy` 悄悄破坏了 NLL 容差判据（`fd05fb3` 引入 / `d780502` 修）
-- **症状**：`verify_accel_readout` 长期报 **1 FAIL**，改动前后都一样。
+- **症状**：`gate_accel_readout` 长期报 **1 FAIL**，改动前后都一样。
 - **根因**：P80 把 nll 从 `log(softmax)` 换成单核 `F.cross_entropy`（内含 logsumexp）—— **数学等价、浮点归约顺序不同**。加速侧与 numba 参考实现相对差 **3.46e-5**，判据是 **1e-6**。`git stash` 双向确认：**不是当次改动引入的回归**，是 P80 悄悄把容差判据作废了。
 - **修复**（`d780502` 的 P93 部分）：容差放宽到 1e-4，**理由写在断言旁边**；并注明 nll 是**上报标量、从不喂给学习** —— 真正影响学习的是 `dp → W`，由下一条 1e-5 的断言守着（实测 1.2e-7）。
 - **门禁缺口（关键）**：⚠ **容差判据本身没有对账机制**。一条长期 FAIL 的断言会被当成「已知噪声」忽略，而没人问「它什么时候开始红的」。**门禁红了必须归因，不能等它变绿。**
@@ -92,9 +92,9 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 
 ### B1 NPU 首次真跑训练即崩 `FakeTensor - None`（P55，`49aea05`）
 - **症状**：`TorchRuntimeError: unsupported operand type(s) for -: 'FakeTensor' and 'NoneType'`，崩在 `accel_readout.py` 的 `dp = (p - t32)`。
-- **根因**：P45 的「`target_idx` 路径就地改 p」只实现在 **eager 分支**，`torch.compile` 融合核 `_train_step_core` 漏改，而该路径 `t32 = None`。既有 `verify_accel_readout.py` 的 learn_softmax 用例**只走 target 数组路径**，从不传 `target_idx` → 恰好漏掉崩的那条。
+- **根因**：P45 的「`target_idx` 路径就地改 p」只实现在 **eager 分支**，`torch.compile` 融合核 `_train_step_core` 漏改，而该路径 `t32 = None`。既有 `gate_accel_readout.py` 的 learn_softmax 用例**只走 target 数组路径**，从不传 `target_idx` → 恰好漏掉崩的那条。
 - **修复**：融合核逐行镜像 eager（`p − onehot` 与 `p[c] −= 1` 数值等价）；顺带把 softmax/nll 移入 eager-only（compiled 路径原白算一次全词表 softmax）。
-- **门禁**：新增 `tests/verifiers/verify_accel_readout_p55.py`（2×2 矩阵：target 数组 / target_idx × eager / compiled，**9/9**，容差 1e-5 fp32）。
+- **门禁**：新增 `tests/gates/gate_accel_readout_p55.py`（2×2 矩阵：target 数组 / target_idx × eager / compiled，**9/9**，容差 1e-5 fp32）。
 
 ### B2 inductor **惰性编译** → 编译失败会崩生产（`49aea05`）
 - **症状**：`__init__` 有 try/except 回落，但**首次调用 `_fused`** 才真正触发编译 → 无 C++ 编译器时直接抛 `InductorError`。
@@ -125,7 +125,7 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 - **症状**：日志 `NPU/GPU --%  HBM --/--GB`，但服务器确有 NPU。
 - **根因**：`Telemetry()` 一直**无参构造** → `device=""` → `sample()` 的加速器分支**永不触发**（P41 遗留；P19 把读出搬上 NPU 后没人回补遥测）。
 - **修复**：自动探测 device（`torch.npu` → `torch.cuda`，显式传入仍优先）；首次采样失败打印原因（原 `except: pass` 全吞）；`TeeLogger` 接管 `sys.stderr`（回落告警 / inductor 日志此前不落盘 —— 这正是「读出为什么没融合」在服务器上不可见的原因）。
-- **门禁缺口**：`verify_ms_stream.py` 只加了「无 NPU 机器探测为空且行为不变」的断言。⚠ **「有 NPU 的机器上遥测非空」本机无法验证**，只能在服务器侧人工确认。
+- **门禁缺口**：`gate_ms_stream.py` 只加了「无 NPU 机器探测为空且行为不变」的断言。⚠ **「有 NPU 的机器上遥测非空」本机无法验证**，只能在服务器侧人工确认。
 
 ### B7 `npu-smi` 不在 PATH → AI Core% 恒 `--`（P63，`0a0dfd8`）
 - **症状**：HBM 有值（走 `torch.npu.memory_allocated()`，host 侧计数器）但 AI Core% 没有。
@@ -165,7 +165,7 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
   ht**却**不把 epoch 回退** → 判据 `2==2` 成立→ 复用了 hB 的 gather。
 - **修复**：新增 `_ht_epoch_at_cache` 记录「当前 `_cache_ht` 上传时的 epoch」，
   `_lookup_ht` 命中时把 `_ht_epoch` 置回它。
-- **门禁**：`verify_accel_sparse.py` C4c 三例（缓存归属 / 污染后前向与干净实例
+- **门禁**：`gate_accel_sparse_readout.py` C4c 三例（缓存归属 / 污染后前向与干净实例
   一致 / 同 h 连续调用仍复用）。**已验证门禁真能抓**——临时撤掉修复后 C4c1 FAIL。
 - **教训**：把「每次都做」的重活换成「按计数器判据」时，**必须枚举计数器
   不递增的所有路径**，别只检查「值递增的那条」。
@@ -181,14 +181,14 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 - **修复**：改用 `importlib.util.spec_from_file_location` **按文件路径加载**，
   绕开包 `__init__`；并把调用点移到 `_ROOT` 定义之后（首次插入时`_ROOT`
   尚未定义，直接报 NameError）。
-- **门禁**：`verify_cann_env.py` 只测 `apply_cann_env()` 函数本身，
+- **门禁**：`gate_cann_env.py` 只测 `apply_cann_env()` 函数本身，
   ⚠ **测不到「调用时机对不对」** ——那是本条漏过的原因。补法：断言
   `train.py` 里用的是 `spec_from_file_location` 而非 `from ... import`。
 - **教训**：**「在某处之前设置」这类纪律无法靠测函数验证**，只能靠
   静态检查调用形式（或在函数里加一条「我必须在库导入前被调用」的断言）。
 
 ### B18 门禁自身腐烂：**26 个 verifier 里有 2 个烂了 3 个月**（P126）
-- **症状**：P126 全量回归时，`verify_readout_fused` 与 `verify_repro_process`
+- **症状**：P126 全量回归时，`gate_readout_fused` 与 `gate_process_reproducibility`
   **立即崩**：
   -前者 `AttributeError: module 'phdnet.readout' has no attribute '_ro_fused'`
     —— 该核在 **P9（2026-09-27）** 就被重命名为 `_ro_dense_update`，验证器漏改。
@@ -255,11 +255,11 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 - **症状**：服务器日志 `[readout] backend=numba-cpu(回落) | fallback reason: readout_conn_k>0（稀疏读出未在加速后端实现）`。读出占端到端 **~89%**（P19），回落等于**默认配置下设备加速全部失效**，而日志只在启动时打一行，训练中无人察觉。
 - **根因**：`--readout-conn-k` 默认 128（P108）撞上 `AccelReadout._unsupported_reason` 的拒绝表 → `pick_readout_backend` 回落到 numba CSR 路径。**P19 纪律的副作用**：拒绝表本是「防止能跑但语义不同」，但一个**默认值**命中它，就等于默认关掉加速。
 - **修复（P111）**：加速后端实现均匀k 的 gather-GEMV（前向 `y[i]=ΣⱼW[i,j]·h[Wi[i,j]]`，更新按行rank-1），拒绝表移除该项；非均匀行宽（幂律变长 CSR）与两级读出仍拒绝 → fail-fast，不静默走错算法。1B 档实测 val 37.9 MB + idx 75.7 MB = **113.6 MB vs 稠密 fp32 908.8 MB（8.0×）**。
-- **门禁**：新增 `tests/verifiers/verify_accel_sparse.py` 21 例（数值等价/调用面/拒绝路径/零回归）。⚠ 实现过程中该验证器抓出**两个真 bug**：① 前向写成 `gather(...).sum(1)`——**把权重整个丢掉**，形状 dtype 全对只有数值错；② `_csr` 每次调用返回**新的 D2H 副本**，ckpt 的 `val[:] = ...` 写进无人引用的数组 → **检查点「恢复成功」但权重是旧值**。两者都靠数值对拍抓出，形状断言抓不到。
+- **门禁**：新增 `tests/gates/gate_accel_sparse_readout.py` 21 例（数值等价/调用面/拒绝路径/零回归）。⚠ 实现过程中该验证器抓出**两个真 bug**：① 前向写成 `gather(...).sum(1)`——**把权重整个丢掉**，形状 dtype 全对只有数值错；② `_csr` 每次调用返回**新的 D2H 副本**，ckpt 的 `val[:] = ...` 写进无人引用的数组 → **检查点「恢复成功」但权重是旧值**。两者都靠数值对拍抓出，形状断言抓不到。
 
 ### B13 低精度读出把 p − t 退化成纯 Hebbian（P105 判断被 P110 实测推翻）
 - **症状**：日志警告「half precision rounds away the perceptron's non-target-row updates (|dp| ~1e-6 vs bf16 half-ULP ~2e-4), so learning degenerates toward pure Hebbian」—— 但当时的默认是 **fp16**，即警告文案在陈述自己默认值的危害。
-- **根因**：P105 认定「fp16 半 ULP 比 bf16 小 8 倍，能保住非目标行更新」。P110 用 `tools/probe_readout_precision.py` 实测（判据：**同精度舍入后元素是否真的变了** = 更新是否被保留）：`|W|~1e-2, |dp|~1e-6` 时非目标行保留率 **fp32 99.95% / fp16 26.67% / bf16 5.79%**；目标行三者都 100%（目标更新 ~1e-2 ≫ 半ULP）→ fp16 只是「比 bf16 好」，**离正确还差一个数量级**，73% 的非目标行更新仍被丢弃。
+- **根因**：P105 认定「fp16 半 ULP 比 bf16 小 8 倍，能保住非目标行更新」。P110 用 `tools/probe/probe_readout_precision.py` 实测（判据：**同精度舍入后元素是否真的变了** = 更新是否被保留）：`|W|~1e-2, |dp|~1e-6` 时非目标行保留率 **fp32 99.95% / fp16 26.67% / bf16 5.79%**；目标行三者都 100%（目标更新 ~1e-2 ≫ 半ULP）→ fp16 只是「比 bf16 好」，**离正确还差一个数量级**，73% 的非目标行更新仍被丢弃。
 - **修复（P110）**：默认改回 **fp32**（fhz授权），低精度降级为显式 opt-in；启动日志按精度分叉（fp32 打印「精确 p − t 规则」，低精度才警告）。
 - **教训**：① **半 ULP 的数量级估算不能替代实测**——「8 倍差距」在跨越两个数量级的问题面前不成立；② 精度判据必须用**同精度舍入后的基线**，第一版拿 fp32 值与 fp16 值直接比，得到「fp16 保留 100%」的**反向假阳性**；③ 修正 P105 时也是先改 bf16→fp16（同样无效），隔一天才被实测推翻——**改动前先问「这个修复的机制是什么」，不要先改再说**。
 
@@ -272,7 +272,7 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 - **症状**：6 步 bit-exact 序列**逐位不一致**；800×800 组合 0.36 → 0.38 ms（**0.96×**，负收益）。
 - **根因（三个独立坑）**：① 核内**生长分支被预留容量 cap 卡住**（原路径只受 `size < m_out` 限制，首版照抄了 `growth_guidance` 守卫）；② **误把结构可塑性绑到 `growth_guidance`**（它只该喂 `in_deg`）；③ **import 块漏了 `prange`** —— 又一个「补丁未落盘」家族实例。
 - **修复**：P78（`12c184f`）重做：生长分支改为**无条件**、scatter 执行原路径在行填满预留后的 `_grow_row` 扩容、`_touch` 留在 Python（核前运行，语义不变）→ 通过 6 步序列对拍。
-- **门禁**：新增 `verify_ltm_learn_batch.py` 5/5（单步 fp64/int8 × guidance 逐位 + 6 步生长/量化/衰减序列）。⚠ 阈值 4096 组合：低于它 gather 开销主导。
+- **门禁**：新增 `gate_ltm_learn_batch.py` 5/5（单步 fp64/int8 × guidance 逐位 + 6 步生长/量化/衰减序列）。⚠ 阈值 4096 组合：低于它 gather 开销主导。
 
 ### C2 `encode` numba 化：O(n²) 线性去重输给 Python `set`（`7c5f21f`）
 - **数据**：**0.84×**（多次跑 0.84–1.75× 波动）。**根因**：核内去重是线性扫描，Python `set` 是 O(1) 哈希。
@@ -284,7 +284,7 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 - **根因**：`OnlineCSRTable.predict` 遍历 256 活跃行 × 约 72 槽 = **1.8 万次 dict 更新 + numpy 标量取值/step**。C2 之后 recall 投影已 numba 化，但**跑在已物化的 dict 上** → dict 工作量原样保留。
 - **修复**：`predict_arr`（numpy gather，返回 `(keys, vals)` **不合并重复键**）+ 核内按「行序 → 槽位序」逐次累加（浮点顺序与原 `p[k] += v` 完全一致 → **逐位相同**）。**实测 predict 8.780 → 0.197 ms（44.6×）**，recall 投影 21.9×。
 - **关键判断**：这段**故意不上 numba gather 核** —— 1.8 万元素比 C1 的 64 万组合小两个数量级，核的固定开销会吃掉收益。
-- **门禁**：`verify_ltm_kernels.py` 扩到 **10/10**，覆盖 recall **全链路**逐位（int8/fp64 × 行满 + 键随机）。
+- **门禁**：`gate_ltm_kernels.py` 扩到 **10/10**，覆盖 recall **全链路**逐位（int8/fp64 × 行满 + 键随机）。
 
 ### C4 `[ltm-diag]` 一行都不输出（我引入，`7c5f21f`）
 - **症状**：加了 LTM 规模诊断，日志里完全没有。**根因**：门槛设成**每 1000 次 imprint**，而 imprint 是**条件触发**（`mode=='encode'` 且超阈值）→ 3500 token 攒不到 1000 次。
@@ -299,7 +299,7 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 ### C6 `_rev_to_csr` 构造期 1677 万次 Python 循环（我引入，`5c4c303`）
 - **症状**：1B 档启动多花约 10 s。**根因**：构造期 `for i in range(n_keys)` 逐个查 dict → 1B 档 **1677 万次 Python 循环**。
 - **修复**：只遍历实际存在的 key（≤ 4096 条）+ 向量化前缀和，**保持 key 升序**（与原实现段序一致 → 逐位相同）。
-- **⚠ 修复过程中自己制造又抓到一次 bug**：第一次改成「dict 插入序 + 生成器」时 `indices` 与 `indptr` 段序错位，被 `verify_ltm_kernels.py` 的「rev CSR 逐维一致」用例当场抓出。
+- **⚠ 修复过程中自己制造又抓到一次 bug**：第一次改成「dict 插入序 + 生成器」时 `indices` 与 `indptr` 段序错位，被 `gate_ltm_kernels.py` 的「rev CSR 逐维一致」用例当场抓出。
 - **教训**：优化「形状/顺序」的代码时**逐位对拍是唯一防线** —— 纯计时看不出段序错位，结果仍「跑得动」。**门禁**：靠既有对拍用例，无需新增。
 
 ### C7 LTM imprint 侧每次调用约 20 s（Python `O(prev×cur)` 循环；部分修复，P78 `12c184f`）
@@ -334,13 +334,13 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 - **症状**：`save_model` → `to_numpy(ro_W)` → `TypeError: Got unsupported ScalarType BFloat16`。
 - **根因**：`readout_dtype=bf16` 使设备张量是 bf16，而 **numpy 无原生 bf16** → `.numpy()` 直接抛。bf16 检查点路径**此前从未走到「保存」这一步**。P84 换 fp8 后**同一处会再崩一次**（numpy 也无原生 fp8）。
 - **修复**：`to_numpy` 对 bf16 存 **uint16 位模式**、fp8 存 **uint8**（`view(torch.uint16)`），与加载侧 P46 的解码（`ckpt_dtype=bf16` + `dtype.kind in "ui"` → `view(bfloat16)`）闭环 —— 无损，且检查点保持原体积。
-- **门禁**：bf16 round-trip 用例加进 `verify_ms_stream.py`（41/41）。⚠ 但 A7 已指出：**fast 门禁仍没有 torch**，这条在 fast 集合里依然覆盖不到。
+- **门禁**：bf16 round-trip 用例加进 `gate_ms_stream.py`（41/41）。⚠ 但 A7 已指出：**fast 门禁仍没有 torch**，这条在 fast 集合里依然覆盖不到。
 
 ### D5 M2 融合核在昇腾退化 3–4×，默认改回 plain（P75 `57c5be7` / P76 `77f9b78`）
 - **症状**：`--m2-kernel A/B`：plain 6.7–11.9 ms/tok vs fused 20–27（**3–4× 慢**）。
 - **根因**：P52 的融合核在 x86 快 1.15–2.16×，在昇腾 aarch64 退化。P75 拒绝凭**一次**服务器日志翻转默认（20–27 ms 也可能是 prange barrier 成本、fastmath codegen，或只是与 P61 落在同一窗口）。
 - **修复**：新增 `--m2-kernel {fused,plain}`，默认 plain；两条路径对拍到 1–2 ulp（融合核用 fastmath，**不逐位**）。`plain` 的实现是**从 git 历史逐字取回**的 —— fhz 明确记录「我先凭记忆写了一份，是错的」，真实版本 `tanh`/`clip(0.15)` 用法不同。
-- **门禁**：`verify_pc_learn_fused.py` 12/12、fused/plain 一致到 1–2 ulp。**教训**：⚠ **凭记忆重写历史实现是错的**；**「不确定就回历史里取」应该是硬规则**。
+- **门禁**：`gate_m2_learn_fused.py` 12/12、fused/plain 一致到 1–2 ulp。**教训**：⚠ **凭记忆重写历史实现是错的**；**「不确定就回历史里取」应该是硬规则**。
 
 ### D6 bf16 读出让学习退化（P85，`646db01`）
 - **症状**：PPL 长期震荡不降。**根因**：bf16 半 ULP ≈ 2e-4 是非目标行更新 `|dp| ≈ 1e-6` 的**约 200 倍** → 更新被舍入 → 训练**退化为纯 Hebbian**。
@@ -381,7 +381,7 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 | M1 编码器 fp32 | 快 **1.80×** | 慢 **约 70×** |
 | M2 融合核 | 快 1.15–2.16× | 慢 **3–8×** |
 | `OMP_PLACES=cores` | 无感 | 慢 **8×**，CS/s 升到 600 万 |
-- **结论**：**x86 的性能结论不构成昇腾的证据**；跨平台项目里任何优化必须在目标机器复测。`--m2-kernel`、`--encoder-dtype` 这两个 A/B 开关就是这条铁律的产物。`tools/bench_local.py`（P89，`b5217a3`）**只回答「在这台机器上变快还是变慢」**，**不产出文档数字** —— 今天已测出三个方向相反的案例。
+- **结论**：**x86 的性能结论不构成昇腾的证据**；跨平台项目里任何优化必须在目标机器复测。`--m2-kernel`、`--encoder-dtype` 这两个 A/B 开关就是这条铁律的产物。`tools/bench/bench_cpu_local.py`（P89，`b5217a3`）**只回答「在这台机器上变快还是变慢」**，**不产出文档数字** —— 今天已测出三个方向相反的案例。
 
 ### E5 计时误导：命中首项 / 规模猜错两个数量级（方法论）
 - **症状一**：按 append 顺序填键 → `_find_slot` 总是命中首项（0.1 µs），把 numpy 优化**测成负收益**；打乱后才是平均情形。
@@ -391,7 +391,7 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 ### E6 观测手段自欺：`--lang` 误判 与 `or True` 假断言
 - **症状一**（`f0732e0`）：报告「加了 `--lang zh` 但日志还是英文」。**那份日志的 argv 里根本没有 `--lang`**（只有 `--step-profiling`）。本机实测过滤本身有效。
 - **修复**：训练循环保留最近 8 个真实 target token，每个日志点打印 `[sample lang=zh] CJK=98% | '…'` → 语种是否生效**一眼可见**；日志头打印完整 `argv`。
-- **症状二**：写 `verify_pc_learn_fused.py` 时为少写几行加了 `... or True`。
+- **症状二**：写 `gate_m2_learn_fused.py` 时为少写几行加了 `... or True`。
 - **教训**：**「行为没生效」先查命令行，再查代码**；**测试不能自己骗自己** —— `or True` / `assert True` 等价于没测。
 
 ---
@@ -399,9 +399,9 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 ## F. CI 与工程
 
 ### F1 GitHub Actions 首跑即红（**CI 设计缺口**，`82c7390`）
-- **症状**：首次推送（sha `90b7b63`）即失败。① `backend-torch / bench_accel`：`open('outputs/bench_accel.json','w')` 但**新 checkout 上 `outputs/` 不存在** → FileNotFoundError；② `tests / verify_parallel_consistency` 硬依赖 `datasets/pretrain/pretrain_*.parquet`，而它**被 gitignore 且本地 29 GB 副本已删**。
+- **症状**：首次推送（sha `90b7b63`）即失败。① `backend-torch / bench_accel`：`open('outputs/bench_accel.json','w')` 但**新 checkout 上 `outputs/` 不存在** → FileNotFoundError；② `tests / gate_parallel_consistency` 硬依赖 `datasets/pretrain/pretrain_*.parquet`，而它**被 gitignore 且本地 29 GB 副本已删**。
 - **根因**：workflow 直接复用了「本地已存在」的假设（已生成的 `outputs/`、已上传的 datasets、只在本机装好的可选依赖）。
-- **修复**：`makedirs(outputs/experiments, exist_ok=True)` 且打印路径与实际一致；`verify_parallel_consistency` 在 glob 匹配为空时**合成一份小而确定的中文 parquet**（pyarrow，text/lang/src，8 样本 × 约 9k 字符）跑同一条流水线 —— 该脚本的目标是多核等价性，不是语料本身。本机带 fallback：serial=8 / parallel=8 块，逐位一致。`seg_equiv` / `vocab_parallel` 不受影响（`eval_corpus/` 43 KB 是 git 跟踪的）。
+- **修复**：`makedirs(outputs/experiments, exist_ok=True)` 且打印路径与实际一致；`gate_parallel_consistency` 在 glob 匹配为空时**合成一份小而确定的中文 parquet**（pyarrow，text/lang/src，8 样本 × 约 9k 字符）跑同一条流水线 —— 该脚本的目标是多核等价性，不是语料本身。本机带 fallback：serial=8 / parallel=8 块，逐位一致。`seg_equiv` / `vocab_parallel` 不受影响（`eval_corpus/` 43 KB 是 git 跟踪的）。
 - **门禁缺口**：这是**门禁自己**的缺口，只能靠真跑一次 CI 才能发现 —— **推上去之前无法本地复现**。
 
 ### F2 依赖 import 损坏 → 诊断步骤自己先崩（`0a5ab0b`）
@@ -457,7 +457,7 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 4. **【阻断】`infer.py` 读 `args.lang` 但从未定义 `--lang`** → 推理入口 100% 崩
    （i18n 接线只做了一半）。
 5. **【高】`BATCH_MIN_COMBOS` 全仓库无人读取**（阈值硬编码 4096）→
-   `verify_ltm_learn_batch.py` 的「禁用/强制批量」切换**完全无效**，对拍脚本
+   `gate_ltm_learn_batch.py` 的「禁用/强制批量」切换**完全无效**，对拍脚本
    在拿批量路径和自己比 → P78 的门禁是空转的。
 6. **【高·当前不可达】`prev` 含重复 id 时批量路径静默算错**（gather 两次、
    scatter 覆盖，Python 路径则累加多次）。当前 prev 来自 `dict.fromkeys`（已去重）
@@ -468,7 +468,7 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
    `T()` 是零调用的死代码；`__getattr__` 在 `_w` 缺失时无限递归。
 
 **已修**：1–6（serial 核现与 parallel **逐位一致**，n_steps=1/2/3 全部 max|Δ|=0；
-`BATCH_MIN_COMBOS` 真正生效后 `verify_ltm_learn_batch` 5/5 才是真对拍）。
+`BATCH_MIN_COMBOS` 真正生效后 `gate_ltm_learn_batch` 5/5 才是真对拍）。
 7–8 待处理。**门禁全绿**：fast 9/9、ms_stream 41/41、pc_learn_fused 12/12、
 ltm_learn_batch 5/5、ltm_kernels 10/10、`infer.py --help` 正常。
 
@@ -481,10 +481,10 @@ ltm_learn_batch 5/5、ltm_kernels 10/10、`infer.py --help` 正常。
 2. **诊断代码也在热路径上**：C5（134 MB/次只为打一行）、C4（门槛没考虑触发频率）、B9（观测手段本身破坏流水线）、A2（`--help` 从来没真跑过）。
 3. **配置与实现必须对账**：**B3（fp8 能力表遗漏 → 整轮改造在生产等于没生效）**与 **B12（`readout_conn_k` 默认值撞拒绝表 → NPU 读出加速全程失效）**是本台账最严重的两条，因为它们**都没有任何报错**。已有的对账是「文档重写」顺带抓出来的，不是门禁抓的。→ **B12 已落地修法**（P111 真正实现稀疏读出而非只改文档口径）。
 4. **负收益同样是结论**：E3 四次连续否决 + C1 负收益回滚，共同结论是**访存/调度受限规模上加并行度要先算固定开销**。但四次都**没留计时护栏** —— 结论只活在文档里。
-5. **x86 的结论不构成昇腾的证据**：D1 在两个平台上**方向相反**；E4 三个案例方向相反。→ 已落地：`tools/bench_local.py` 明确「不产出文档数字」+ 三个 A/B 开关。
+5. **x86 的结论不构成昇腾的证据**：D1 在两个平台上**方向相反**；E4 三个案例方向相反。→ 已落地：`tools/bench/bench_cpu_local.py` 明确「不产出文档数字」+ 三个 A/B 开关。
 6. **门禁只能拦住门禁想得到的东西**：G2（语料分布错）、F3（CI 仍红）、F1（CI 自己的设计缺口）、D2（混合 dtype —— **在所有正确性门禁下都是隐形的**）、D6（更新被舍 → 训练退化但不崩）、**B13（半 ULP 数量级估算代替实测 → 默认值改了两次都是错的）**都超出现有 9 项 fast 门禁的视野。
 7. **容差判据本身需要归因**：A8 的一条断言长期红着没人问「它什么时候开始红的」—— **门禁红了必须归因，不能等它变绿。** B12 的 A3 断言也是同理：它断言「稀疏必须回落」，P111 修好后**必须同步改断言**，否则会把正确的修复当成回归（反向风险与 B3 同源）。
-8. **数值 bug 需要数值门禁，形状/dtype 断言抓不到**：B12 的前向 bug（`gather.sum(1)` 丢掉全部权重）形状、dtype、量纲全对，只有**数值对拍**能抓住；`_csr` 返回副本导致检查点静默不生效，同样只有数值对拍能抓住。→ 已落地：`verify_accel_sparse.py` 的A1–A4 四条数值断言（容差判据，跨库归约顺序不同故不要求逐位）。
+8. **数值 bug 需要数值门禁，形状/dtype 断言抓不到**：B12 的前向 bug（`gather.sum(1)` 丢掉全部权重）形状、dtype、量纲全对，只有**数值对拍**能抓住；`_csr` 返回副本导致检查点静默不生效，同样只有数值对拍能抓住。→ 已落地：`gate_accel_sparse_readout.py` 的A1–A4 四条数值断言（容差判据，跨库归约顺序不同故不要求逐位）。
 
 ---
 

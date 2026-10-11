@@ -294,7 +294,7 @@ class PHDNetConfig:
     # P6b：读出权重精度（性能开关）。
     # 动机：P6 剖析显示读出学习占训练热路径 79%（词级读出矩阵的稠密更新），
     # 其耗时受内存带宽支配 —— 低精度使带宽减半。
-    # P110 实测结论（tools/probe_readout_precision.py，判据：舍入后元素
+    # P110 实测结论（tools/probe/probe_readout_precision.py，判据：舍入后元素
     # 实际发生变化的比例 = 更新是否被保留）：
     #   非目标行更新保留率 @ |W|~1e-2 / |dp|~1e-6
     #     fp32 99.95%（精确 p − t）｜fp16 26.67%｜bf16 5.79%
@@ -318,7 +318,7 @@ class PHDNetConfig:
     #   fp8 的量化步长比 fp16 **粗4 倍**（mantissa 3bit vs 10bit）→ 风险更高。
     #   → 判定只能靠**PPL**（P146：训练流 PPL 波动 ±20% 不可用，
     #     必须用新加的 `--probe-every` 固定探针集做 A/B）。
-    #   → `tools/probe_readout_precision.py` 可复核这条反证。
+    #   → `tools/probe/probe_readout_precision.py` 可复核这条反证。
     # fp8 的算子可用性由 `phdnet/backends/fp8_capability.py` **运行时探测**
     #   （原生 fp8 / 只有 int8→自动转 / 都无→报错），不再硬编码禁用（P86 解除）。
     readout_dtype: str = "fp8"
@@ -469,13 +469,13 @@ class PHDNetConfig:
     # 三个开关分别对应三段可并行的工作，**互不重叠、可单独 A/B**：
 
     # ① Cython 核（CPU 侧自身提速 + 真放 GIL）
-    cython_kernels: str = "off"        # off(默认) | auto | force
+    cython_kernels: str = "auto"        # off | auto(默认) | force
     #   `off` = 完全不碰 Cython，走现行 numba/BLAS 路径（铁律④逐位不变）。
     #   `auto`= 加载已编译扩展，否则就地构建；失败**静默回落** numba。
     #   `force`= 同 auto，但失败** raise**（门禁/CI 用，逼人面对问题）。
     # ⚠ **诚实边界**：本机（x86 Windows）**无昇腾/NPU**，故本项目
     #   **没有任何 Cython 核的昇腾端到端收益实测**。已做的只有
-    #   ① 逐位/容差等价门禁（`tests/verifiers/verify_cykernels.py`，41/41）
+    #   ① 逐位/容差等价门禁（`tests/gates/gate_cython_kernels.py`，41/41）
     #   ② 本机微基准。收益必须等服务器 A/B，见性能文档 §八。
     # ⚠ **数值漂移**：Cython 用 MSVC `/O2`（严格 IEEE，无 FMA 收缩），
     #   M2 numba 核使用 `fastmath=True`；M3 则还存在 fp64/fp32 中间值差异 → 开此开关后
@@ -486,7 +486,7 @@ class PHDNetConfig:
     readout_pipeline: bool = False
     #   训练已有 forward_dev 异步提交；不能仅凭静态代码断言额外流水收益为零。
     #   `_prev_rate` 是主干活动率，非读出输出；时序学习/记忆状态必须严格保序。
-    #   门禁 tests/verifiers/verify_overlap_contract.py 检查停用契约；
+    #   门禁 tests/gates/gate_cpu_npu_overlap_contract.py 检查停用契约；
     #   本机无 NPU，尚无保持语义的流水实现及服务器端到端收益实测。
 
     # ③ CANN 侧下发流水（官方 task_queue 二级流水 + 算子合并下发）

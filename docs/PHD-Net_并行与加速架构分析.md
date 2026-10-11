@@ -127,7 +127,7 @@ P99 因此新增了第一条（去掉 `parallel=True`，保留融合的「一次
 | `M2_infer` | 6.92 → **1.28 ms/tok（5.41×）** | 1b 档，昇腾 191 核 + NPU，`[日志]` |
 | 端到端 | 17.63 → **12.09 ms/tok（1.46×）** | 同上 |
 | 零回归 | 四个采样点（10250/20250/30250/40250 token）sliding PPL **逐位相同**：38101.949 / 25042.421 / 22693.449 / 19602.394 | `[日志]` 跨 run 观测 |
-| 受控门禁 | `tests/verifiers/verify_m2_kernels.py` **13 例三态对拍** | 同进程、同输入 |
+| 受控门禁 | `tests/gates/gate_m2_infer_kernels.py` **13 例三态对拍** | 同进程、同输入 |
 
 ⚠ **历史值标注**：上表 6.92 / 17.63 是 **serial 口径（历史对照）**。
 另有一组更早的 plain 值 6.7–11.9 ms/tok（P76 A/B 期间，**线程配置未标**），
@@ -146,11 +146,11 @@ P99 因此新增了第一条（去掉 `parallel=True`，保留融合的「一次
 并行化的每一条都必须证明「并行版与串行版逐位相同」，否则无法排除语义漂移。
 仓库用两个 verifier 把关：
 
-- `tests/verifiers/verify_parallel_consistency.py:78-122`：五个 CSR 核
+- `tests/gates/gate_parallel_consistency.py:78-122`：五个 CSR 核
   （`_csr_matvec` / `_csr_add_outer` / `_csr_oja_up` / `_csr_row_norms` /
   `_csr_scale_rows`）的 prange 版对 numba 串行版逐位对拍，含零行（触发 skip 分支）。
   第二部分（`:126-172`）对拍 zh 多进程流与串行参考。
-- `tests/verifiers/verify_multi_device.py:124-136`：读出 4 路分片与单设备
+- `tests/gates/gate_multi_device.py:124-136`：读出 4 路分片与单设备
   前向 / NLL / 更新后权重**逐位**一致。
 
 ⚠ 逐位对拍的基线必须是**同库、同 fastmath 口径的串行实现**——
@@ -453,7 +453,7 @@ idx  = n_out × k × 8 B          （Wi 列索引，int64 是刻意的 —— ac
 
 `multi_device.py:166-182` 提供了 `configure_host_threads()`，
 docstring 明写「必须在 numpy/torch 初始化前调用才完全生效」。
-但全仓库搜索的结果是：**它只有一个调用点——`verify_multi_device.py:161` 的 F 用例。**
+但全仓库搜索的结果是：**它只有一个调用点——`gate_multi_device.py:161` 的 F 用例。**
 
 `train/train.py` 与 `train/infer.py` 都**不调用**它。
 生产侧的线程收敛完全由 §4.1 的三行环境变量 + `numba.set_num_threads` 承担，
@@ -494,11 +494,11 @@ docstring 明写「必须在 numpy/torch 初始化前调用才完全生效」。
 
 - **同设备分片**（同一张卡上按行切分再 `cat`）→ **逐位一致**。
   每行 dot 与分片顺序无关，softmax 在 `cat` 后的同一向量上算。
-  `verify_multi_device.py:124-136` 对此给**逐位**断言（4 路分片 vs 单设备：
+  `gate_multi_device.py:124-136` 对此给**逐位**断言（4 路分片 vs 单设备：
   前向 / NLL / 更新后权重）。
 - **跨设备** → **容差一致**（不是逐位），因为归约顺序不同。
 
-⚠ `verify_multi_device.py:14-16` 明说：**GPU 真机多卡路径待硬件到位后另测**。
+⚠ `gate_multi_device.py:14-16` 明说：**GPU 真机多卡路径待硬件到位后另测**。
 本机无加速器，D 例是「同设备 4 路分片」验证分片逻辑。
 所以「多卡已验证」的准确表述是**分片逻辑已逐位验证，跨设备一致性未实测**。
 
@@ -553,7 +553,7 @@ docstring 明写「必须在 numpy/torch 初始化前调用才完全生效」。
   （`infer.py:237-247`），随后明确打印「本入口推理走 numba CPU 生产路径」。
 - `multi_device.py` 的四个入口（`resolve_devices` / `plan_parallel` /
   `MultiDeviceReadout` / `configure_host_threads`）**全部没有生产调用点**，
-  只在 `verify_multi_device.py` 与 `infer.py` 的探测打印里出现。
+  只在 `gate_multi_device.py` 与 `infer.py` 的探测打印里出现。
 
 > **准确表述**：多卡是**已实现并逐位验证的库层能力**，**当前没有生产接线**。
 > 任何「多卡能用」的引用都必须带上这句限定。
@@ -626,7 +626,7 @@ msprof 昇腾实测曾让我下错两次结论，**两次都是读指标的方�
 - 每个 profiler 指标都要问「**这个 0 是真 0 还是缺数据**」。
   我第一版解析器只取 `aicore_time` 一个指标，把 0 当「没数据」→误判。
 - **必须看多个硬件单元**（Cube / Vector / 搬运 / 排队），单看一个必误判。
-  `tools/analyse_readout_timeline.py` 已内置「硬件单元归属判读」：
+  `tools/probe/analyze_msprof_timeline.py` 已内置「硬件单元归属判读」：
   AICore>50% = 真在算矩阵｜AIV/Vector>30% = 访存/向量型｜
   搬运>30% = memory-bound ｜**wait ≫ 耗时 = 不是它慢，是没被调度到**。
 
@@ -642,7 +642,7 @@ msprof 昇腾实测曾让我下错两次结论，**两次都是读指标的方�
 | # | 候选 | 现状（实测口径） | 待测问题 | 工程量 |
 |---|---|---|---|---|
 | **1** | **读出 7.83 ms 的 26.1 倍差**（原「NPU 侧结构性上限的表述」） | 读出 7.83 ms/tok vs 每步 **229.15 MiB ÷ ~800 GB/s = 0.300 ms** 估算下界（性能文档 §3.5 / `diag_readout_npu.py`）→ **26.1×**。**静态扫描已确认热路径无设备同步点** | ✅ **已定位（P144，msprof 昇腾 600 步）**：`aclnnIndex_IndexAiCore_Index` 占 **89.3%**（13.11 ms/步），但其 **`aicore_time=0`、aiv_time=99.6%**（跑在 Vector 单元）且 **Task Wait 是自身耗时的 6.8 倍** → **不是「算子慢」而是「大部分时间在等资源」**。真因：**每步只提交 12 个小 kernel，NPU 大部分时间空转等 CPU**（AI Core 只在 BatchMatMul 的 1.41 ms/step 上工作）。→ 方向是**流水线/减少同步点**，**不是换算子**（P134/P135 已双重证伪换算子方向）。⚠ 名字里的 "AiCore" 是 CANN 分类标签，**不代表跑在 AI Core 上**（教训见下） | 中（需流水线改造） |
-| **2** | **`configure_host_threads()` 接入生产** | 已实现（`multi_device.py:166-182`）、已被 verifier 覆盖（`verify_multi_device.py:159-163`）、**零生产调用点** | 多卡场景下 CPU 线程与卡内线程争抢的实测影响有多大？单卡场景下是否也应统一走这条路径？ | 小（接线） |
+| **2** | **`configure_host_threads()` 接入生产** | 已实现（`multi_device.py:166-182`）、已被 verifier 覆盖（`gate_multi_device.py:159-163`）、**零生产调用点** | 多卡场景下 CPU 线程与卡内线程争抢的实测影响有多大？单卡场景下是否也应统一走这条路径？ | 小（接线） |
 | **3** | **`--encoder-dtype` / `--readout-dtype` 的档位收敛** | `--m2-kernel` 已在 P113 收敛为 `plain`（并改为默认），`--encoder-dtype` 的 help 与 `default=` 矛盾**仍在**（§7.1） | 昇腾 191 核 + NPU 上 `encoder_dtype` / `readout_dtype` 的最优值是哪一个？两者是否有交互？ | 小（跑 A/B） |
 | **4** | **CPU/NPU 流水重叠** | CPU 侧 **4.26 ms** vs NPU 侧 **7.83 ms** → **NPU 是 CPU 的 1.84 倍**；完全重叠理论上限 = `max` = **7.83 ms**（12.09 → 7.83，**1.55×**） | 两侧时间是否可叠加。⚠ **违反逐 token 语义**：状态跨 token 连续演化，不能批处理、不能回溯重算 → 必须靠前瞻机制。**三方案 A/B/C 与执行顺序建议见 `docs/PHD-Net_CPU-NPU重叠执行计划.md`** | **大**（架构级） |
 | **5** | **层间线程池用在训练稳态** | 现有层间 `ThreadPoolExecutor` 只在**词表构建/扫描**阶段（`vocab_parallel.py:120,275`） | 稳态分词已被 `tokenizer_core.py` 的 nogil 核覆盖；M4b 的 `_recall_project` 因写竞态**结构性串行**。稳态路径上是否还有 nogil 化的空间？ | 待评估 |
@@ -707,8 +707,8 @@ P113 把它改对的方式不是删掉 help 里的数字，而是**把 help 换�
    访存量由「每步一个 h」锁死）。
 4. **它的实测在目标机器上吗？** 七次实测里五次方向相反、一次在 x86 上未 A/B（§6）——
    x86 结论不构成昇腾证据，**x86 的「无差别」也不构成**。
-5. **它过了逐位对拍吗？** 判据见 `verify_parallel_consistency.py`（五核）
-   与 `verify_multi_device.py`（4 路分片）。⚠ 基线必须是同库同 fastmath 的串行实现。
+5. **它过了逐位对拍吗？** 判据见 `gate_parallel_consistency.py`（五核）
+   与 `gate_multi_device.py`（4 路分片）。⚠ 基线必须是同库同 fastmath 的串行实现。
 6. **它加的是核还是进程？** 加核在访存饱和区（1→6 线程 1.16×）无效；
    加进程在数据侧已被 8 进程 + 19 解码核封顶（§1.5）。
 

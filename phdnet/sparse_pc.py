@@ -24,7 +24,7 @@
 
 数值关系（可验证）：**k = n_in（全连接图）时本模块与稠密栈数值一致**
 （CSR 求和顺序按列索引升序；与 BLAS 内部求和顺序不保证逐位相同，
-对拍判据见 tests/verifiers/verify_parallel_consistency.py）。
+对拍判据见 tests/gates/gate_parallel_consistency.py）。
 
 开关（默认关闭，默认路径逐位不变）：
   cfg.sparse_conn  —— True 时主干改用本模块
@@ -182,7 +182,7 @@ else:                                               # pandas 回退（纯 numpy�
 #   （**无** FMA 收缩、**无**重结合），而本文件的 numba 核全部
 #   `fastmath=True`（**有**收缩 + 重结合）→ 开此开关后训练轨迹会有
 #   **fp32 级微小漂移**（实测 max|d| ~1e-8 ~ 1e-5，随规模）。
-#   **不得**称为「逐位等价」。门禁见 tests/verifiers/verify_cykernels.py。
+#   **不得**称为「逐位等价」。门禁见 tests/gates/gate_cython_kernels.py。
 #
 # ⚠ **不走 prange 的两个核**（`_csr_clip` / `_csr_row_norms` / `_csr_scale_rows`）
 #   未做 Cython 版：前两者是 O(nnz) 一次扫描，numba 的向量化/连续访问已接近
@@ -286,7 +286,7 @@ def _from_dense_csr(W: np.ndarray, k: int):
     # `np.argsort(-np.abs(W), axis=1)` 对每行跑的是与
     # `np.argsort(-np.abs(W[r]))` 相同的 numpy 默认 introsort、比较同一逻辑
     # 序列 ⇒ 排列逐位相同。tie-heavy 对拍见
-    # tests/verifiers/verify_perf_no_regression.py（全 0 / 大量重复值 /
+    # tests/gates/gate_csr_vectorization_perf.py（全 0 / 大量重复值 /
     # 两值矩阵 / k=1 / k=n_cols / NaN 行）。
     # 值路径 fp64→fp32 逐元素转换语义不变：take_along_axis 先取原值、
     # 再 astype(np.float32)，与 `val[s] = W[r, cols]` 的赋值期转换同语义。

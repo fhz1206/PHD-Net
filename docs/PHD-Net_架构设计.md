@@ -99,7 +99,7 @@ LTM 突触、调制器 Welford 统计量、`step_count`、读出 W）**全部跨
 | 项 | 值 | 位置 | 理由 |
 |---|---|---|---|
 | `sparse_conn` | `True` | `phdnet/config.py:187` | 稠密 PC 栈已于 2026-09-28 **删除**（`phdnet/pc.py` 移除），主干唯一实现是 `SparsePCStack`；传 `False` 在配置期 **fail-fast**（`phdnet/config.py:342-345`），不做静默稀疏化 |
-| `k_sparse` | `16` | `phdnet/config.py:11` | 2026-09-24 起默认（原 32 = 12.5%）。实测依据（4,000 字符口径）：k=16（6.25%）PPL **−1.43%** 优于 k=32；k=8（3.125%）**+12.5%**（容量不足，有害）。**评测脚本显式传 `k_sparse=32`**（`tests/eval_common.py:16`），故该默认变更不影响既有评测口径 |
+| `k_sparse` | `16` | `phdnet/config.py:11` | 2026-09-24 起默认（原 32 = 12.5%）。实测依据（4,000 字符口径）：k=16（6.25%）PPL **−1.43%** 优于 k=32；k=8（3.125%）**+12.5%**（容量不足，有害）。**评测脚本显式传 `k_sparse=32`**（`tests/evals/eval_common.py:16`），故该默认变更不影响既有评测口径 |
 | `csr_online` | CLI `--csr-online` `default=True` | `train/train.py:281-282` | 在线可写 CSR 已是生产默认（dict 版每条目 ~100+ B → CSR 版 ~16 B）。库字段 `csr_online` 本身默认 `False`（`phdnet/config.py:262`），由 CLI 显式打开 |
 
 ---
@@ -163,7 +163,7 @@ s[idx] = norm(u[idx]) + 0.1     # 归一到 [0.1, 1.1]，sparse_encoder.py:129
   ⚠ aarch64 numba **不支持 float16 数组**（P107b 曾踩中，已回滚）。
 - **可选可学习词典**（`learnable_encoder`，默认 `False`，`config.py:158`）：
   Foldiak 局部规则 `ΔW_i = η·s_i·(x − s_i·W_i)` + 行范数拉回（`sparse_encoder.py:132-153`），
-  成本 `O(k·n_input)`。**实测有害 +6.1%**（`tools/audit_brain_parity.py:143`）→ 保持关闭。
+  成本 `O(k·n_input)`。**实测有害 +6.1%**（`tools/eval/audit_brain_parity.py:143`）→ 保持关闭。
 
 ---
 
@@ -201,7 +201,7 @@ s[idx] = norm(u[idx]) + 0.1     # 归一到 [0.1, 1.1]，sparse_encoder.py:129
   自身的行级 prange**——而 plain 走的正是后者。服务器实测（1b 档，昇腾 191 核 + NPU）：
   M2_infer **6.92 → 1.28 ms/tok（5.41×）**，端到端 17.63 → 12.09 ms/tok（1.46×），
   四个采样点 sliding PPL 与 serial 运行**逐位相同**（纯调度变化、零语义变化）。
-  对拍见 `tests/verifiers/verify_m2_kernels.py`（13 例三态等价 + n_steps 1/2/3）。
+  对拍见 `tests/gates/gate_m2_infer_kernels.py`（13 例三态等价 + n_steps 1/2/3）。
   ⚠ **x86 上测不出这个差异**（本机 fused/serial/plain 三态`max|Δ|=0`，256 行规模下
   结果恰好相同）——x86 结论不构成昇腾证据。
 - **学习**（`sparse_pc.py:500-529`）：下行 `ΔW += η_pc·e⊗r`（误差驱动稀疏外积）；
@@ -217,7 +217,7 @@ s[idx] = norm(u[idx]) + 0.1     # 归一到 [0.1, 1.1]，sparse_encoder.py:129
   即生产档下 M2 只做前向推理，**不学习**；可塑性由 M3（STDP）与 M6（读出）承担。
 - **可验证等价性**：`k = n_in`（全连接图）时本模块与稠密栈**数值一致**（CSR 求和按列索引升序；
   与 BLAS 内部求和顺序不保证逐位相同）。对拍判据见
-  `tests/verifiers/verify_parallel_consistency.py`（`sparse_pc.py:25-27`）。
+  `tests/gates/gate_parallel_consistency.py`（`sparse_pc.py:25-27`）。
 - **统计接口**：`pc.stats()` 返回 `synapses` / `dense_equivalent` / `connectivity`
   / `k0` / `k1`（`sparse_pc.py:602-609`）。
 
@@ -316,7 +316,7 @@ M4b 有**两种实现**，由 `big_ltm` 开关切换（`model.py:73-84`）：
 #### (b) 大空间事件驱动稀疏表（`big_ltm=True`，**1B 档生产路径**）
 
 **脑同构**：海马/皮层印迹 —— **仅被经验触碰过的突触存在**；单神经元突触数有硬上限
-（`tools/audit_brain_parity.py:96-101` 的 A2 条目）。
+（`tools/eval/audit_brain_parity.py:96-101` 的 A2 条目）。
 
 三层结构：
 
@@ -357,7 +357,7 @@ M4b 有**两种实现**，由 `big_ltm` 开关切换（`model.py:73-84`）：
 | 行扩容 | dict 自动 | 满 `row_cap` 后按 **2× 增长**，上限 `m_out`（`sparse_table.py:219-226`） |
 | 惰性迹衰减 | `trace[i] = trace.get(i,0)·λ^Δt + 1.0`，pre/post **各自独立时间戳**（共用会导致 Δt=0、迹无衰减累加爆炸） | 同 |
 | 新突触生长 | 只由 **LTP** 驱动（相邻对约定），LTD 仅作用于**已存在**突触 | 同（槽位顺序 = 首次生长顺序 = dict 插入顺序 → 逐位等价） |
-| 逐位等价 | — | 对拍见 `tests/verifiers/verify_csr_equiv.py` |
+| 逐位等价 | — | 对拍见 `tests/gates/gate_ltm_csr_equivalence.py` |
 | 分片落盘 | — | `export_shards(out_dir, n_shards)` / `import_shards`：按行哈希分片写 np.memmap（`sparse_table.py:471+`） |
 
 **⚠ `consolidate` 在容量表上语义退化**（`bigltm.py:233-271`）：没有稠密快/慢权重分离，
@@ -447,7 +447,7 @@ mode = "encode" if z > 0.3 else "retrieve"
   前向 = `Σⱼ Wv[i,j]·ht[Wi[i,j]]`（**逐元素乘 W 再求和**）、更新 = 逐行 rank-1
   `Wv[i] -= η·dp[i]·h[Wi[i,:]]`。此前 `readout_conn_k > 0` 命中 `_unsupported_reason`
   → 整个读出回落 numba CPU（等于关掉了全部设备加速）。对拍见
-  `tests/verifiers/verify_accel_sparse.py`。
+  `tests/gates/gate_accel_sparse_readout.py`。
 
 #### 2.7.1 M6 的第三层稀疏化：幂律异质连接（P124，本轮新接入）
 
@@ -479,7 +479,7 @@ mode = "encode" if z > 0.3 else "retrieve"
   （`assign_conn_counts` 用 `total_budget` 硬约束，撞上 `k_max` 时会花不完，
   那是夹紧的**正常**结果而非 bug）。
 - **不变式**：每行入边 ≥ 1（读出行不允许 0 条边）、列索引**行内升序且无重复**
-  （`_csr_matvec` 的隐含契约）。对拍 `tests/verifiers/verify_powlaw_readout.py`（32 例）。
+  （`_csr_matvec` 的隐含契约）。对拍 `tests/gates/gate_readout_powlaw.py`（32 例）。
 - **⚠ 加速器不支持非均匀行宽**：行宽不等需要变长 CSR + segment sum，与均匀 k 的
   「稠密张量 gather-GEMV」是**不同算法**（P19纪律：不能「能跑但语义不同」）→
   开 `alpha>0` 会**回落 numba 读出**，NPU 加速失效。**这是正确行为，不是 bug。**
@@ -508,7 +508,7 @@ mode = "encode" if z > 0.3 else "retrieve"
   `phdnet/word_lm.py:42-43`）：`ΔW = −η·(p − t)⊗h`，返回 `nll = −log p(correct)`。
   梯度只有末端一层，**不反传 M2/M3**。
 
-**稀疏化的两难（诚实记录）**：`tools/audit_brain_parity.py:139-146` 记录了
+**稀疏化的两难（诚实记录）**：`tools/eval/audit_brain_parity.py:139-146` 记录了
 256 维栈下 `readout_conn_k=8`（连接率 1.0%）的实测：**PPL +14.8%**（质量劣化）。
 即**过小的 k 会伤害质量** —— 单层线性 softmax 读出的连接需求远高于分布式编码主干。
 1B 档取 k=128（4.2%）而非 8，是这个约束下的折中（该处的速度收益见性能文档）。
@@ -636,7 +636,7 @@ big_ltm 容量 = big_ltm_N × big_ltm_m = 2^24 × 72 = 1,207,959,552   (config_1
 
 ⚠ **词表口径必须标明**：`capacity_report` 的 `n_ro = vocab_size × (readout_conn_k or n_h)`
 （`config_1b.py:102`）。上表用 **51,962**（1B 档实建词表）。若按设计态满词表
-**73,958**（`tools/bench_accel.py` 的缺省 `V`，用于访存上界估算），1B 档读出为
+**73,958**（`tools/bench/bench_readout_devices.py` 的缺省 `V`，用于访存上界估算），1B 档读出为
 9,466,624、总容量 **1,220,065,024 ≈ 1.2201e9**；读出改回稠密（`readout_conn_k=0`）时
 1B 档总容量为 1,437,797,376 ≈ **1.4378e9**（V=73,958） / 1,370,225,664 ≈ **1.3702e9**（V=51,962）。
 **三个数都对，区别只在词表与稀疏档位。**
@@ -701,7 +701,7 @@ W 以 **fp8 e4m3fn 位模式由 uint8 承载**（1 B/元素，访存收益完整
 `dtype_name = dtype if conn_k == 0 else "fp32"`）—— 稀疏的意义正是省流量，
 不叠加语义损失。
 
-判据是 `tools/probe_readout_precision.py` 实测的「舍入后元素实际发生变化的比例」
+判据是 `tools/probe/probe_readout_precision.py` 实测的「舍入后元素实际发生变化的比例」
 （= 更新是否被保留），在 `|W|~1e-2` / `|dp|~1e-6` 档：
 
 | 格式 | 非目标行更新保留率 | 目标行保留率 |
@@ -766,7 +766,7 @@ W 以 **fp8 e4m3fn 位模式由 uint8 承载**（1 B/元素，访存收益完整
    接线需自行保证 `indptr/idx/val` 与下游 `_csr_matvec` 核的约定一致
    （列索引行内升序、无放回；本模块已保证）。
    当前状态：加速后端对非均匀行宽 **fail-fast**（`accel_readout.py:148-153`）；
-   `tools/bench_readout_sparse.py:113-160` 通过候选名探测 + 本地 `csr_from_widths`
+   `tools/bench/bench_readout_sparse.py:113-160` 通过候选名探测 + 本地 `csr_from_widths`
    回退做幂律分组扫描，**回退路径不崩整轮**。
 
 ---
@@ -783,13 +783,13 @@ W 以 **fp8 e4m3fn 位模式由 uint8 承载**（1 B/元素，访存收益完整
 | `eval_corpus/ood_wiki.txt` | **20,187** | 远域（OOD）探针 |
 
 ⚠ **字符数口径**：`27,034` = Python `open(..., encoding="utf-8").read()` 的返回值
-（`tests/eval_suite.py:38-40` 的实际口径，也是本文一切评测数字的基准）。
+（`tests/evals/run_eval_suite.py:38-40` 的实际口径，也是本文一切评测数字的基准）。
 该文件在磁盘上是 **CRLF** 行尾（363 个 `\r\n`、73,934 字节），按字节解码是 **27,397**
 字符、按 `\n` 归一后是 **27,034**。`ood_wiki.txt` 同理（磁盘 CRLF 20,212 / 归一 20,187，
-56,891 字节、25 行）。**`tools/rebaseline.py:29` 的注释写「27,405 字符」，与这三个口径
+56,891 字节、25 行）。**`tools/eval/rebaseline.py:29` 的注释写「27,405 字符」，与这三个口径
 都不符** —— 见 §9。
 
-**评测配置**（`tests/eval_common.py:15-18`）：`BASE` = 256 维栈（`n_sdr=n_mid=n_top=256`）、
+**评测配置**（`tests/evals/eval_common.py:15-18`）：`BASE` = 256 维栈（`n_sdr=n_mid=n_top=256`）、
 `k_sparse=32`、`eta_pc=eta_oja=0`、`eta_stdp=0.02`、`seed=11`、`pred_in_readout=True`；
 `SEG` = `dict(max_len=6, min_count=5, min_entropy=1.0)`。
 ⚠ **评测显式传 `k_sparse=32`**（12.5%），与库默认 16（6.25%）**不同口径**。
@@ -816,7 +816,7 @@ W 以 **fp8 e4m3fn 位模式由 uint8 承载**（1 B/元素，访存收益完整
 **统一读取层**（`phdnet/corpus.py`）：`load_text` / `iter_texts` / `write_parquet` /
 `corpus_stats` / `open_parquet_source`，支持 txt / parquet / jsonl 三形态。
 **兼容性铁律**（`corpus.py:14-19`）：只**新增**读取能力，不改动既有默认路径 ——
-`tests/eval_common.py` 仍读纯文本 `.txt`，行为逐位不变。
+`tests/evals/eval_common.py` 仍读纯文本 `.txt`，行为逐位不变。
 
 **其它 CLI 语料开关**：`--data-lang {all,zh,en}`（默认 `all`；按 parquet `lang` 列过滤，⚠ P119 从 `--lang` 拆出——`--lang` 现只管终端语言、默认 `en`；原 `--lang {all,zh,en}`（默认 `all`；按 parquet `lang` 列过滤，
 **词表扫描不受影响** —— 词表是训练流的超集，OOV 恒 0）、`--vocab-scan {head,full}`
@@ -839,10 +839,10 @@ W 以 **fp8 e4m3fn 位模式由 uint8 承载**（1 B/元素，访存收益完整
 | 层级 | 命令 / 脚本 | 口径 |
 |---|---|---|
 | **零回归门禁** | `python tests/run_tests.py fast` | 分层回归（版本一致性、核心三实验、容量层小规模、词级 LM 冒烟…），**< 1 分钟**。`--full` 叠加耗时验收 |
-| **专项验证** | `tests/verifiers/*.py` | **21 个**独立验证脚本（CSR 等价、融合核逐位、加速器对拍、稀疏读出门禁、检查点往返、分片一致性、精度探针…） |
-| **基线锚点** | `tools/rebaseline.py` | 两个口径（4,000 字符 / 全语料）+ 吞吐 + 主干连接率 |
+| **专项验证** | `tests/gates/gate_*.py` | **21 个**独立验证脚本（CSR 等价、融合核逐位、加速器对拍、稀疏读出门禁、检查点往返、分片一致性、精度探针…） |
+| **基线锚点** | `tools/eval/rebaseline.py` | 两个口径（4,000 字符 / 全语料）+ 吞吐 + 主干连接率 |
 
-`tests/eval_suite.py` 是**跨任务对照评测**（PHD-Net vs nanoGPT 级 Transformer，
+`tests/evals/run_eval_suite.py` 是**跨任务对照评测**（PHD-Net vs nanoGPT 级 Transformer，
 同语料 / 同字符预算）：任务 1 语言建模、任务 2 延迟复制、任务 3 单样本记忆、
 任务 4 持续学习 BWT、任务 5 多跳链式推理、任务 6 效率。
 
@@ -858,7 +858,7 @@ W 以 **fp8 e4m3fn 位模式由 uint8 承载**（1 B/元素，访存收益完整
 
 ### 7.3 现行锚点
 
-⚠ **锚点是历史值，与代码无绑定**。`tools/rebaseline.py:29` 的 `ANCHOR` 字典：
+⚠ **锚点是历史值，与代码无绑定**。`tools/eval/rebaseline.py:29` 的 `ANCHOR` 字典：
 
 | 口径 | 锚点 |
 |---|---|
@@ -915,11 +915,11 @@ W 以 **fp8 e4m3fn 位模式由 uint8 承载**（1 B/元素，访存收益完整
 |---|---|---|---|
 | 1 | `phdnet/config.py:197` vs `train/train.py:467` | `readout_conn_k` **库默认 0（稠密）**、**生产 CLI 默认 128** | 两者都写，并标明各自口径 |
 | 2 | `docs/文档写作规范.md` §2.2 表 | 仍写「M6 读出**100% 稠密 = 架构欠账**」 | **已过时**。P108（2026-10-01）起 CLI 默认 `readout_conn_k=128`（4.2% 连接率）；P111 起加速器已实现均匀 k 的 gather-GEMV |
-| 20 | `tools/rebaseline.py:9-10` / `phdnet/sparse_pc.py:29-32` | P124 之后 M6 已**三层稀疏化**（均匀 k / 加速器 gather-GEMV / 幂律异质），但 `phdnet/sparse_alloc.py` docstring 的「未接入 `readout.py`」**已过时** | **P124 已接入**（`alpha=0` 逐位等价）。建议把该 docstring 改成「P124 起已接入，默认 alpha=0」 |
+| 20 | `tools/eval/rebaseline.py:9-10` / `phdnet/sparse_pc.py:29-32` | P124 之后 M6 已**三层稀疏化**（均匀 k / 加速器 gather-GEMV / 幂律异质），但 `phdnet/sparse_alloc.py` docstring 的「未接入 `readout.py`」**已过时** | **P124 已接入**（`alpha=0` 逐位等价）。建议把该 docstring 改成「P124 起已接入，默认 alpha=0」 |
 | 21 | 幂律的**词频来源** | 文档若写「按词频分配」而不提来源，会误导读者以为用的是真实 Zipf 频次 | 实为**代理值** `1/rank`（`word_lm.py::_powlaw_proxy_counts`），因构造期语料未流过；且词表是**字典序非频次序** → 代理依据不足。**默认 alpha=0**，见 §2.7.1 |
 | 22 | `phdnet/backends/accel_readout.py:148-153` | `AccelReadout.__init__` 只在**构造期**检查行宽均匀性 | 幂律路径下会走到构造期抛 `ValueError` → 被 `pick_readout_backend` 兜底 except 吞掉 → **回落原因丢失**。**P124 已在 `_unsupported_reason` 提前拒绝**（P19 纪律） |
-| 3 | `tools/rebaseline.py:29` 注释 | 写「冻结语料 **27,405** 字符」 | 三个口径：磁盘 CRLF **27,397** / 归一 **27,034**（= `eval_suite` 实际）/ 73,934 字节。**27,405 与三者都不符** |
-| 4 | `tools/rebaseline.py:9-10` docstring | 仍写「冻结语料 **23,504** 字符」+ 旧锚点 `96.7241 / 77.5261` | 与同文件 `ANCHOR` 字典（`394.4687 / 359.2603`）**自相矛盾** |
+| 3 | `tools/eval/rebaseline.py:29` 注释 | 写「冻结语料 **27,405** 字符」 | 三个口径：磁盘 CRLF **27,397** / 归一 **27,034**（= `run_eval_suite` 实际）/ 73,934 字节。**27,405 与三者都不符** |
+| 4 | `tools/eval/rebaseline.py:9-10` docstring | 仍写「冻结语料 **23,504** 字符」+ 旧锚点 `96.7241 / 77.5261` | 与同文件 `ANCHOR` 字典（`394.4687 / 359.2603`）**自相矛盾** |
 | 5 | `docs/文档写作规范.md` §2.2 / §2.7 | 1B 档容量写 `1.370e9`（稠密读出、V=51,962 口径） | **三个都对**：V=51,962/k=128 → **1.2172e9**；V=73,958/k=128 → 1.2201e9；V=51,962/k=0 → 1.3702e9。差异来自词表与稀疏档位，必须标明 |
 | 6 | `docs/文档写作规范.md` §2.2 表 | M1 写「输出 **12.5%** 稀疏」 | 库默认 `k_sparse=16`/`n_sdr=256` = **6.25%**；12.5% 是评测口径（`k_sparse=32`）与 1B 档（128/1024） |
 | 7 | ~~`docs/文档写作规范.md` §2.4 / §2.8 写「读出 **CLI 默认 fp16**（库 config 默认 bf16）」~~ | ✅ **两处均已过时，现行口径 = CLI 与库 config 都是 `fp8`**（`config.py:318`、`train/train.py:324`，P189 2026-10-07）。`文档写作规范.md` §1 禁止表与 §2.4 已同步为 fp8，并注明「fp32 默认是 P110 的历史口径」 | 🟢 已修。本表保留此行作为**「修正一次 ≠ 永久正确」**的实例：P110 改 fp32 → P163 改 fp16 → **P189 改 fp8** |
@@ -928,8 +928,8 @@ W 以 **fp8 e4m3fn 位模式由 uint8 承载**（1 B/元素，访存收益完整
 | 10 | ~~`train/train.py:250-255`~~ | ~~`--m2-kernel` 的 `default="serial"`，但 help 文本写「**默认 plain**」~~ | **P113 已修**：默认改`plain`（有服务器实测支撑），help 同步为实测数字（现行 `train/train.py:394`）。见§1 M2 三态核 |
 | 11 | `phdnet/sparse_pc.py:29-32` 文档字符串 | 说「开关（默认关闭，默认路径逐位不变）：`cfg.sparse_conn` —— True 时主干改用本模块」 | **已过时**（写于稠密栈仍在时）。2026-09-28 稠密栈已删除，`sparse_conn` 恒 `True`，False 会 fail-fast |
 | 12 | `phdnet/config.py:84-85` vs `phdnet/model.py:53-57` | config 仍保留 `backend` / `torch_dtype` 字段和「昇腾部分型号建议 float16」的说明 | `model.py` 对非 `auto/numpy/cpu` 的 backend **fail-fast**（旧 torch 栈已随 P30 删除）。字段为**兼容保留** |
-| 13 | ~~`tools/bench_readout_sparse.py:113-115` 注释~~ | ~~「`sparse_alloc.py` 由另一位同事并行实现中」~~ | ✅ **已过时并已解决**：`phdnet/sparse_alloc.py` 已存在，**且 P124 已接入 `readout.py`**（`:574-579`，幂律路径 import `sparse_alloc.build_powlaw_csr`，`alpha=0` 逐位等价于均匀 k）。该注释仍在声称「预留接口 / 未就绪」→ 🔴 **活跃的误导性注释，建议回修**（与本表第 20 行是同一件事的两面） |
-| 14 | `tools/audit_brain_parity.py:139-146` | A4 结论仍写「直接稀疏化读出不可接受」 | 该结论基于 256 维栈 `conn_k=8`（1.0%）。1B 档取 k=128（4.2%）后 PPL 反而**更优**（477 vs 608，4M 档）—— 两者不矛盾但**口径不同**，须标明维度 |
+| 13 | ~~`tools/bench/bench_readout_sparse.py:113-115` 注释~~ | ~~「`sparse_alloc.py` 由另一位同事并行实现中」~~ | ✅ **已过时并已解决**：`phdnet/sparse_alloc.py` 已存在，**且 P124 已接入 `readout.py`**（`:574-579`，幂律路径 import `sparse_alloc.build_powlaw_csr`，`alpha=0` 逐位等价于均匀 k）。该注释仍在声称「预留接口 / 未就绪」→ 🔴 **活跃的误导性注释，建议回修**（与本表第 20 行是同一件事的两面） |
+| 14 | `tools/eval/audit_brain_parity.py:139-146` | A4 结论仍写「直接稀疏化读出不可接受」 | 该结论基于 256 维栈 `conn_k=8`（1.0%）。1B 档取 k=128（4.2%）后 PPL 反而**更优**（477 vs 608，4M 档）—— 两者不矛盾但**口径不同**，须标明维度 |
 | 15 | `phdnet/config.py` 中 `encoder_dtype` 上方的注释块 | 🔴 **2026-10-07 已重写，但重写得只对了一半** —— **本条是活跃缺陷，不是历史问题**。旧注释（写「`bf16` 语义在读出侧已由 `readout_dtype`（**默认 bf16**）落地」）**确实已删除**；现注释（`:320-329`）开头正确声明「本字段自 P75 起**默认 fp64**」、并正确写「读出侧精度由 `readout_dtype`（**默认 fp8**，P189）决定，与本字段无关」。**残留错误在上一段**：`readout_dtype` 字段正上方 `:305` 仍写「默认 **fp32**（fhz 2026-10-01 授权改回）」，而下一行 `:318` 就是 `readout_dtype: str = "fp8"` —— **同一段注释内部自相矛盾，且紧贴它所描述的字段** | 文档采用 `fp8`（`config.py:318` + `train/train.py:324` 双重核对）。**建议回修 `config.py:305`**：删掉「默认 fp32」，改写为「默认 fp8（P189 2026-10-07）；P110 的 fp32 默认是历史口径」，并把 P110 的 fp8 保留率警告保留在案 |
 
 ---

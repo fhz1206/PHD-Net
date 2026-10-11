@@ -14,7 +14,7 @@ fhz 要求「计算类型的东西就要跑在 NPU 上」。读出是唯一值�
 因此本模块提供**混合执行**：数据侧（分词/编码）CPU + 读出 NPU。
 
 精度判据：跨设备为**容差一致**（归约顺序不同，不宣称逐位）；同设备
-（torch CPU vs torch CPU）逐位一致。验证见 `tests/verifiers/verify_accel_readout.py`。
+（torch CPU vs torch CPU）逐位一致。验证见 `tests/gates/gate_accel_readout.py`。
 
 接口与 `phdnet.readout.Readout` 对齐（forward / learn_softmax / W / n_synapses），
 因此可作为 `PHDNetConfig.accel_readout` 开关的后端；**无加速器时自动回落原
@@ -1062,7 +1062,7 @@ class AccelReadout:
         # `_to_dev` 而**不是** `_staged_to_dev`（前者不做 pinned 暂存），
         # 只在 `_staged_to_dev` 里递增会让本路径的 epoch 恒定不变，
         # `_sp_gather` 于是把上一步的 gather 结果错误地复用给新 h。
-        # （第一版遗漏此处 → verify_accel_sparse A1 立刻报数值不一致。）
+        # （第一版遗漏此处 → gate_accel_sparse_readout A1 立刻报数值不一致。）
         self._ht_epoch += 1
         ht = self._to_dev(h)
         try:
@@ -1520,7 +1520,7 @@ class AccelReadout:
         return int(self.W.numel())
 
     # ---- 与 Readout 的属性/方法面对齐（P23：三次崩溃的根治）----
-    # 全仓库对 `readout.X` 的访问面（见 tests/verifiers/verify_accel_readout.py
+    # 全仓库对 `readout.X` 的访问面（见 tests/gates/gate_accel_readout.py
     # 的接口扫描用例）：W / learn_softmax / learn / __call__ / n_synapses /
     # **conn_k** / **hidden** / **stats()**。前五项首版已实现，conn_k（ckpt 保存
     # 会访问）与 stats（诊断脚本会访问）缺失 → 生产保存检查点时崩溃。

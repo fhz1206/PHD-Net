@@ -187,4 +187,4 @@ class WorkingMemory:
     #
     # ③ 因此 `wm_decay_read` 核**保留在 .pyx 里**（自检 C3/C4 会跑它，
     #    保证它一旦将来被启用是对的），但**默认无任何调用点**。
-    #    门禁 `verify_cykernels.py` 的 C3/C3b/C4 组就是它的保护网。
+    #    门禁 `gate_cython_kernels.py` 的 C3/C3b/C4 组就是它的保护网。

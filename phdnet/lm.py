@@ -74,7 +74,7 @@ class PHDNetLM:
             #      net.wm.slots maxΔ=1.19，heldout PPL 9.5564 vs 9.8475（−3.0%）
             #      ——「评估」污染了训练，A/B 对照全部失效。
             # 对照实现：phdnet/word_lm.py:227（B5 修复，早就传了 readonly=True）。
-            # 门禁：tests/verifiers/verify_eval_readonly.py（(a) 连评逐位相等、
+            # 门禁：tests/gates/gate_eval_readonly.py（(a) 连评逐位相等、
             # (b) 快照零副作用、(c) 评估后再训练与不评估等权）。
             y = self.net.step(self.tok.encode(text[t]), learn=False, readonly=True)["y"]
             y = y - y.max()
@@ -89,7 +89,7 @@ class PHDNetLM:
         2026-10-07 P0-1 同步：本路径**不调用 step()**，只走 encoder.encode /
         pc.infer / wm.read / stdp.predict / readout 五个纯函数（不写任何持久状态），
         与 evaluate 的 readonly 契约一致 —— **零状态副作用**。
-        门禁 tests/verifiers/verify_eval_readonly.py (b*) 会对它做快照核验。
+        门禁 tests/gates/gate_eval_readonly.py (b*) 会对它做快照核验。
         """
         s0, _ = self.net.encoder.encode(x)
         cache = self.net.pc.infer(s0, self.net.cfg.n_infer_steps)

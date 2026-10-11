@@ -39,7 +39,7 @@ fhz 2026-10-03 指令
 - 量化 = `round(W / scale)`，**half-to-even**（与 torch.round 一致，
   见 P151 门禁「np.rint vs torch.round 都是 banker's rounding」）；
 - clamp 到 ±127（int8 的 qmax）。
-- ⚠ **逐位对拍**由 `tests/verifiers/verify_fp8_int8_convert.py` 把关，
+- ⚠ **逐位对拍**由 `tests/gates/verify_fp8_int8_convert.py` 把关，
   基准是 P153 的纯 torch 路径。
 """
 from __future__ import annotations

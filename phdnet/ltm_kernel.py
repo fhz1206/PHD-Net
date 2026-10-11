@@ -19,7 +19,7 @@ fhz 2026-09-29：「给可以用 numba 来加速的都用上」。本模块覆�
 即便串行，收益也来自「消除 Python 解释开销 + 释放 GIL」（原实现每个绑定维度
 约 50–100 ns 解释器开销，C 内约 1–2 ns）。
 
-**逐位一致**（`tests/verifiers/verify_ltm_kernels.py` 把关）：遍历次序、累加
+**逐位一致**（`tests/gates/gate_ltm_kernels.py` 把关）：遍历次序、累加
 次序、浮点加法顺序全部与 Python 版一致。
 `learn` / `predict` 的多核化需要把在线 CSR 存储改成连续数组（避免
 gather/scatter 拷贝），属独立立项，本模块不含。

@@ -22,7 +22,7 @@
 >
 > **结论**：`--readout-pipeline` 已实现为开关但**强制 fail-fast**（传了直接报错退出）。
 > 本文保留作为**决策记录**（说明当初为什么想做、以及为什么现在判定不做），
-> **不再作为待执行计划**。证据：`tests/verifiers/verify_overlap_contract.py`（19/19）。
+> **不再作为待执行计划**。证据：`tests/gates/gate_cpu_npu_overlap_contract.py`（19/19）。
 > 仍待实测的相邻候选见 `PHD-Net_性能评估与迭代方案.md` §8.3（候选 1/6/7）。
 >
 > ---
@@ -139,7 +139,7 @@ NPU:            [RO_t]  [RO_{t+1}]  [RO_{t+2}]
 ```
 
 **门禁**：
-- 新建 `tests/verifiers/verify_pipeline.py`：同一 seed 下，`--pipeline-depth 0`
+- 新建 `tests/gates/verify_pipeline.py`：同一 seed 下，`--pipeline-depth 0`
   与 `N=1/2/3` 的 **PPL 轨迹逐点对比**（不是最终 PPL，是整条轨迹）；
 - `--help` 门禁自动覆盖；
 - **零回归判据**：depth=0 必须与当前默认**逐位一致**（否则方案本身有 bug）。
@@ -163,7 +163,7 @@ M4b 的 imprint 是**写**（事件驱动），recall 是**读**。当前每步�
 （同样涉及「跨 token 延后执行 + 保序」）。如果方案 A 保序做对了，B 基本白送；
 如果 A 失败，B 仍有 6% 的独立价值。
 
-**门禁**：`verify_ltm_learn_batch` 已有 5 例对拍（批量 learn），扩展它即可。
+**门禁**：`gate_ltm_learn_batch` 已有 5 例对拍（批量 learn），扩展它即可。
 
 ---
 
@@ -196,7 +196,7 @@ M4b 的 imprint 是**写**（事件驱动），recall 是**读**。当前每步�
 **收益估计**：若能把 7.83 压到 3 ms，端到端 → ~7.3 ms（1.65×），
 **比方案 A 的 1.53×还好，且不碰训练主循环**。
 
-**门禁**：`tools/bench_accel.py`（三档 + 等效带宽 GB/s）+ `verify_accel_sparse` 39 例。
+**门禁**：`tools/bench/bench_readout_devices.py`（三档 + 等效带宽 GB/s）+ `gate_accel_sparse_readout` 39 例。
 
 ---
 
@@ -259,7 +259,7 @@ step(t):
 第 0 步 ✅已完成
   └─ 文档已全部同步 P113 实测数字（性能/并行/后端/扩展/竞争力/写作规范/
      架构设计 7 份），并新增本文与 tools/diag_readout_npu.py、
-     tests/verifiers/verify_m2_kernels.py
+     tests/gates/gate_m2_infer_kernels.py
 
 第 1 步（低风险，6%）
   └─ 方案 B：M4b imprint 批量化/延后 → ~11.4 ms

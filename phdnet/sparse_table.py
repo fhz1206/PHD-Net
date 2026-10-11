@@ -223,7 +223,7 @@ class OnlineCSRTable(SparseSynapseTable):
 
     逐位等价（关键设计）：行的槽位顺序 = 首次生长顺序，与 dict 版的插入顺序一致；
     `predict` 按槽位顺序累加、`learn` 逐键独立更新 → 与 dict 版**逐位相同**，
-    可用 `tests/verifiers/verify_csr_equiv.py` 对拍验证。
+    可用 `tests/gates/gate_ltm_csr_equivalence.py` 对拍验证。
 
     行扩容：满 `row_cap` 后按 2× 增长（amortized O(1)），上限 m_out（硬容量）。
     """
@@ -355,8 +355,8 @@ class OnlineCSRTable(SparseSynapseTable):
         if self.growth_guidance and len(cur) > 1:
             grow_order = sorted(cur, key=lambda k: self.in_deg.get(k, 0))
         # P78：批量多核路径（aarch64 上一次 imprint 的 Python learn 要 ~20 s，
-        # 只占 1 个核）。逐位对拍见 tests/verifiers/verify_ltm_learn_batch.py。
-        # P103：阈值走属性而非硬编码——否则 verify_ltm_learn_batch 的
+        # 只占 1 个核）。逐位对拍见 tests/gates/gate_ltm_learn_batch.py。
+        # P103：阈值走属性而非硬编码——否则 gate_ltm_learn_batch 的
         # `BATCH_MIN_COMBOS = 10**18 / 1` 切换**完全无效**，对拍脚本在拿批量
         # 路径和自己比（审查实测：baseline 臂也走了 _learn_batch）。
         if NUMBA_LTM and len(prev) * len(grow_order) >= self.BATCH_MIN_COMBOS:

@@ -1,0 +1,20 @@
+PASS off
+PASS invalid
+PASS prebuilt
+PASS auto-failure
+PASS force-failure
+PASS auto-systemexit
+PASS force-systemexit
+PASS force-missing-setup
+PASS force-postbuild-missing
+PASS direct-build-cache
+PASS keyboard-interrupt
+PASS m2-force
+PASS m3-force
+PASS model-force
+PASS model-isolation
+PASS train-force
+PASS setup-paths
+cython loader: 17/17 PASS
+
+[stderr]

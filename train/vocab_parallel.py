@@ -85,7 +85,7 @@ def build_segmenter_parallel(text: str, seg_kwargs: dict | None = None,
                              workers: int = 0):
     """词涌现多核构建（P18：numba nogil + prange，层间**线程池**零 pickle）。
 
-    引擎二选一（词集合逐位一致，verify_vocab_parallel A 例把关）：
+    引擎二选一（词集合逐位一致，gate_vocab_parallel A 例把关）：
       - numba 可用 → `phdnet.word_induce_numba`：层内 prange（默认核数/10 线程）
         + 层间 ThreadPoolExecutor（nogil 释放 GIL → 真并行）；
       - 否则 → 原 numpy `_induce_length` + ProcessPoolExecutor（回退路径）。

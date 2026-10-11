@@ -18,7 +18,7 @@ fhz 问「为啥哪怕 nogil 也不会吃满所有核心」——因为 nogil �
 
 ⚠ 浮点口径：原实现是「压缩非零 + 1D pairwise Σ p log p」，本核用解析式
    H = log(Σc) − (Σ c log c)/Σc（数学等价、无灾难性抵消）。差异 1 ulp 量级，
-   `tests/verifiers/verify_word_induce.py` 给出实测词集合差异数（预期 0）。
+   `tests/gates/verify_word_induce.py` 给出实测词集合差异数（预期 0）。
 """
 
 from __future__ import annotations

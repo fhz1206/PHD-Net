@@ -230,6 +230,10 @@ def main() -> None:
                          "注意本入口推理为 numba CPU 生产路径（单路）；"
                          "P30 已删除 torch 全栈（tools/train_torch_lm.py，缺 7 项机制），"
                          "当前无可用的多卡/加速器推理轨")
+    ap.add_argument("--verbose", action="store_true",
+                    help="打印完整启动说明（设计动机 / P 编号考古等长篇解释）；"
+                         "默认关闭，启动横幅只留一行事实摘要（关键字保留，"
+                         "可 grep）")
     ap.add_argument("--lang", choices=["en", "zh"], default="en",
                     help="**终端输出语言**（P119）：**默认英文**；"
                          "--lang zh 输出中文。对推理结果**无任何影响**。")
@@ -240,6 +244,9 @@ def main() -> None:
     install_stream_filter()
 
     # ---- 设备探测（诚实声明：1B 生产推理为 numba CPU 单路，不假装多卡）----
+    # 瘦身：默认一行事实（grep 关键字：infer / numba CPU / P30）；
+    # 「为什么没有加速推理轨」的原理说明挂 --verbose。
+    _infer_verbose = getattr(args, "verbose", False)
     try:
         from phdnet.backends.multi_device import (capability_report,
                                                   plan_parallel, probe_multi,
@@ -254,10 +261,13 @@ def main() -> None:
             print(f"[infer] 多卡计划（参考 torch 栈）："
                   f"{plan_parallel(devs, 0, 0)['strategy']}")
         _cap = capability_report(verbose=False)
-        print(f"[infer] 本入口推理走 numba CPU 生产路径（numba 只能编译到 CPU 机器码；"
-              f"探测到的加速器 {_cap['accelerators_present'] or '无'} 仅训练时的读出段"
-              f"会用上——推理侧无加速轨：P30 已删除 torch 全栈"
-              f"（tools/train_torch_lm.py，缺 7 项机制含 big_ltm，权重亦不通用）。")
+        print(f"[infer] 本入口推理走 numba CPU 生产路径"
+              f"（探测到的加速器 {_cap['accelerators_present'] or '无'} 仅"
+              f"训练时的读出段会用上；推理侧无加速轨，P30）"
+              + ("" if not _infer_verbose else
+                 " —— 原理（--verbose）：numba 只能编译到 CPU 机器码；P30 已"
+                 "删除 torch 全栈（tools/train_torch_lm.py，缺 big_ltm 等 7 项"
+                 "机制，权重亦不通用）。"))
     except Exception as e:                                   # noqa: BLE001
         print(f"[infer] 设备探测不可用（{type(e).__name__}: {e}），"
               "按 CPU 单路继续。")

@@ -2,11 +2,11 @@
 
 设计原则：
   1. **同一份算子代码覆盖所有后端**——torch 后端只改 device/dtype，不改动算法语义
-     （加速读出 `AccelReadout` 的对拍见 tests/verifiers/verify_accel_readout.py）。
+     （加速读出 `AccelReadout` 的对拍见 tests/gates/gate_accel_readout.py）。
   2. **永远可回退**：无加速器或缺少依赖时自动回退 numpy(+numba) CPU 路径，
      默认行为与既有实现逐位一致（零回归）。
   3. **数值等价有门槛**：任何非 numpy 后端启用前必须通过对拍验证
-     （`tests/verifiers/verify_accel_readout.py`；容差判据，跨设备不宣称逐位）
+     （`tests/gates/gate_accel_readout.py`；容差判据，跨设备不宣称逐位）
      与 numpy 参考实现的等价性检验（沿用 numba 自检 bug 的教训）。
 
 生态说明（诚实）：
@@ -164,7 +164,7 @@ def _verify(torch, device: str, hip) -> bool:
     死代码（还会误导读者以为自检还能跑）。等价性对拍的新归属见 docstring 提示。
     """
     # selftest_torch 已随旧 torch 栈删除（P30）；等价性对拍改由
-    # tests/verifiers/verify_accel_readout.py 承担。
+    # tests/gates/gate_accel_readout.py 承担。
     return False
 
 

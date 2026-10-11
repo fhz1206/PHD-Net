@@ -2,7 +2,7 @@
 
 fast（默认，< 1 分钟）：版本一致性、核心三实验、容量层小规模、词级 LM 冒烟、
                        大容量 LTM 冒烟、长程复制、后端三项、开关可构造。
-full：叠加全部耗时验收脚本（demo_lm / demo_m1 … demo_m4 / demo_strength / eval_suite）。
+full：叠加全部耗时验收脚本（demo_char_lm / demo_m1_encoder_modulation … demo_m4_capacity / demo_homeostasis / run_eval_suite）。
 
 向后兼容：旧的位置参数 `fast`（`python tests/run_tests.py fast`）仍等价于
 `--fast`；未给任何参数时默认 fast。
@@ -30,8 +30,15 @@ from checks_core import (t_bigltm_smoke, t_brain_homologues, t_capacity_small,
                          t_core_demo, t_copy_task, t_switches_construct,
                          t_version, t_word_lm_smoke)
 
-FULL_SCRIPTS = ["demo_lm.py", "demo_m1.py", "demo_m2.py", "demo_m3.py",
-                "demo_m4.py", "demo_m9.py", "demo_strength.py", "eval_suite.py"]
+# full 层脚本：按功能分类后的实际位置（demos/ 与 evals/）。
+# ⚠ 以前这份清单在 checks_core.py 末尾有一份**完全重复**的死副本 —— 已删除，
+#    两处不同步正是那次重复埋的坑。
+FULL_SCRIPTS = [
+    "demos/demo_char_lm.py", "demos/demo_m1_encoder_modulation.py",
+    "demos/demo_m2_emergence.py", "demos/demo_m3_schedule.py",
+    "demos/demo_m4_capacity.py", "demos/demo_m9_optimizations.py",
+    "demos/demo_homeostasis.py", "evals/run_eval_suite.py",
+]
 
 
 def run_full() -> None:

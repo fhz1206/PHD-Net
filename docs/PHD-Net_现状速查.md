@@ -13,13 +13,13 @@
 
 ## 2. 工程 / 目录现状
 
-- 训练入口 **`train/train.py`**（train_1b/ 已改名 train/）；推理 `train/infer.py`；容量验证 `tools/train_1b_capacity.py`；torch 轨已删（P30）。
-- 产物 `outputs/{test,experiments,smoke,models}`；对话 `chat/`；验证 `tests/verifiers/`（**别写死数量**，`ls tests/verifiers/*.py` 现查；fast 门禁 9/9）。
+- 训练入口 **`train/train.py`**（train_1b/ 已改名 train/）；推理 `train/infer.py`；容量验证 `tools/train/train_1b_capacity.py`；torch 轨已删（P30）。
+- 产物 `outputs/{test,experiments,smoke,models}`；对话 `chat/`；验证 `tests/gates/`（**别写死数量**，`ls tests/gates/gate_*.py` 现查；fast 门禁 9/9）。
 - 版本 v0.1.0-alpha（已并入 main）；历史 force push 过，**旧 hash 全失效，服务器 clone 须 reset --hard**。
 - CI **两套**：`.gitcode/workflows/ci.yml`（GitCode）+ `.github/workflows/ci.yml`（GitHub 镜像）。⚠ **仓库没有 Jenkinsfile** —— 旧版本这里写「三套并存」，是错的。GitHub 侧当前仍红（无日志权限，待 traceback）
 - `requirements.txt`：numpy>=2.0 / numba>=0.60 / psutil / pyarrow 必装，torch 可选。
 - 词表快照唯一权威 = **JSON**（words+seg_vocab+max_len+sha1）；`tok_vocab≠tok_tokens`，推理校验比 tok_tokens。
-- `tools/bench_local.py` 只测本机 CPU 相对变化，**不产出文档数字**。
+- `tools/bench/bench_cpu_local.py` 只测本机 CPU 相对变化，**不产出文档数字**。
 
 ## 3. 现行默认值
 
@@ -70,7 +70,7 @@
   `.item()`/`.cpu()`** —— 唯一显式同步被 `nll_sync_every` 门控。故「12.09 = 4.26 + 7.83 完全串行」
   若真存在，成因是**运行时下发/队列背压**，**不是**代码里的显式同步。
   要证实这一点需要服务器 `msprof`，**本机（x86、无昇腾）无法验证**，故不给结论。
-  门禁把这一事实钉死：`tests/verifiers/verify_overlap_contract.py`（23/23）。
+  门禁把这一事实钉死：`tests/gates/gate_cpu_npu_overlap_contract.py`（23/23）。
 
   ⚠ **P192 同时更正了「推理侧也要重叠」这个提法**（当前自回归推理有跨 token 数据依赖）：
   | | 训练步 | 推理步 `sample_next` |
@@ -97,7 +97,7 @@
 - **完整实测值、平台、配置及归因记录**集中在
   [性能评估与迭代方案 §10.1](PHD-Net_性能评估与迭代方案.md#101-评测锚点)。
   这些是 x86 本机结果，**不是昇腾/NPU 测量**；修正后须另建版本化基线，历史锚点不覆盖。
-- 复测命令 `tools/rebaseline.py`。⚠ 该脚本**只对比不更新** `ANCHOR`；更新锚点前必须先
+- 复测命令 `tools/eval/rebaseline.py`。⚠ 该脚本**只对比不更新** `ANCHOR`；更新锚点前必须先
   定性「是回归还是口径变更」，并写明是两者中的哪一个。
 - 容量口径（带 readout_conn_k 与词表）：生产 conn_k=128 → 1.217e9；稠密读出同词表 1.370e9；30b preset big_n 2^29 × big_m 56。
 - 1B 档读出规模：vocab 73,958 × n_h 3,072；稀疏 k=128 = 113.6 MB/步（稠密 fp32 866.7 MiB，8.0× 省）；稀疏后每步字节流量 229.15 MiB。
@@ -127,9 +127,9 @@ P188 fhz「删除 rust 版本，默认全部改回 python」）。下面标 🔴
 
 ## 6. 数据与训练现状
 
-- 预训练 = 中英全量 3906 万块（52 parquet 分片 4.8GB）；SFT 用 assistant-marker 双标记状态机（只对回复计损失）；两阶段 `--init-from`；RL = REINFORCE（`tools/train_rl.py`，奖励稀疏→优势恒 0 有诊断）。
+- 预训练 = 中英全量 3906 万块（52 parquet 分片 4.8GB）；SFT 用 assistant-marker 双标记状态机（只对回复计损失）；两阶段 `--init-from`；RL = REINFORCE（`tools/train/train_rl.py`，奖励稀疏→优势恒 0 有诊断）。
 - 远程数据 `ms://owner/dataset/path`（ModelScope 直连 API，HTTP Range 流式零落盘，勿 lfs pull）；生产仓 `ms://fhzfhz/Mixture-General-Mini/`（pretrain 52 分片 / sft 178MB）；`--data pretrain|pretrain_zh|sft` 自动走远程。
-- 本机 `datasets/` 已删（32.28 GiB，git LFS 历史可恢复）；`tools/fetch_l3.py` / `fetch_ms.py` 三源采样（994 GB 源，统一 schema text/lang/src）。
+- 本机 `datasets/` 已删（32.28 GiB，git LFS 历史可恢复）；`tools/data/fetch_ultrafineweb_l3.py` / `fetch_ms.py` 三源采样（994 GB 源，统一 schema text/lang/src）。
 - 语料角色：UltraInteract 英文 SFT、deepctrl 中文 SFT、Magpie-R1 与 Ultra-FineWeb-L3 = 预训练。
 - 🔴 `phdnet_rs/src/acl.rs` 曾是纯传输层（无计算核）；NPU 计算实际走 Python torch_npu（`accel_readout.py`）。CANN Rust 库（cann/cann-sys、rust-ascend、ascend-rs）调研完成，均需 aarch64 + CANN SDK 在服务器做 —— ⚠ **但 P188 已删掉 `phdnet_rs/`，故 CANN 若要接只能走 Cython（`libacl_rt.so`）或 ctypes，不是 Rust**。
 
@@ -140,7 +140,7 @@ P188 fhz「删除 rust 版本，默认全部改回 python」）。下面标 🔴
 3. 幂律变长 CSR 的稀疏读出（加速器只支持均匀 k，非均匀行宽 fail-fast）。
 4. fp32 化（P173 + P176 融合核 fp32 统一）后须重新 rebaseline。
 5. stepfun 报告两方向：列稀疏 update（次级杠杆，forward 319MB 不可省）、CSR idx 压缩 uint16（1.43×，val 不能降 bf16）。
-6. `bench_local.py` 测 fp64 而生产 fp32 的门禁盲点待修；verifier 门禁会腐烂 → 定期全量跑（`ls tests/verifiers/*.py` 现查数量，⚠ 别写死）。
+6. `bench_local.py` 测 fp64 而生产 fp32 的门禁盲点待修；verifier 门禁会腐烂 → 定期全量跑（`ls tests/gates/gate_*.py` 现查数量，⚠ 别写死）。
 7. `phdnet/generate.py` 字符级老接口清理待 fhz 确认。
 8. GitHub Actions 状态待确认绿（根因已修）。
 
@@ -155,7 +155,7 @@ P188 fhz「删除 rust 版本，默认全部改回 python」）。下面标 🔴
 - 换后端必须对齐完整调用面（__call__/learn/learn_softmax/W/conn_k/hidden/stats/n_synapses，A4 扫全仓库）；未实现配置回落+记原因；用显式标识 `_is_accel` 不用 hasattr 猜。
 - fast 门禁不 import train 入口 → 改 `train/*.py` 后单独 py_compile / `--help`；verifier 比对两端须同一时刻、门禁用生产尺寸。
 - gitcode 推送：`git -c credential.helper= -c credential.helper="!<wincred.exe 绝对路径>" push origin main`（PAT 存 wincred）；>100MiB 拒、LFS 配额满、仓库限额 1.0 GiB。
-- `tools/rebaseline.py` 打印的「连接率」是 M2 主干（非 M6 读出 4.2%）。
+- `tools/eval/rebaseline.py` 打印的「连接率」是 M2 主干（非 M6 读出 4.2%）。
 
 ## 附录：已过时 / 已被推翻主题（明细见 BUGS.md 与 git 历史）
 

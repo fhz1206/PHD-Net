@@ -57,9 +57,9 @@ python train/train.py --devices auto    # 多卡：读出列并行（与 --accel
 探测 ≠ 能算，跑 `accel_doctor.py`。诊断与基准：
 
 ```bash
-python tools/backend_probe.py     # 探测层：各平台 ok / count / name
-python tools/accel_doctor.py      # 试分配 + 一次前向 matvec，验证设备真的能算
-python tools/bench_accel.py       # 读出基准，报等效带宽 GB/s（跨平台唯一可比指标）
+python tools/probe/backend_probe.py     # 探测层：各平台 ok / count / name
+python tools/probe/accel_doctor.py      # 试分配 + 一次前向 matvec，验证设备真的能算
+python tools/bench/bench_readout_devices.py       # 读出基准，报等效带宽 GB/s（跨平台唯一可比指标）
 ```
 
 ## 四、关键口径
@@ -138,10 +138,10 @@ python tools/bench_accel.py       # 读出基准，报等效带宽 GB/s（跨平
 
 | 脚本 | 覆盖 |
 |---|---|
-| `tests/verifiers/verify_accel_readout.py` | `AccelReadout` 对拍 + **接口完整性扫描**（扫全仓库 `readout.X` 访问面，断言加速后端具备） |
-| `tests/verifiers/verify_accel_readout_p55.py` | 融合核/eager × 两种 target 路径的矩阵 |
-| `tests/verifiers/verify_multi_device.py` | 设备解析 / 分片均衡与余数 / 单设备 ≡ `AccelReadout` / 分片 ≡ 单设备（逐位）/ 计划报告 / host 线程收敛 |
-| `tests/verifiers/bench_accel_path.py` | 复现读出路径的设备流量与墙钟对照 |
+| `tests/gates/gate_accel_readout.py` | `AccelReadout` 对拍 + **接口完整性扫描**（扫全仓库 `readout.X` 访问面，断言加速后端具备） |
+| `tests/gates/gate_accel_readout_p55.py` | 融合核/eager × 两种 target 路径的矩阵 |
+| `tests/gates/gate_multi_device.py` | 设备解析 / 分片均衡与余数 / 单设备 ≡ `AccelReadout` / 分片 ≡ 单设备（逐位）/ 计划报告 / host 线程收敛 |
+| `tests/gates/bench_accel_readout_path.py` | 复现读出路径的设备流量与墙钟对照 |
 | `python tests/run_tests.py fast` | 零回归门槛，**9/9** |
 
 **周边配套**（子包外，同一批变更）：`phdnet/telemetry.py::Telemetry`（CPU/RAM/NPU

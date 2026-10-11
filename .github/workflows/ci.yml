@@ -36,21 +36,21 @@ jobs:
 
       - name: 逐位对拍（分词器 / 词表并行 / 并行核一致性）
         run: |
-          python tests/verifiers/verify_seg_equiv.py
-          python tests/verifiers/verify_vocab_parallel.py
-          python tests/verifiers/verify_parallel_consistency.py
+          python tests/gates/gate_word_segmenter_equivalence.py
+          python tests/gates/gate_vocab_parallel.py
+          python tests/gates/gate_parallel_consistency.py
 
       - name: Cython 与审计修复门禁
         run: |
-          python tests/verifiers/verify_cython_loader.py
-          python tests/verifiers/verify_cykernels.py
-          python tests/verifiers/verify_cython_switch.py
-          python tests/verifiers/verify_stdp_parity.py
-          python tests/verifiers/verify_eval_readonly.py
-          python tests/verifiers/verify_wm_modulator.py
-          python tests/verifiers/verify_perf_no_regression.py
-          python tests/verifiers/verify_cann_dispatch.py
-          python tests/verifiers/verify_overlap_contract.py
+          python tests/gates/gate_cython_loader.py
+          python tests/gates/gate_cython_kernels.py
+          python tests/gates/gate_cython_switch.py
+          python tests/gates/gate_stdp_parity.py
+          python tests/gates/gate_eval_readonly.py
+          python tests/gates/gate_wm_modulator.py
+          python tests/gates/gate_csr_vectorization_perf.py
+          python tests/gates/gate_cann_dispatch.py
+          python tests/gates/gate_cpu_npu_overlap_contract.py
           python -m compileall -q phdnet train tools
           python train/train.py --help
           python train/infer.py --help
@@ -63,10 +63,10 @@ jobs:
           python -c "import numba; print('numba', numba.__version__)" || true
           python -c "import pyarrow; print('pyarrow', pyarrow.__version__)" || true
           python -c "import torch; print('torch', torch.__version__)" || true
-          echo '--- 重跑 verify_parallel_consistency（完整 traceback）---'
-          python tests/verifiers/verify_parallel_consistency.py; echo "exit=$?"
-          echo '--- 重跑 verify_seg_equiv ---'
-          python tests/verifiers/verify_seg_equiv.py; echo "exit=$?"
+          echo '--- 重跑 gate_parallel_consistency（完整 traceback）---'
+          python tests/gates/gate_parallel_consistency.py; echo "exit=$?"
+          echo '--- 重跑 gate_word_segmenter_equivalence ---'
+          python tests/gates/gate_word_segmenter_equivalence.py; echo "exit=$?"
 
 
   backend-torch:
@@ -82,14 +82,14 @@ jobs:
       - name: Install torch (CPU) + deps
         run: |
           python -m pip install --upgrade pip
-          # numba/psutil 必装：本 job 现在会跑 verify_accel_readout.py 与
+          # numba/psutil 必装：本 job 现在会跑 gate_accel_readout.py 与
           # t_backend_probe，两者都会 import phdnet 包 → phdnet/__init__ →
           # model → bigltm → ltm_kernel **无条件需要 numba**（缺了就是
           # ImportError，与 torch 无关）。原步骤漏装。
           python -m pip install "numpy==2.5.2" "numba==0.67.0" psutil
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: Device probe + readout bench (CPU 参考)
-        run: python tools/bench_accel.py --steps 20
+        run: python tools/bench/bench_readout_devices.py --steps 20
 
       - name: 诊断（bench 失败时打印环境与重跑 traceback）
         if: failure()
@@ -98,13 +98,13 @@ jobs:
           python -c "import torch; print('torch', torch.__version__)" || true
           python -c "import numpy; print('numpy', numpy.__version__)" || true
           echo '--- 重跑 bench_accel（完整 traceback）---'
-          python tools/bench_accel.py --steps 20; echo "exit=$?"
+          python tools/bench/bench_readout_devices.py --steps 20; echo "exit=$?"
       # ⚠ 2026-10-07 修复：原步骤引用的 phdnet.torch_backend.selftest_torch
       #   与 checks_backend.t_torch_equivalence / t_torch_model_smoke **都不存在**
       #   （torch 栈已随 P30 删除、checks_backend 只剩 t_backend_probe）→
       #   本 job 必然 ImportError/ModuleNotFoundError。换成实际存在的等价性门禁。
       - name: 读出加速臂等价性（P30 后 torch 栈对拍的新归属）
-        run: python tests/verifiers/verify_accel_readout.py
+        run: python tests/gates/gate_accel_readout.py
       - name: 后端探测检查（checks_backend 现存入口；缺 torch 会在此硬失败）
         run: |
           python -c "import torch; print('torch', torch.__version__)"

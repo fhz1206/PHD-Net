@@ -29,7 +29,7 @@ def t_core_demo() -> None:
     被放大；因果结构（A→B 最优）、补全 100%、one-shot 5/5 均保持。
     """
 
-    r = subprocess.run([PY, str(TESTS / "demo_phdnet.py")], capture_output=True,
+    r = subprocess.run([PY, str(TESTS / "demos" / "demo_core_experiments.py")], capture_output=True,
                        text=True, cwd=str(ROOT), env=ENV,
                        encoding="utf-8", errors="replace")
     out = r.stdout or ""
@@ -46,7 +46,7 @@ def t_core_demo() -> None:
 
     ok = (r.returncode == 0 and "全部实验完成" in out and "5/5" in out
           and "100.0%" in out and cos_b() > 0.6 and err_after() < 0.45)
-    _check("demo_phdnet 三实验（因果结构 / 补全 100% / 关联 5/5）", ok,
+    _check("demo_core_experiments 三实验（因果结构 / 补全 100% / 关联 5/5）", ok,
            f"cos_B={cos_b():.2f} 误差={err_after():.3f}")
 
 
@@ -113,7 +113,7 @@ def t_bigltm_smoke() -> None:
 
 def t_copy_task() -> None:
     """T6 长程复制：小规模配置下位置准确率必须显著高于随机基线（1/12≈8.3%）。"""
-    import demo_copy as dc
+    import demo_delayed_copy as dc
     codes = dc.sdrs(dc.ALPHA)
     mem, ep = dc.train(codes, n=8, n_seq=40, rho=0.5, forget=0.95, sep=1.0)
     res = dc.evaluate(mem, codes, 4, ep, n_seq=20)
@@ -187,6 +187,6 @@ def t_brain_homologues() -> None:
     n_done = net.sleep(n_replay=3, replay_ratio=0.5)
     _check("脑同构五项全开：构造/学习/睡眠/有限输出", finite and n_done >= 0)
 
-
-FULL_SCRIPTS = ["demo_lm.py", "demo_m1.py", "demo_m2.py", "demo_m3.py",
-                "demo_m4.py", "demo_m9.py", "demo_strength.py", "eval_suite.py"]
+# ⚠ 此处原先有一份与 `run_tests.py` 逐字重复的 `FULL_SCRIPTS` 死副本 ——
+#   两份不同步正是重命名后「full 层跑不到新路径」的成因，已删除，唯一出处在
+#   `run_tests.py`。

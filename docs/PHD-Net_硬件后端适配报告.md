@@ -26,7 +26,7 @@
 
 **torch 全栈轨已删除**：原 `phdnet/backends/torch_lm.py` 里的 `TorchPHDNet` /
 `TorchWordLM` / `TorchSparsePC` / `TorchLTM` 等约 800 行，加上
-`tools/train_torch_lm.py`、`tests/verifiers/verify_torch_lm.py`，在 P30 一次性删除
+`tools/train_torch_lm.py`、`tests/gates/verify_torch_lm.py`，在 P30 一次性删除
 （合计约 1,400 行）。删除理由三条，均写在 `torch_lm.py` 现存 docstring 里：
 
 1. **权重与生产 npz 检查点不通用**（不同实现、不同初始化顺序）；
@@ -79,7 +79,7 @@ DataParallel 需要 batch 轴可切，本网络两者都没有。
 
 **等价性判据**：跨**不同**卡只做结构验证（容差一致）；**同设备分片 vs 单设备逐位一致**
 （每行 dot 与分片顺序无关，softmax 在 cat 后的同一向量上计算），
-由 `tests/verifiers/verify_multi_device.py` 给逐位断言。
+由 `tests/gates/gate_multi_device.py` 给逐位断言。
 
 LTM / 印迹分片只有**计划层**（`shard_ranges` 给均衡神经元区间），跨神经元 STDP
 共激活对是唯一跨卡通信需求 —— **不提供假实现**。
@@ -109,7 +109,7 @@ torch_npu 版本或架构（x86 / aarch64）中的任何一项，结论都必须
 **CANN 安装目录属主与当前运行用户不一致**（镜像拷贝/多用户共用导致）。
 判定为无害的依据：① 告警出现在 import 阶段而非算子执行阶段；
 ② 后续 `torch.npu.is_available()` 返回 True 且设备名可读；
-③ `tools/accel_doctor.py` 的**真实规模张量试分配 + 前向 matvec 成功**；
+③ `tools/probe/accel_doctor.py` 的**真实规模张量试分配 + 前向 matvec 成功**；
 ④ 无 traceback、无 `ERR` 码。**判据是「算子能不能跑」，不是「有没有告警」** ——
 这条与 §五 踩坑 4（能力探针必须试真实算子而非只看张量能否创建）是同一条纪律。
 若 (3) 失败，则不是无害告警，按 §七 诊断入口排查。
@@ -211,7 +211,7 @@ W/x/b 转 fp16 进核以省访存，aarch64 上直接抛
 
 ### 4.1 测量方法
 
-`tools/probe_readout_precision.py`（纯测量，不改任何生产代码）。
+`tools/probe/probe_readout_precision.py`（纯测量，不改任何生产代码）。
 判据 = **同精度舍入后元素是否真的变了**（变了 = 更新被保留）：
 
 ```
@@ -263,10 +263,10 @@ updated  = _round(W0 + dp, dtype)
 
 | # | 症状 | 根因 | 修复 / 绕过 | 会复发？ |
 |---|---|---|---|---|
-| 1 | NPU 首次真跑生产训练即崩 `FakeTensor - None` @ `accel_readout.py` | P45 把「`target_idx` 路径就地改 p」只实现在 **eager 分支**，`torch.compile` 融合核仍是 `dp = p - t32`，`t32=None` 时崩 dynamo。既有验证只走 target 数组路径 → 恰好漏掉崩的那条 | 两条路径**逐行等价**（`p − onehot` ≡ `p[c] −= 1`，数值也等价）；新增 `verify_accel_readout_p55.py` **2×2 矩阵**（target 数组/`target_idx` × eager/compiled） | **会**。任何新增的 eager 分支都可能漏改融合核。门禁 A4 接口扫描只查属性存在性，查不到分支等价性 → 必须靠 2×2 矩阵 |
+| 1 | NPU 首次真跑生产训练即崩 `FakeTensor - None` @ `accel_readout.py` | P45 把「`target_idx` 路径就地改 p」只实现在 **eager 分支**，`torch.compile` 融合核仍是 `dp = p - t32`，`t32=None` 时崩 dynamo。既有验证只走 target 数组路径 → 恰好漏掉崩的那条 | 两条路径**逐行等价**（`p − onehot` ≡ `p[c] −= 1`，数值也等价）；新增 `gate_accel_readout_p55.py` **2×2 矩阵**（target 数组/`target_idx` × eager/compiled） | **会**。任何新增的 eager 分支都可能漏改融合核。门禁 A4 接口扫描只查属性存在性，查不到分支等价性 → 必须靠 2×2 矩阵 |
 | 2 | `torch.compile()` **只在首次调用才编译**，构造期 try/except 是假护栏 → 编译失败崩生产 | inductor **惰性编译**：构造期 `torch.compile()` 只是包装、不会失败，**首次调用**才真正编译 | 捕获点放在**首次执行**处；首次失败即 `self._compiled = False` **永久回落 eager** + `RuntimeWarning`。`--torch-compile` **默认关** | **会**。Windows 无 `cl`、NPU 上 inductor 异常都可能发生 |
 | 3 | `torch.compile` + `reduce-overhead` 与「W 原地 mutate」本质冲突 | cudagraphs 捕获的张量不允许被后续 kernel mutate → 每次调用打印 `skipping cudagraphs due to mutated inputs` 并**静默退回**无 graph 模式 | **锁 `torch_compile_mode="default"`**（只融合 kernel，不启用 cudagraphs）。改成非原地重新分配会让流量翻倍，更不可接受 | **会**（只要有人传 `--torch-compile-mode reduce-overhead`）。功能正确，只是拿不到 graph 收益 |
-| 4 | 设备探针只测**张量创建**→ fp8 能建不能乘，假通过后炸在 matmul | 第一版探针只测 `torch.zeros(..., dtype=fp8)`。CPU 能分配 fp8 → 判「可用」 | 探针必须试**真实算子**：`tools/accel_doctor.py` 试分配**真实规模**张量（默认 73,958×3,072 fp32）+ 一次前向 matvec。fp8 探测须 create / roundtrip / **matmul** 三档分开报（原 `tools/probe_fp8.py` 已删，逻辑并入 `_probe`） | **会**。新增 dtype 或新平台时必须重跑三档 |
+| 4 | 设备探针只测**张量创建**→ fp8 能建不能乘，假通过后炸在 matmul | 第一版探针只测 `torch.zeros(..., dtype=fp8)`。CPU 能分配 fp8 → 判「可用」 | 探针必须试**真实算子**：`tools/probe/accel_doctor.py` 试分配**真实规模**张量（默认 73,958×3,072 fp32）+ 一次前向 matvec。fp8 探测须 create / roundtrip / **matmul** 三档分开报（原 `tools/probe_fp8.py` 已删，逻辑并入 `_probe`） | **会**。新增 dtype 或新平台时必须重跑三档 |
 | 5 | `torch.npu.utilization()` 同步设备流，破坏被观测的流水 | 它内部会同步设备流 —— 每 `log_every` 采样一次就在训练热路径上砍一刀全局同步，与「CPU 预计算提前 / NPU 流水」直接冲突 | AI Core% 改走 **`npu-smi` 子进程**（外部查询，**零同步**）；`memory_allocated` 是 host 侧计数器，保留 | **会**。任何新增的 torch 侧设备指标都要先问「它同步吗」 |
 | 6 | `npu-smi` 不在 PATH → AI Core% 恒 `--` | 训练是**直接 `python train.py` 启动**、没 source Ascend 的 `set_env.sh`（能跑 `watch npu-smi` 的那个 shell 是交互式） | **三级路径解析**：环境变量 `$NPU_SMI_PATH` → `shutil.which("npu-smi")` → 常见安装路径候选表。只提示一次；首次成功打印实际路径 | **会**（换机器/换安装方式）。三级解析已覆盖主要情况 |
 | 7 | `npu-smi` 输出**没有 Bus-Id 列** → 路径已定位但仍恒 `--` | 解析器找「含 `0x` 总线号的数据行」启发式，**该机输出没有这一列** → 所有数据行被跳过 | 改为**按表头定位列**：找含 `AICore` 的表头行（回退小写 `aicore`）→ 切列得 AICore / HBM-Usage 列序 → 按列号取值。**与型号无关** | **不会**（表头定位与型号解耦）。但门禁只能测**合成布局** —— 真实格式仍靠人读那 14 行原始输出 |
@@ -275,9 +275,9 @@ updated  = _round(W0 + dp, dtype)
 | 10 | 热路径设备同步：`.item()` / `bool(tensor)` / `torch.equal` / `.cpu()` 都**强制同步** | 事故：稀疏 gather 缓存判据用 `torch.equal(self._cache_g_src, ht)` → 返回 Python bool → **每步一次硬同步**（P112 实例；当时服务器日志实测读出 7.68 ms/tok、占 43.5%，P113 口径为 7.83 ms / 64.7%），把 P34 用 `nll_sync_every` 消除掉的同步又加了回来 | 改为**主机侧 epoch 整数判据**：每次上传新 h 递增 `_ht_epoch`，`_sp_gather` 只比整数。语义等价（同一 epoch = 同一个 h），**零设备交互**。**系统性排查手段见踩坑 16** | **会**。⚠ 不能简化成「盲目复用缓存」——那会在 h 变化时静默用错结果。commit `7701138` |
 | 11 | `W.add_(torch.outer(dp,ht))` **物化与 W 同尺寸的临时张量** | `torch.outer` 先生成完整 (n_out, n_h) 矩阵再被 `add_` 读回。1B 档 = **867 MiB** 临时张量，单步多 **1.73 GiB** 带宽（≈ 总流量的 **40%**） | 改 `addmm_` 做 **rank-1 AXPY**：`W.addmm_(dp.reshape(-1,1), ht.reshape(1,-1), alpha=-eta)`，不产生临时张量。**数值逐位相同** | **不会**（已换成 AXPY 口径）。⚠ 稀疏模式下 `addmm_` 是稠密的，等价写法是 gather 后逐行 `add_`（流量 `(n_out,k)` 而非 `(n_out,n_h)`） |
 | 12 | 混合 dtype（fp32 W @ fp64 x）**掉出 BLAS** 走逐元素慢路径 | numpy 不做类型提升。两次误判：P61/P75 踩中 | 输入 dtype **必须跟随权重 dtype**（输入只有 `n_in` 个元素，转换代价可忽略）。慢 5.9×（x86）→ 约 70×（昇腾 aarch64） | **会**。新增 dtype 维度时每个入口都要检查 |
-| 13 | 「探测到设备」≠「能用」 | `torch_npu` 与 `torch` **版本严格配对**（如 2.5.1 ↔ 2.5.1）。不匹配会出现探测成功但算子不可用 | `tools/accel_doctor.py`：环境矩阵（含 CANN 版本）+ **试分配真实规模张量 + 前向 matvec**。分配失败时明确打印「该设备被探测到但实际不可用（常见：算子缺失 / 显存不足 / 版本不配对）」 | **会**（升级 torch 或 torch_npu 时）。这是环境问题，不是代码问题 |
-| 14 | 换后端只实现主要方法 → **生产首个 step 崩** | `AccelReadout` 必须对齐 `Readout` 的**全部**访问面：`__call__` / `forward` / `learn` / `learn_softmax` / `W` / `W_cpu` / `load_W` / `n_synapses` / `conn_k` / `hidden` / `stats()` / `dtype_name` / `_csr`。早期版本缺 `__call__` → `TypeError: not callable`；缺 `conn_k`/`stats()` → **保存检查点时**才崩 | **接口完整性自动扫描**：`verify_accel_readout.py::A4` 用正则扫全仓库 `readout\.([a-zA-Z_]\w*)` 访问面，断言加速后端**全部具备**（这比人工列举更强：新增访问点自动进扫描范围） | **会**（新增 `readout.X` 访问点时）。⚠ `conn_k` / `hidden` / `W_cpu` 必须与 numba `Readout` 同为**只读 property**，否则两侧语义不对称、ckpt 的读法会分叉 |
-| 15 | **能力表与实现不同步 → 静默关掉全部加速，且零报错** | 两次实战：① fp8 能力表遗漏 → P84 实现了 fp8 并设为默认，**忘了从 `_unsupported_reason()` 删掉** → 生产日志一直 `numba-cpu(回落)`，整轮改造在生产**等于没生效且不报任何错**（本项目最严重的一条）。② `readout_conn_k>0` 撞拒绝表 → 稀疏读出把整个 NPU 读出加速**全程回落 CPU 也不报错**，而读出占端到端 **89%** | 拒绝表与 `_DT` 必须**同步**；加新 dtype 时两处一起改。`verify_accel_readout.py::A3` 对拒绝路径给断言 | **会**。**核心教训：默认值撞拒绝表 = 静默关掉全部加速。** 「回落 + 记原因」是好纪律，但**一个默认值命中它就等于默认关掉加速** —— 所以默认值必须与能力表一起审计 |
+| 13 | 「探测到设备」≠「能用」 | `torch_npu` 与 `torch` **版本严格配对**（如 2.5.1 ↔ 2.5.1）。不匹配会出现探测成功但算子不可用 | `tools/probe/accel_doctor.py`：环境矩阵（含 CANN 版本）+ **试分配真实规模张量 + 前向 matvec**。分配失败时明确打印「该设备被探测到但实际不可用（常见：算子缺失 / 显存不足 / 版本不配对）」 | **会**（升级 torch 或 torch_npu 时）。这是环境问题，不是代码问题 |
+| 14 | 换后端只实现主要方法 → **生产首个 step 崩** | `AccelReadout` 必须对齐 `Readout` 的**全部**访问面：`__call__` / `forward` / `learn` / `learn_softmax` / `W` / `W_cpu` / `load_W` / `n_synapses` / `conn_k` / `hidden` / `stats()` / `dtype_name` / `_csr`。早期版本缺 `__call__` → `TypeError: not callable`；缺 `conn_k`/`stats()` → **保存检查点时**才崩 | **接口完整性自动扫描**：`gate_accel_readout.py::A4` 用正则扫全仓库 `readout\.([a-zA-Z_]\w*)` 访问面，断言加速后端**全部具备**（这比人工列举更强：新增访问点自动进扫描范围） | **会**（新增 `readout.X` 访问点时）。⚠ `conn_k` / `hidden` / `W_cpu` 必须与 numba `Readout` 同为**只读 property**，否则两侧语义不对称、ckpt 的读法会分叉 |
+| 15 | **能力表与实现不同步 → 静默关掉全部加速，且零报错** | 两次实战：① fp8 能力表遗漏 → P84 实现了 fp8 并设为默认，**忘了从 `_unsupported_reason()` 删掉** → 生产日志一直 `numba-cpu(回落)`，整轮改造在生产**等于没生效且不报任何错**（本项目最严重的一条）。② `readout_conn_k>0` 撞拒绝表 → 稀疏读出把整个 NPU 读出加速**全程回落 CPU 也不报错**，而读出占端到端 **89%** | 拒绝表与 `_DT` 必须**同步**；加新 dtype 时两处一起改。`gate_accel_readout.py::A3` 对拒绝路径给断言 | **会**。**核心教训：默认值撞拒绝表 = 静默关掉全部加速。** 「回落 + 记原因」是好纪律，但**一个默认值命中它就等于默认关掉加速** —— 所以默认值必须与能力表一起审计 |
 | **16** | **P112 实例：热路径设备同步点，只能靠静态扫描系统性找出** | 热路径上的**显式同步原语**（`torch.equal` / `.item()` / `.cpu()` / `bool(tensor)`）在NPU 上**每处都是一次硬同步**：CPU 被设备等住的时间**不计入 NPU 利用率，但全额计入端到端**。P112 的实例是稀疏 gather 缓存判据用 `torch.equal(cache_src, ht)` 判「是不是同一个 h」→ **每步一次硬同步**，等于把 P34 用 `nll_sync_every` 消除掉的同步又还回去。⚠ **它不报错、不影响数值、不触发任何告警** —— 日志里所有字段都正常，只是慢 | ① 修法：改**主机侧标记**（每次上传新 h 递增 `_ht_epoch`，`_sp_gather` 只比整数，**零设备交互**）；② **发现手段**：`tools/diag_readout_npu.py`（P113 新增）的**同步点静态扫描**——人工找这类点不可靠，改一处漏一处；③ 判据要覆盖**所有上传路径**（`forward()` 走 `_to_dev`、`forward_dev()` 走 `_staged_to_dev`，漏一处会静默复用旧 gather 结果，实测 `max\|Δ\|=1.45`） | **会**。⚠ **静态扫描只能证明「没有显式同步原语」，不能证明设备端没有隐式同步** —— 后者需 CANN 级profiling（msprof）。P113 扫描确认读出热路径**已无同步点**，这是「26.1× 差距归因于算子效率而非同步」的前提 |
 
 ### 5.1 两条补充纪律
@@ -394,11 +394,11 @@ torch 栈恒用稀疏 CSR 语义（`TorchSparsePC` 只实现 CSR 边表示）；
 
 | 工具 | 回答的问题 | 备注 |
 |---|---|---|
-| `tools/backend_probe.py` | 各平台 ok / count / name | 探测层 |
-| `tools/accel_doctor.py` | 设备**真的能算**吗 | ① 环境矩阵（torch / torch_npu / **CANN 版本** + 配对警告）② `resolve_devices` 结果 ③ **试分配真实规模张量 + 前向 matvec**（默认 73,958×3,072 fp32 ≈ 908 MB）④ 性能对照（设备 torch / CPU torch / numba 基线）⑤ 结论。`--no-bench` 只诊断 |
-| `tools/probe_readout_precision.py` | 低精度**是否丢弃学习更新** | 纯测量，不改生产代码（§四） |
+| `tools/probe/backend_probe.py` | 各平台 ok / count / name | 探测层 |
+| `tools/probe/accel_doctor.py` | 设备**真的能算**吗 | ① 环境矩阵（torch / torch_npu / **CANN 版本** + 配对警告）② `resolve_devices` 结果 ③ **试分配真实规模张量 + 前向 matvec**（默认 73,958×3,072 fp32 ≈ 908 MB）④ 性能对照（设备 torch / CPU torch / numba 基线）⑤ 结论。`--no-bench` 只诊断 |
+| `tools/probe/probe_readout_precision.py` | 低精度**是否丢弃学习更新** | 纯测量，不改生产代码（§四） |
 | **`tools/diag_readout_npu.py`**<br>（P113 新增，**已删**——结论沉淀在性能文档 §3.5） | **读出热路径还有没有设备同步点？时间花在带宽还是算子？** | 两个子问题：① **同步点静态扫描**（扫 `torch.equal` / `.item()` / `.cpu()` / `bool(tensor)` 等显式同步原语）；② **字节流量拆解**（分idx / val / 临时张量 `g` / `dp` 四项）。⚠ **带宽下界是估算值不是实测**（依赖假设带宽）——**把下界当实测是本项目反复踩过的坑**（`BUGS.md` A8/B12） |
-| `tools/bench_accel.py` | 读出热路径基准 + **等效带宽 GB/s** | 默认 V=73,958 / H=3,072（1B 真实词表规模），fp32/fp16/bf16 **三档都跑**。读出是 GEMV，**受带宽限制而非算力** → 等效带宽（3×\|W\| / 耗时）是**唯一可跨平台比较的指标** |
+| `tools/bench/bench_readout_devices.py` | 读出热路径基准 + **等效带宽 GB/s** | 默认 V=73,958 / H=3,072（1B 真实词表规模），fp32/fp16/bf16 **三档都跑**。读出是 GEMV，**受带宽限制而非算力** → 等效带宽（3×\|W\| / 耗时）是**唯一可跨平台比较的指标** |
 | `multi_device.capability_report()` | 后端 × 设备能力矩阵 + 本机探测 + 行动建议 | `verbose=True` 打印 |
 
 ### 7.2 ⚠ 判断加速是否生效：看日志，不看「检测到设备」
@@ -436,15 +436,15 @@ CPU 侧 4.26 ms vs NPU 侧 7.83 ms（性能文档 §4.1）→ **瓶颈在 NPU �
 
 | 脚本 | 覆盖 |
 |---|---|
-| `verify_accel_readout.py` | `AccelReadout` 对拍 + **接口完整性自动扫描**（A4：正则扫全仓库 `readout.X` 访问面）+ 拒绝路径断言（A3） |
-| `verify_accel_readout_p55.py` | **2×2 矩阵**（target 数组 / `target_idx` × eager / compiled），判据容差 1e-5 |
-| `verify_accel_sparse.py` | 稀疏读出 39 例：数值等价 / 调用面 / 拒绝路径 / 零回归 |
-| `verify_multi_device.py` | 设备解析 / 分片均衡与余数 / 单设备 ≡ `AccelReadout` / 分片 ≡ 单设备（**逐位**）/ 计划报告 / host 线程收敛 |
-| `bench_accel_path.py` | 复现读出路径的设备流量与墙钟对照 |
-| **`verify_m2_kernels.py`**（P113 新增，13 例） | M2 推理核三态（fused/serial/plain）对拍。它属 CPU 侧而非设备侧，列在这里是因为**默认值切换的零回归证据**（A1/A2/A3 + 行级 prange 不改变求和顺序） |
+| `gate_accel_readout.py` | `AccelReadout` 对拍 + **接口完整性自动扫描**（A4：正则扫全仓库 `readout.X` 访问面）+ 拒绝路径断言（A3） |
+| `gate_accel_readout_p55.py` | **2×2 矩阵**（target 数组 / `target_idx` × eager / compiled），判据容差 1e-5 |
+| `gate_accel_sparse_readout.py` | 稀疏读出 39 例：数值等价 / 调用面 / 拒绝路径 / 零回归 |
+| `gate_multi_device.py` | 设备解析 / 分片均衡与余数 / 单设备 ≡ `AccelReadout` / 分片 ≡ 单设备（**逐位**）/ 计划报告 / host 线程收敛 |
+| `bench_accel_readout_path.py` | 复现读出路径的设备流量与墙钟对照 |
+| **`gate_m2_infer_kernels.py`**（P113 新增，13 例） | M2 推理核三态（fused/serial/plain）对拍。它属 CPU 侧而非设备侧，列在这里是因为**默认值切换的零回归证据**（A1/A2/A3 + 行级 prange 不改变求和顺序） |
 | `python tests/run_tests.py fast` | 零回归门槛 **9/9** |
 
-`verify_accel_sparse.py` 的价值在于它是**实现的准入门槛，不是事后补的测试** ——
+`gate_accel_sparse_readout.py` 的价值在于它是**实现的准入门槛，不是事后补的测试** ——
 它在开发中抓出两个真 bug：① 前向写成 `gather(...).sum(1)`，**把权重整个丢掉**
 （形状 dtype 全对，只有数值错）；② `_csr` 每次返回**新的 D2H 副本**，
 ckpt 的 `val[:] = ...` 写进无人引用的数组 → **检查点「恢复成功」但权重是旧值**。
@@ -469,7 +469,7 @@ ckpt 的 `val[:] = ...` 写进无人引用的数组 → **检查点「恢复成�
 | 6 | CLI `--encoder-dtype` **实际默认 `fp32`**，但 help 文本写「**默认 fp64**」 | `train/train.py:408` `default="fp32"`，help 写「**默认 fp64**：昇腾 aarch64 上 fp32 sgemv 实测慢约 70 倍」。库 `config.encoder_dtype` 是 `fp64`（`config.py:330`） | 🟡 help 自相矛盾（P107 已把**CLI** 默认改回 fp32；库默认 fp64 是有意的，CLI 显式覆盖 —— 见《扩展指南》§4） |
 | 7 | 稀疏读出**已在加速后端实现**，但 `phdnet/backends/README.md` §四回落表仍列 `readout_conn_k > 0 → 回落` | `_unsupported_reason()` 对 `readout_conn_k=128` 返回 `None`（实测）；README 表格仍写「加速后端未实现」 | 🟡 子包 README 滞后于 P111 |
 | 8 | `phdnet/backends/README.md` 标题写「精度：读出默认 int8」，正文表格写「默认 `--readout-dtype fp16`（CLI 默认；库 config 默认 bf16）」，且写「fp8 / fp4 在所有加速器禁用（P86）」 | 实际默认 **`fp8`**（`train/train.py:324` 与 `config.py:318` 一致），且 **fp8 的 blanket ban 已于 P189 解除**（`_unsupported_reason()` 对 `_rd in ("int8","fp8")` 返回 `None`，`accel_readout.py:1776-1777`）；fp4/int4 才仍禁（P152/P191e） | 🟡 同一文件内自相矛盾，**且禁令口径已过期**（`phdnet/backends/README.md:77,82,86,89,90`） |
-| 9 | `phdnet/backends/README.md` 称 verifier 有 `verify_accel_sparse` 外的引用、以及 `bench_accel.py` 三档 | `ls tests/verifiers/` = **22 个 `.py`**（21 个 `verify_*` + 1 个 `bench_accel_path`；P113 新增 `verify_m2_kernels.py`）。`文档写作规范.md` §2.7 已同步为 22 | 🟢 计数已同步（`verify_accel_sparse` / `verify_readout_intdtypes` / `verify_readout_sparse_gate` / `verify_ltm_learn_batch` / `verify_m2_kernels` 是后加的） |
+| 9 | `phdnet/backends/README.md` 称 verifier 有 `gate_accel_sparse_readout` 外的引用、以及 `bench_accel.py` 三档 | `ls tests/gates/` = **22 个 `.py`**（21 个 `verify_*` + 1 个 `bench_accel_readout_path`；P113 新增 `gate_m2_infer_kernels.py`）。`文档写作规范.md` §2.7 已同步为 22 | 🟢 计数已同步（`gate_accel_sparse_readout` / `gate_readout_int_dtypes` / `gate_readout_sparse_structure` / `gate_ltm_learn_batch` / `gate_m2_infer_kernels` 是后加的） |
 | 10 | `phdnet/backends/torch_backend.py` 模块 docstring 首行仍写「STDP 关联核的 torch 实现」，但文件里**只有探针 + 基准** | `TorchSTDPCore` 已随 P30 删除；docstring 未同步 | 🟢 首行描述误导 |
 
 ---
@@ -480,7 +480,7 @@ ckpt 的 `val[:] = ...` 写进无人引用的数组 → **检查点「恢复成�
 `PHD-Net_性能评估与迭代方案.md`**，不复制具体数值到本文表格里 ——
 唯一例外是 §四的**精度保留率**（fp32 99.95% / fp16 26.67% / bf16 5.79%），
 因为它是**机制性判据**（数值精度性质，与平台和档位无关），
-不是性能数字，且由 `tools/probe_readout_precision.py` 一条命令可复现。
+不是性能数字，且由 `tools/probe/probe_readout_precision.py` 一条命令可复现。
 
 引用别处数字时必须带**平台 + 档位 + 版本**三件套，例如
 「昇腾 191 核 + NPU，1B 档」。**不带平台的加速倍数在本项目没有意义** ——

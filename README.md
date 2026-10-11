@@ -124,8 +124,8 @@ M4b 突触**不是构建即存在**，而是随经验生长（"fire together, wi
 
 ### 门禁与 CI
 
-- `python tests/run_tests.py fast` = **9/9**（零回归门槛）；专项 verifier 见 `ls tests/verifiers/*.py`（**别处别再写死数字**，历史文档已出现 18/22/23/26 四个互相矛盾的值）。
-- 语法门禁：`verify_ms_stream` 会对改动文件 `py_compile` 并真跑 `train.py --help`。
+- `python tests/run_tests.py fast` = **9/9**（零回归门槛）；专项 verifier 见 `ls tests/gates/gate_*.py`（**别处别再写死数字**，历史文档已出现 18/22/23/26 四个互相矛盾的值）。
+- 语法门禁：`gate_ms_stream` 会对改动文件 `py_compile` 并真跑 `train.py --help`。
 - CI **两套**：`.gitcode/workflows/ci.yml`、`.github/workflows/ci.yml`（镜像）。
   仓库**没有 Jenkinsfile**。GitHub 侧当前仍红（无日志权限，待 traceback）。
 
@@ -133,7 +133,7 @@ M4b 突触**不是构建即存在**，而是随经验生长（"fire together, wi
 
 - 口径：256 维栈、`eta_readout=0.15`。现行锚点 **4K 段 394.4687 / 全语料 359.2603**
   （评测语料 2026-09-28 换为中文维基条目合集）。
-- 复测入口 `python tools/rebaseline.py`（**无命令行参数**）。
+- 复测入口 `python tools/eval/rebaseline.py`（**无命令行参数**）。
 - ⚠ 旧口径 78.16 / 90.2480 / 73.1166 **只存于 git 历史，不可混用**。
 
 ### 已知开放项

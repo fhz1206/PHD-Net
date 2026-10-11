@@ -53,7 +53,7 @@
 | **x86 本机** | Windows 11 / 8 线程 / 12.6 GB RAM / 无 GPU·NPU | 正确性对拍、机制消融、**本机微基准与回归检测** | ❌ **不可**。只用于「这次改动让 CPU 侧变快还是变慢」 |
 | **昇腾服务器** | **191 核** + NPU（Ascend 910B4，CANN 8.5，torch_npu 2.9）/ ~1.6 TB/s HBM | **性能数字只以本口径为准** | ✅ 唯一有效出处 |
 
-`tools/bench_local.py` 的 docstring 已把这条写成硬约束：**本机不产出文档里的 ms/tok**。
+`tools/bench/bench_cpu_local.py` 的 docstring 已把这条写成硬约束：**本机不产出文档里的 ms/tok**。
 
 ### 1.2 档位口径
 
@@ -187,7 +187,7 @@
 **38101.949 / 25042.421 / 22693.449 / 19602.394**。
 → `plain` 是**纯调度变化、零语义变化**，这是它能当默认值的唯一理由。
 ⚠ 这份「逐位相同」是**生产日志观测**（两次 run 的其余条件相同，但不是同进程内比），
-已由 `tests/verifiers/verify_m2_kernels.py`（13 例三态对拍）固化成**可复跑的受控门禁**。
+已由 `tests/gates/gate_m2_infer_kernels.py`（13 例三态对拍）固化成**可复跑的受控门禁**。
 
 **收敛曲线**（P111 那一段 run 内按token 数采样，**这是「稳态」的唯一依据**）：
 
@@ -293,7 +293,7 @@ P113 run 的采样点止于 40250，**未跑到 56k**，所以两条run 的稳�
 ### 3.1 稀疏 vs 稠密的访存账（1B 档，设计词表 vocab 73,958 × n_h 3,072）
 
 ⚠ **两套词表口径，不要混用**：
-- **73,958** = 设计态满词表（`tools/bench_accel.py` 的缺省 `V`），用于访存/带宽**上界**估算。
+- **73,958** = 设计态满词表（`tools/bench/bench_readout_devices.py` 的缺省 `V`），用于访存/带宽**上界**估算。
 - **51,962** = 本次训练实建词表（`[日志]`），实际读出规模比上界小 30%。
 
 | 布局 | 每步字节 | 相对稠密 |
@@ -316,7 +316,7 @@ P113 run 的采样点止于 40250，**未跑到 56k**，所以两条run 的稳�
 1B 档 `k/n_in = 128/3072 = 4.2%`，在交叉点以下 6 倍，稀疏成立。
 ⚠ 这也解释了为什么 §3.1 的 8.0×（4.2% 密度）低于理论上限 `1/0.042 = 24×`。
 
-来源：`tools/bench_readout_sparse.py` 的 docstring（数值推导）+
+来源：`tools/bench/bench_readout_sparse.py` 的 docstring（数值推导）+
 `[日志]` 1B 档实测 113.6 MB。
 
 ### 3.3 ⚠ 稠密读出的旧口径（历史对照，分子分母不匹配）
@@ -479,7 +479,7 @@ NPU 侧 43.5%；现在 NPU 侧是大头。
 > P113 给出答案：能吃掉 5.64 ms（5.41×），但 191 核并没有被吃满**
 > —— CPU 侧整体只从 9.95 降到 4.26 ms（§2.5）。
 
-**零回归门禁**：`tests/verifiers/verify_m2_kernels.py`（**P113 新增，13 例**）——
+**零回归门禁**：`tests/gates/gate_m2_infer_kernels.py`（**P113 新增，13 例**）——
 三态（fused / serial / plain）在同一进程、同一输入下对拍：
 A1 fused vs serial、A2 plain vs serial（**容差**，归约顺序不同，偏差 1e-7 量级）、
 A3 `n_steps=1/2/3`（单步一致不代表多步一致）、B 类断言 plain 的行级 prange
@@ -549,7 +549,7 @@ fp32 权重 @ fp64 输入会**脱离 BLAS 的 sgemv**，走逐元素慢路径，
 
 ## 六、精度与速度的取舍
 
-### 6.1 读出精度的实测保留率（`tools/probe_readout_precision.py`，`[工具]`）
+### 6.1 读出精度的实测保留率（`tools/probe/probe_readout_precision.py`，`[工具]`）
 
 **判据**：同精度舍入后元素是否**真的变了**（更新是否被保留）。
 量级 `|W| ~ 1e-2`、`|dp| ~ 1e-6`（感知器 `p − t` 的非目标行更新）。
@@ -849,7 +849,7 @@ idx（**1.85 ms/次**），**比核本身（1.01 ms）还贵**。
 → **配置位保留但 fail-fast**：用户若传 `--readout-pipeline`，`train/train.py`
 **直接报错退出**（退出码 1，发生在建模之前、无任何副作用）。
 理由：留一个「开了没反应」的开关是最坏的一种 API —— 用户会以为自己在跑一个优化。
-门禁 `tests/verifiers/verify_overlap_contract.py`（23/23）把上述四条钉死。
+门禁 `tests/gates/gate_cpu_npu_overlap_contract.py`（23/23）把上述四条钉死。
 
 ### 推理侧：为什么同样**不加**流水（这不是「还没做」，是**提法要更正**）
 
@@ -909,35 +909,35 @@ python train/train.py --preset 1b --data pretrain --data-lang zh --remote-data \
 
 | 工具 | 用途 | 数字可否进本文档 |
 |---|---|---|
-| `tools/bench_accel.py` | 加速器读出热路径基准（CUDA / ROCm / CANN-NPU / CPU），默认 `V=73958 H=3072` | ✅ 昇腾上跑出的可进 |
-| `tools/bench_local.py` | **x86 回归基准**：同 commit 前后「变快还是变慢」+ 线程缩放 | ❌ **不产出文档数字**（docstring 明确） |
-| `tools/bench_readout_sparse.py` | M6 稀疏读出 A/B 框架：`conn_k ↔ PPL / 速度 / 访存` 曲线 | ✅（带平台标注时） |
-| `tools/probe_readout_precision.py` | 读出精度保留率（§6.1） | ✅ 纯数值性质，平台无关 |
-| `tools/audit_precision.py` | 精度体系 L1 逐位 / L2 带宽 / L3 PPL | ✅ |
-| `tools/accel_doctor.py` | 设备侧一次性诊断 | ✅ |
+| `tools/bench/bench_readout_devices.py` | 加速器读出热路径基准（CUDA / ROCm / CANN-NPU / CPU），默认 `V=73958 H=3072` | ✅ 昇腾上跑出的可进 |
+| `tools/bench/bench_cpu_local.py` | **x86 回归基准**：同 commit 前后「变快还是变慢」+ 线程缩放 | ❌ **不产出文档数字**（docstring 明确） |
+| `tools/bench/bench_readout_sparse.py` | M6 稀疏读出 A/B 框架：`conn_k ↔ PPL / 速度 / 访存` 曲线 | ✅（带平台标注时） |
+| `tools/probe/probe_readout_precision.py` | 读出精度保留率（§6.1） | ✅ 纯数值性质，平台无关 |
+| `tools/eval/audit_precision.py` | 精度体系 L1 逐位 / L2 带宽 / L3 PPL | ✅ |
+| `tools/probe/accel_doctor.py` | 设备侧一次性诊断 | ✅ |
 | `outputs/verify_p189_fp8conv.py` / `outputs/bench_p189_fp8conv_ab.py`（P189） | 🔴 fp8→int8 转换核对拍（逐位）与 A/B —— **其中 `rust` 分支随 P188 删除**。~~「fp8→int8 Rust 转换核对拍（逐位）」~~与~~「A/B（rust 8.44× vs torch @x86）」~~**均已作废**（被测的 Rust 核不存在）；仅 torch/nogil 两路径的对拍结论仍有效 | 🔴 Rust 侧数字作废；⚠ 剩余的 x86 口径昇腾待复测 |
-| `tools/rebaseline.py` | 现行评测锚点复测 | ✅ |
-| `tools/profile_lm.py` | LM 热路径 cProfile | ✅ |
+| `tools/eval/rebaseline.py` | 现行评测锚点复测 | ✅ |
+| `tools/probe/profile_lm.py` | LM 热路径 cProfile | ✅ |
 
-### 9.4 专项 verifier（`tests/verifiers/`）
+### 9.4 专项 verifier（`tests/gates/`）
 
 | verifier | 覆盖 |
 |---|---|
-| **`verify_m2_kernels.py`（13/13，P113 新增）** | **M2 推理核三态（fused/serial/plain）对拍**：A1 fused vs serial、A2 plain vs serial（容差）、A3 `n_steps=1/2/3`、B 类断言行级 prange 不改变求和顺序 |
-| `verify_accel_sparse.py` | **P111 新增，39 例**：稀疏读出数值等价（A1–A4）/ 调用面（B1–B5，含 P112 新增的 A1b gather 缓存 epoch 回归）/ 拒绝路径（C1–C3）/ 零回归（D1–D3） |
-| `verify_m2_kernels.py` | **P113 新增，13 例**：M2 三态（fused/serial/plain）数值等价 / n_steps=1,2,3 多步 / 三态映射与自由能定义 |
-| `verify_accel_readout.py`、`verify_accel_readout_p55.py` | 加速读出；P55 的 2×2 矩阵（target 数组 / target_idx × eager / compiled） |
-| `verify_readout_sparse.py`、`verify_readout_sparse_gate.py` | 稀疏读出与门禁 |
-| `verify_ltm_kernels.py`（10/10）、`verify_ltm_learn_batch.py`（5/5） | LTM 逐位对拍（含 recall 全链路） |
-| `verify_pc_learn_fused.py`（12/12） | M2 fused/plain 一致到 1–2 ulp |
-| `verify_readout_fused.py`、`verify_readout_intdtypes.py` | 读出融合核、整数 dtype |
-| `bench_accel_path.py` | 读出设备侧流量基准 |
-| `verify_ms_stream.py`（41/41） | 流式管线总门禁 |
-| `verify_csr_equiv.py`、`verify_parallel_consistency.py`、`verify_vocab_parallel.py`、`verify_seg_equiv.py`、`verify_repro_process.py`、`verify_multi_device.py`、`verify_stream_tokenize.py`、`verify_ckpt_roundtrip.py`、`verify_rl.py` | CSR 等价、多核逐位、分词、多设备、检查点往返等 |
-| **`verify_cykernels.py`（41/41，P192 新增）** | **Cython 核 vs numba 对拍**，**两档判据**：语义级（索引口径 / clip / 事件驱动分支 / 整数用例逐位）严；数值级（`fastmath` 的 ~1 ulp）容差并**如实打出 `max\|d\|`**（管道已转义，否则会多切一列）。另含 A3 OpenMP 真伪（读 `_OPENMP` 宏，不自证）与 D1 nogil 释放检查 |
-| **`verify_cython_switch.py`（18/18，P192 新增）** | **`--cython-kernels` 开关不变量**：`off` 轨迹两次独立构造**逐位相同**；`auto` 漂移有界（实测 8.595e-08 @`stdp.W`）；取值域 fail-fast；int64 `post_idx` 被正确归一；**G 组「启动自检日志不许说假话」** —— `get_kernels()` 返回的是**原始扩展模块**而非 `Kernels` 门面，故判断生效要用 `is not None`，**读 `.active` 会 AttributeError**。这是 P192 首版的真实 bug：异常被 `except` 吞成「未生效」，紧接下一行又打印 `active=True`，日志自相矛盾且会误导事后复盘 |
-| **`verify_overlap_contract.py`（19/19，P192 新增）** | **CPU/NPU 重叠的事实核对**：钉死「训练步设备路径已零同步（P117）」、`step()` 内无 `y_dev` D2H、PC/STDP 学习段不读 `y`、`--readout-pipeline` 未接线且**传了即 fail-fast**（不是「开了没反应」的开关）、`--cann-dispatch` 只核对不新增且幂等只读 |
-| `verify_ltm_trace_semantics.py`（**26/32**） | LTM 迹补偿/快照/分片恢复/巩固钳位。⚠ **(a) 组 6 例当前失败，且是既有失败**：惰性迹 vs 自建急切参考 `ratio=0.939770`（期望≈1.0）。已用「stash 全部新改动后重跑」验证与任何新改动无关；(b)(c)(d) 全绿。**退出码保持 1 以免差异被掩盖**（P192 只把 (d) 组从 `forget=150` 改为断言 fail-fast，因为 `bigltm.py` 已加 >100 的守卫） |
+| **`gate_m2_infer_kernels.py`（13/13，P113 新增）** | **M2 推理核三态（fused/serial/plain）对拍**：A1 fused vs serial、A2 plain vs serial（容差）、A3 `n_steps=1/2/3`、B 类断言行级 prange 不改变求和顺序 |
+| `gate_accel_sparse_readout.py` | **P111 新增，39 例**：稀疏读出数值等价（A1–A4）/ 调用面（B1–B5，含 P112 新增的 A1b gather 缓存 epoch 回归）/ 拒绝路径（C1–C3）/ 零回归（D1–D3） |
+| `gate_m2_infer_kernels.py` | **P113 新增，13 例**：M2 三态（fused/serial/plain）数值等价 / n_steps=1,2,3 多步 / 三态映射与自由能定义 |
+| `gate_accel_readout.py`、`gate_accel_readout_p55.py` | 加速读出；P55 的 2×2 矩阵（target 数组 / target_idx × eager / compiled） |
+| `gate_readout_sparse.py`、`gate_readout_sparse_structure.py` | 稀疏读出与门禁 |
+| `gate_ltm_kernels.py`（10/10）、`gate_ltm_learn_batch.py`（5/5） | LTM 逐位对拍（含 recall 全链路） |
+| `gate_m2_learn_fused.py`（12/12） | M2 fused/plain 一致到 1–2 ulp |
+| `gate_readout_fused.py`、`gate_readout_int_dtypes.py` | 读出融合核、整数 dtype |
+| `bench_accel_readout_path.py` | 读出设备侧流量基准 |
+| `gate_ms_stream.py`（41/41） | 流式管线总门禁 |
+| `gate_ltm_csr_equivalence.py`、`gate_parallel_consistency.py`、`gate_vocab_parallel.py`、`gate_word_segmenter_equivalence.py`、`gate_process_reproducibility.py`、`gate_multi_device.py`、`gate_stream_tokenize.py`、`gate_checkpoint_roundtrip.py`、`gate_rl_loop.py` | CSR 等价、多核逐位、分词、多设备、检查点往返等 |
+| **`gate_cython_kernels.py`（41/41，P192 新增）** | **Cython 核 vs numba 对拍**，**两档判据**：语义级（索引口径 / clip / 事件驱动分支 / 整数用例逐位）严；数值级（`fastmath` 的 ~1 ulp）容差并**如实打出 `max\|d\|`**（管道已转义，否则会多切一列）。另含 A3 OpenMP 真伪（读 `_OPENMP` 宏，不自证）与 D1 nogil 释放检查 |
+| **`gate_cython_switch.py`（18/18，P192 新增）** | **`--cython-kernels` 开关不变量**：`off` 轨迹两次独立构造**逐位相同**；`auto` 漂移有界（实测 8.595e-08 @`stdp.W`）；取值域 fail-fast；int64 `post_idx` 被正确归一；**G 组「启动自检日志不许说假话」** —— `get_kernels()` 返回的是**原始扩展模块**而非 `Kernels` 门面，故判断生效要用 `is not None`，**读 `.active` 会 AttributeError**。这是 P192 首版的真实 bug：异常被 `except` 吞成「未生效」，紧接下一行又打印 `active=True`，日志自相矛盾且会误导事后复盘 |
+| **`gate_cpu_npu_overlap_contract.py`（19/19，P192 新增）** | **CPU/NPU 重叠的事实核对**：钉死「训练步设备路径已零同步（P117）」、`step()` 内无 `y_dev` D2H、PC/STDP 学习段不读 `y`、`--readout-pipeline` 未接线且**传了即 fail-fast**（不是「开了没反应」的开关）、`--cann-dispatch` 只核对不新增且幂等只读 |
+| `gate_ltm_trace_semantics.py`（**26/32**） | LTM 迹补偿/快照/分片恢复/巩固钳位。⚠ **(a) 组 6 例当前失败，且是既有失败**：惰性迹 vs 自建急切参考 `ratio=0.939770`（期望≈1.0）。已用「stash 全部新改动后重跑」验证与任何新改动无关；(b)(c)(d) 全绿。**退出码保持 1 以免差异被掩盖**（P192 只把 (d) 组从 `forget=150` 改为断言 fail-fast，因为 `bigltm.py` 已加 >100 的守卫） |
 
 ### 9.5 日志字段完整速查表
 
@@ -954,9 +954,9 @@ python train/train.py --preset 1b --data pretrain --data-lang zh --remote-data \
 ### 10.1 评测锚点
 
 口径：字符归一 PPL = `exp(Σ token NLL / 评估段字符数)`；
-`tests/eval_common.py::BASE`（256 维、seed=11、eta_stdp=0.02）+ `SEG`；
+`tests/evals/eval_common.py::BASE`（256 维、seed=11、eta_stdp=0.02）+ `SEG`；
 冻结语料 internal_corpus，80/20 划分。历史锚点使用**显式 fp32**读出，
-与 P189 库默认 fp8 不是同一口径。`tools/rebaseline.py` 现在默认显式 fp32，
+与 P189 库默认 fp8 不是同一口径。`tools/eval/rebaseline.py` 现在默认显式 fp32，
 仅比较、不改 `ANCHOR`；`--readout-dtype fp8` 可测 fp8，但不判历史锚点一致。
 
 **P192 本地复测（x86 Windows，Python 3.14.5，无 NPU，单位 ppl_char）**：
@@ -1026,7 +1026,7 @@ Markdown 与 `docs/index.html`**（20 份）作为语料，跑同一 `BASE` 口�
 
 ⚠ **锚点是 P110（fp32 读出）时期重测的**：读出默认自此经 fp32 → fp16 → **fp8**（P189）
 多轮变更（见《竞争力与脑同构性评估》§6.4），**fp8 锚点尚未重测** ——
-`tools/rebaseline.py --readout-dtype fp8` 测 fp8；脚本默认显式 fp32，与库默认值分开
+`tools/eval/rebaseline.py --readout-dtype fp8` 测 fp8；脚本默认显式 fp32，与库默认值分开
 （本节上表已实测当前工作区 fp8；不可外推到 NPU 或其他配置）。
 
 **稀疏读出的 PPL 对照**（4M 档 A/B，`[工具] bench_readout_sparse.py`）：
@@ -1037,12 +1037,12 @@ Markdown 与 `docs/index.html`**（20 份）作为语料，跑同一 `BASE` 口�
 | 项 | 状态 |
 |---|---|
 | `python tests/run_tests.py fast` | **9/9**（零回归门槛） |
-| 专项 verifier | **43 个 `verify_*.py`**（另有 `bench_accel_path.py`，不计入 verifier；清单见 §9.4） |
+| 专项 verifier | **43 个 `verify_*.py`**（另有 `bench_accel_readout_path.py`，不计入 verifier；清单见 §9.4） |
 | ~~`verify_m2_rust_kernels.py`~~ | 🔴 **已随 P188 删除**（Rust 臂整体下线）。它 P182 时是 0 FAIL/31 条全绿，但**该 verifier 与它守护的实现都不再存在** —— 保留此行只为说明「Rust 臂的 bug 史」（int64→int32 漏转曾致 5 FAIL，N2 relerr≈1.9） |
 | P192 Cython/开关/loader/重叠契约/CANN 核对门禁 | 最新例数见发布日志，不复制过时计数；Cython 只声明容差等价，实例隔离、force 失败、plain/fused 与 fp32/fp64 编码输入另有覆盖 |
-| `verify_ltm_trace_semantics.py` | ⚠ **26/32，(a) 组 6 例失败且为既有失败**（已 stash 验证与新改动无关）；(b)(c)(d) 全绿。退出码保持 1 以免差异被永久掩盖 |
-| `verify_readout_fused.py` | ✅ PASS（融合更新核 1.54×） |
-| `verify_accel_readout.py` | ✅ 全部 PASS |
+| `gate_ltm_trace_semantics.py` | ⚠ **26/32，(a) 组 6 例失败且为既有失败**（已 stash 验证与新改动无关）；(b)(c)(d) 全绿。退出码保持 1 以免差异被永久掩盖 |
+| `gate_readout_fused.py` | ✅ PASS（融合更新核 1.54×） |
+| `gate_accel_readout.py` | ✅ 全部 PASS |
 | **P192 发布验证实测（2026-10-11，py -3.14.5）** | **40/41** verifier 通过（`outputs/test/p192_publication/summary.json` + 各 `.log`）；fast **9/9**；`compileall` + `train.py --help` + `infer.py --help` 全过；隔离目录、无预编译扩展、外部 cwd 下 `force` 真实构建成功（`fresh_cython_build.log`，`cp314 openmp=yes`）。唯一失败即上表 (a) 组既有失败 |
 | CI | 两套 workflow 已补 Python 3.14、Cython 构建/强制加载及新增门禁。GitCode 用 uv 创建 3.14 虚拟环境，GitHub 用 setup-python；仓库无 Jenkinsfile。远端本轮状态未核验，**不宣称 CI 全绿** |
 
@@ -1079,7 +1079,7 @@ Markdown 与 `docs/index.html`**（20 份）作为语料，跑同一 `BASE` 口�
 | 9 | **M4b 优化倍率的可外推性** | 44.6× / 21.9× / 1.44× 是 **x86 本机实测**；0.40 ms/tok 是**昇腾端到端实测** | 两者**不可相乘外推**（§4.3 已标注）。`[台账]` C7 明确 imprints 侧收益「尚未经服务器复测」 |
 | 10 | **主循环三段**（`tokenize` / `encode_onehot` / `step`） | ✅ **P113 日志已采集**：`tokenize` 0.02 / `encode_onehot` 0.02 ms/tok | **P111 段日志未采集**（此前一直标「待服务器实测」）；更早文档记 0.06 / 0.13 ms（2026-09-29，x86 口径） |
 | 11 | **检查点 `compact_csr`** | 0.8–37 s / 5 万步（跨配置观测） | 旧文档记 3.9 s / 10 万行。两者是**不同分母**（步 vs 行），不可比 |
-| 12 | **专项 verifier 数量** | 以 `tests/verifiers/verify_*.py` 与发布原始记录实计。P192 另补 loader 隔离与 CANN 未知状态门禁；不再复制过时例数 | 历史值 18/21/22/26/29 均已作废（各阶段的实际计数）。⚠ **「文件数 ≠ verifier 数」**：`bench_accel_path.py` 是基准脚本。⚠ 更根本的：**不要在文档里写死这个数字**（它变了 6 次），引用时现查 |
+| 12 | **专项 verifier 数量** | 以 `tests/gates/gate_*.py` 与发布原始记录实计。P192 另补 loader 隔离与 CANN 未知状态门禁；不再复制过时例数 | 历史值 18/21/22/26/29 均已作废（各阶段的实际计数）。⚠ **「文件数 ≠ verifier 数」**：`bench_accel_readout_path.py` 是基准脚本。⚠ 更根本的：**不要在文档里写死这个数字**（它变了 6 次），引用时现查 |
 | 13 | **`M2_infer` 是否跑单核** | **P113 起不是**：`plain` 走 `_csr_matvec` 的行级 prange，实测 1.28 ms/tok | 《竞争力与脑同构性评估》§5.2 / §6.3 曾写「只走单核numba，占端到端 39.3%」→ 已同步 |
 
 **已失效、不得再引用的表述**（`文档写作规范.md` §1 禁止表，同样适用于本文档）：

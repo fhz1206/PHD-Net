@@ -56,6 +56,8 @@ def T(zh: str, en: str = "") -> str:
 
 
 # 兜底替换表：按「长串优先」排序，保证最长匹配生效
+# 结构：(中文键, 英文值)。正向（en 模式）：中文键 → 英文值；
+# 反向（zh 模式）：由下方 _REV_ZH 程序化构建 英文值 → 中文键。
 _TABLE: list[tuple[str, str]] = [
     # —— 训练主循环 ——
     ("预取进程数", "prefetch processes"),
@@ -276,30 +278,109 @@ _LATIN_OK = re.compile(r"[A-Za-z]")      # 快速预筛：没有字母就不用�
 # 快速预筛：没有「需要翻译的字符」才走快速通道。
 # ⚠ 2026-10-07：范围必须**含 CJK 标点与全角字母数字**（\u3000-\u303f 注释符号、
 #   \uff00-\uffef 全角（）：，；、与 Ａ-Ｚ），否则「只有标点没有汉字」的串会
-#   被快速通道原样返回 —— 门禁 verify_i18n 的 B3 抓到过（'（SFT）'→ 未译）。
+#   被快速通道原样返回 —— 门禁 gate_cli_i18n 的 B3 抓到过（'（SFT）'→ 未译）。
 _CJK_OK = re.compile(r"[\u4e00-\u9fff\u3000-\u303f\uf900-\ufaff\uff00-\uffef]")
+
+# ============================================================================
+# zh 模式：**英 → 中** 反向兜底（2026-10-08 新增）
+# ----------------------------------------------------------------------------
+# 背景：此前 translate() 只有「源码中文串 → en 模式译成英文」一个方向；运行期
+# 却有大量**硬编码英文**片段（"(requested fp8"、"checkpoint storage = fp16"、
+# "prefetch processes"、"warning: " …，多数恰是 `_TABLE` 的英文值）在 zh 模式
+# 原样透出 → 终端中英混杂。→ zh 模式把 `_TABLE` 的英文值**反向译回中文键**。
+#
+# 构建规则（保守优先，宁可漏译不可误翻）：
+#   ① `_REV_ZH`：英文值（strip 后）→ 中文键。**一键多值**（多个中文键映射到
+#      同一英文值）时取**较长的中文键**（信息更完整；同长保留先出现的，保证
+#      确定性）。实测碰撞例："total time" ← 总计用时/总用时、"usage" ←
+#      用法/占用、"warning" ← 警告/警告：——任取其一均可读。
+#   ② **只收长度 ≥ 4 的英文值**：滤掉 "on"/"off"/"s"/"ms"/"run"/"avg"/"min"
+#      这类短词 —— 短词即使加词边界也极易误伤代码标识符、路径、数字单位。
+#      短词（含 "on/off"）一律放弃，不翻。
+#   ③ 边界用显式环视 `(?<![A-Za-z0-9_]) … (?![A-Za-z0-9_])` 而非裸 `\b`：
+#      对标识符字符的判定二者等价，但 `\b` 在值以空格/标点结尾时（如
+#      "warning: "）必然失配，环视对任意值稳健。下划线归标识符侧，
+#      "probe_PPL"、"save_dir"、"step_time" 等不会被拆开误翻。
+#   ④ **区分大小写**精确匹配（保守起步，实测够用：源码硬编码片段均为小写，
+#      放宽会把 FP8/Fp16 等专有名词卷进来）。
+#   ⑤ 值被 strip 掉的**尾部空白**同步从键上剥掉（"警告："对应值 "warning: "
+#      → core "warning:"：冒号在匹配内被消费掉，键必须保留全角冒号，
+#      否则 "警告：读出后端…" 会丢冒号变成 "警告读出后端…"）。
+#   ⑥ 快速通道：zh 模式下**没有 ASCII 字母**的串直接原样返回
+#      （纯中文 / 纯数字 / 对齐表格零开销）。
+_REV_ZH: dict[str, str] = {}
+for _zh_k, _en_v in _TABLE:
+    _core = _en_v.strip()
+    if len(_core) < 4 or not _core.isascii():
+        continue                                  # ② 短词 / ③ 非英文值 / 空译文
+    _zc = _zh_k.strip()
+    if _en_v != _core:                            # ⑤ 值有被剥的尾部空白 → 键同步剥
+        _zc = _zc.rstrip(" \t")
+    if _core not in _REV_ZH or len(_zc) > len(_REV_ZH[_core]):
+        _REV_ZH[_core] = _zc                      # ① 更长的中文键优先
+
+# 补充表：**只存在于 zh 反向**的零星硬编码英文 —— 源码直接打印、`_TABLE`
+# 里没有对应中文键（无法程序化推出）。刻意维持极小集合，逐条注明出处；
+# `setdefault` 不覆盖 `_TABLE` 派生的映射。
+_ZH_EXTRA: dict[str, str] = {
+    "requested": "请求",      # train.py 精度声明行 "(requested fp8 …)"
+}
+for _xk, _xv in _ZH_EXTRA.items():
+    _REV_ZH.setdefault(_xk, _xv)
+
+# 最长优先的交替正则（与 en 模式 _KEYS/_CN 同一策略：排序后 re.escape 拼接）
+_REV_ITEMS = sorted(_REV_ZH.items(), key=lambda kv: (-len(kv[0]), kv[0]))
+_ZH_EN = re.compile("(?<![A-Za-z0-9_])(?:"
+                    + "|".join(re.escape(k) for k, _ in _REV_ITEMS)
+                    + ")(?![A-Za-z0-9_])")
+
+# zh 译后修整（只在 zh 模式、只作用于终端输出层）：
+#   _ZH_SPACE  汉字之间的残留空格折叠（"读出后端 不可用" → "读出后端不可用"）；
+#              只在两侧都是汉字时折叠，数字/英文前后的空格不动，保住对齐；
+#   _ZH_COLON  汉字后的半角 ": " 补成全角 "："（与 "警告：" 类词条风格一致）；
+#   _ZH_COMMA  逗号后紧跟汉字时补成全角 "，"（"8, 警告" → "8，警告"）；
+#              "1, 2, 3" 这类列表后面不是汉字，不受影响。
+_ZH_SPACE = re.compile(r"(?<=[\u4e00-\u9fff])[ \t]+(?=[\u4e00-\u9fff])")
+_ZH_COLON = re.compile(r"(?<=[\u4e00-\u9fff])\s*:\s*(?![\u4e00-\u9fff])")
+# 汉字全角冒号后**仍残留**的空格（后跟英文/数字时 _ZH_COLON 不吞），
+# 折叠成无空格 —— 中文冒号后照习惯不加空格。
+_ZH_COLON_GAP = re.compile(r"(?<=[\u4e00-\u9fff]：)[ \t]+")
+_ZH_COMMA = re.compile(r",\s*(?=[\u4e00-\u9fff])")
 
 
 def translate(text: str) -> str:
-    """把 `text` 里的中文片段按表替换（英文模式）。未知片段原样保留。
+    """按当前语言转换 `text`：en 模式译出中文串，zh 模式译回硬编码英文。
 
     ⚠ P147：**诊断类前缀整行跳过翻译**（见 `_DIAG_PREFIXES` / `_DIAG_TAG`）——
-      逐词替换会把技术告警拼成中英混杂的不可读文本。
-    ⚠ 2026-10-07：**粘连处理**（逐词替换的固有产物，实测）：
+      逐词替换会把技术告警拼成中英混杂的不可读文本。**两种模式都跳过**：
+      诊断行必须两种语言下逐字节一致。
+    ⚠ 2026-10-07（en 模式）：**粘连处理**（逐词替换的固有产物，实测）：
         "读出后端不可用" → "readout backendunavailable"
         "已加载检查点"   → "loadedcheckpoint"
       根因是「两个相邻词条各自译成英文后首尾相接」，此时源字符串里**已经没有
       汉字**，靠事后的「字母↔汉字」规则根本看不到 → 必须在**替换回调里**判断：
       相邻词条、或原文前一个字符是字母且本次译文也以字母开头 → 补一个空格。
+    ⚠ 2026-10-08（zh 模式）：反向兜底 —— `_REV_ZH`（由 `_TABLE` 程序化构建，
+      英文值 → 中文键，只收长度 ≥ 4 的值）+ 显式环视词边界 + 区分大小写。
+      短词（"on"/"off"/"s"/"ms"/"run" …）与未收录的英文一律原样保留；
+      fp8/fp16/PPL 等专有名词自然不受影响（不在表内）。
     """
-    if _LANG != "en" or not text:
+    if not text:
         return text
+    if _LANG == "zh":
+        return _translate_zh(text)
+    # —— en 模式（原有逻辑，行为不变）——
     # 快速通道：**整段没有汉字**（英式日志里绝大多数行，含全部指标表格）
     # → 原样返回，零正则开销；顺带保证对齐用的连续空格绝不被动过。
     if not _CJK_OK.search(text):
         return text
     if text.lstrip().startswith(_DIAG_PREFIXES) or _DIAG_TAG.match(text):
         return text
+    return _translate_en(text)
+
+
+def _translate_en(text: str) -> str:
+    """en 模式：中文片段 → 英文（2026-10-07 前的 translate 正文，原样搬入）。"""
     # _MAP 是模块级去重表：**每次 write 不再重建 dict**（原来 27.97 µs/次，
     # train.py 每步多次 print，纯浪费）。
     prev_end = -1                      # 上一个匹配的结尾（源串坐标）
@@ -332,6 +413,26 @@ def translate(text: str) -> str:
         return out
     out = _C2L.sub(" ", _L2C.sub(" ", out))
     return _P2C.sub(" ", out)
+
+
+def _translate_zh(text: str) -> str:
+    """zh 模式：硬编码英文片段 → 中文（反向兜底，保守规则见 `_REV_ZH` 注释）。"""
+    # 快速通道 ⑥：整段没有 ASCII 字母 → 原样返回（纯中文/纯数字/表格零开销）。
+    if not _LATIN_OK.search(text):
+        return text
+    # 诊断前缀：两种模式下都整行跳过（与 en 模式同一判据、同一理由）。
+    if text.lstrip().startswith(_DIAG_PREFIXES) or _DIAG_TAG.match(text):
+        return text
+
+    def _rep(m: "re.Match") -> str:
+        return _REV_ZH[m.group(0)]
+
+    out = _ZH_EN.sub(_rep, text)
+    if out == text:                      # 没有任何命中 → 三个修整正则都白跑
+        return out
+    out = _ZH_SPACE.sub("", out)
+    out = _ZH_COLON_GAP.sub("", _ZH_COLON.sub("：", out))
+    return _ZH_COMMA.sub("，", out)
 
 
 class _StreamFilter:

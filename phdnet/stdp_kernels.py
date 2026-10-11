@@ -63,7 +63,7 @@ def _stdp_delta(W, post_idx, t_pre, t_post, pre, post, eta, w_max):
 #   `2.0*t_pre[i]*post[k]`，而 Cython 版用 `cdef float`（fp32）→ 仍有
 #   ~1 ulp 差异（门禁 B4 实测 max|d| ~6e-8）。
 #   故本开关**同样不构成「逐位等价」**，只保证**语义等价**（同序、同 clip、
-#   同事件驱动分支）。门禁：`tests/verifiers/verify_cykernels.py`。
+#   同事件驱动分支）。门禁：`tests/gates/gate_cython_kernels.py`。
 try:                                        # pragma: no cover - 纯导入分支
     from .cykernels import get_kernels as _get_cyk
 except Exception:                           # noqa: BLE001

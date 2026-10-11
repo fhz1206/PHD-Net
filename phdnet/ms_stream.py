@@ -3,7 +3,7 @@
 fhz 2026-09-29（服务器 ``--data pretrain`` 报「glob 无匹配」后拍板走此路）：
 **默认仍从本地 datasets/ 加载**（逐位不变）；用户通过 ``--remote-data`` 切换
 为 ModelScope 直读——**HTTP Range 流式**（206 分块随机读，pyarrow 直接消费
-可 seek 文件流，与 tools/fetch_l3.py 同款、项目已实测），**只支持
+可 seek 文件流，与 tools/data/fetch_ultrafineweb_l3.py 同款、项目已实测），**只支持
 ModelScope**（数据集托管于 modelscope.cn，atomgit 限额 1 GiB 本就推不全）。
 
 实现（fhz 指示「用 modelscope 库」）：
@@ -165,7 +165,7 @@ def expand_ms(spec: str) -> list[MsFile]:
       分片抽样只发生在主进程的 glob 展开处。
     - 带通配符 → 列最后一层目录 + fnmatch 过滤文件名。
       **只支持单层**（pattern 不含 `/`、不支持 `**` 跨目录）——与
-      ``tools/fetch_ms.py::walk_parquets`` 的手工递归不同，这里显式拒绝而非
+      ``tools/data/fetch_modelscope_multisource.py::walk_parquets`` 的手工递归不同，这里显式拒绝而非
       静默失效（审计 A4）。
     """
     repo_id, tail = _parse(spec)
@@ -193,7 +193,7 @@ def expand_ms(spec: str) -> list[MsFile]:
 def open_ms_file(spec: str, block_mb: int = _BLOCK_MB):
     """``ms://`` spec → 可 seek 的 HTTP 文件流（Range 随机读，零落盘）。
 
-    依赖 fsspec + aiohttp（fetched from tools/fetch_l3.py 同款，项目已实测）。
+    依赖 fsspec + aiohttp（fetched from tools/data/fetch_ultrafineweb_l3.py 同款，项目已实测）。
     私有数据集经 MS_TOKEN 认证。**不重试**：重试需重建文件流（fsspec 句柄
     不可复用），由调用方 ``phdnet.corpus.open_parquet_source`` 统一重试。
     """

@@ -1,0 +1,47 @@
+{
+  "env": {
+    "python": "3.14.5",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "machine": "AMD64",
+    "cpu_count": 8,
+    "numpy": "2.5.2",
+    "numba": "0.67.0",
+    "torch": "2.13.0+cpu",
+    "commit": "6f9493b",
+    "ts": "2026-10-11 16:44:26"
+  },
+  "note": "本地 x86 回归基准；**不可作为昇腾/文档数字**（今天已实测三次平台方向相反）",
+  "mechanisms": {
+    "threads=1": {
+      "M1_encode_us": 887.2,
+      "M2_infer_fused_us": 1101.9,
+      "M2_infer_plain_us": 1102.4,
+      "M4b_predict_arr_us": 170.9,
+      "LTM_encode_us": 55.3
+    },
+    "threads=2": {
+      "M1_encode_us": 831.1,
+      "M2_infer_fused_us": 624.7,
+      "M2_infer_plain_us": 697.9,
+      "M4b_predict_arr_us": 282.0,
+      "LTM_encode_us": 55.8
+    },
+    "threads=4": {
+      "M1_encode_us": 777.7,
+      "M2_infer_fused_us": 586.0,
+      "M2_infer_plain_us": 674.7,
+      "M4b_predict_arr_us": 191.7,
+      "LTM_encode_us": 60.1
+    },
+    "threads=8": {
+      "M1_encode_us": 963.6,
+      "M2_infer_fused_us": 358.9,
+      "M2_infer_plain_us": 480.8,
+      "M4b_predict_arr_us": 316.4,
+      "LTM_encode_us": 59.4
+    }
+  },
+  "smoke": {
+    "error": "\n                [--context-milestone CONTEXT_MILESTONE]\n                [--ckpt-dtype {,fp8,bf16,fp16,int8,int16,int32}]\n                [--ckpt-every CKPT_EVERY] [--log-every LOG_EVERY] [--resume]\n                [--save-dir SAVE_DIR] [--log-file LOG_FILE] [--report]\n                [--verbose]\ntrain.py: error: argument --preset: invalid choice: '4m' (choose from 'smoke', '1b', '1b_max', '30b')\n"
+  }
+}

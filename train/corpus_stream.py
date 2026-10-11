@@ -16,7 +16,7 @@
   该决策只依赖 `text[i:i+max_len]`（贪心不回溯、不向左看）。
   在线版保证**每次决策前缓冲 ≥ max_len 字符（或源已耗尽 = 缓冲即全部剩余）**，
   因此 L 的上界、命中判断、回退行为与全量完全相同。
-  `verify_stream_tokenize.py` 对拍验证（多块切分 vs 全量，逐位一致 PASS）。
+  `gate_stream_tokenize.py` 对拍验证（多块切分 vs 全量，逐位一致 PASS）。
 
 语料流定义：`concat(样本_i + SEP)`（SEP="\n\n"，与 load_text 的样本分隔约定一致，
 每条样本尾部显式携带分隔符 → 样本边界成为 token 流的普通字符）。
@@ -230,6 +230,29 @@ class PrefetchChars:
         t = self._cur[self._cur_i]
         self._cur_i += 1
         return t
+
+    def close(self) -> None:
+        """显式清理：终止所有生产者进程并关闭队列（防止进程泄漏）。
+        
+        必须在训练结束/异常时调用。支持上下文管理器 `with PrefetchChars(...) as src:`。
+        """
+        for p in self._procs:
+            if p.is_alive():
+                p.terminate()
+        for p in self._procs:
+            p.join(timeout=2.0)
+        try:
+            self._q.close()
+            self._q.join_thread()
+        except Exception:
+            pass
+        self._procs.clear()
+
+    def __enter__(self) -> "PrefetchChars":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 
 
 def build_vocab_text(path, max_chars: int, sep: str = SEP) -> str:

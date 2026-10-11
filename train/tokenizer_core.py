@@ -7,7 +7,7 @@
   主进程单核 100%）。本模块把热循环编译为释放 GIL 的机器码（numba njit nogil）：
   线程池并行 = 真多核，且共享内存零 pickle，主进程只做 µs 级接链。
 
-逐位等价承诺（对拍验收 = tests/verifiers/verify_vocab_parallel.py 全部用例）：
+逐位等价承诺（对拍验收 = tests/gates/gate_vocab_parallel.py 全部用例）：
   与 vocab_parallel._scan_group（Python 进程版）及串行 StreamingTokenizer 的
   贪心轨道**逐位一致**：最长匹配 L=max_len..2（单字符永不查词表、走 OOV 编码），
   memo 缓存不改变语义，锚点链 δ 前缀链语义原样保留。

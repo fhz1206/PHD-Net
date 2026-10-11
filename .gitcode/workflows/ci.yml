@@ -41,26 +41,26 @@ jobs:
           .venv-ci/bin/python -c "from phdnet.cykernels import get_kernels; assert get_kernels('force') is not None"
       - name: Cython 与审计修复门禁
         run: |
-          .venv-ci/bin/python tests/verifiers/verify_cython_loader.py
-          .venv-ci/bin/python tests/verifiers/verify_cykernels.py
-          .venv-ci/bin/python tests/verifiers/verify_cython_switch.py
-          .venv-ci/bin/python tests/verifiers/verify_stdp_parity.py
-          .venv-ci/bin/python tests/verifiers/verify_eval_readonly.py
-          .venv-ci/bin/python tests/verifiers/verify_wm_modulator.py
-          .venv-ci/bin/python tests/verifiers/verify_perf_no_regression.py
-          .venv-ci/bin/python tests/verifiers/verify_cann_dispatch.py
-          .venv-ci/bin/python tests/verifiers/verify_overlap_contract.py
+          .venv-ci/bin/python tests/gates/gate_cython_loader.py
+          .venv-ci/bin/python tests/gates/gate_cython_kernels.py
+          .venv-ci/bin/python tests/gates/gate_cython_switch.py
+          .venv-ci/bin/python tests/gates/gate_stdp_parity.py
+          .venv-ci/bin/python tests/gates/gate_eval_readonly.py
+          .venv-ci/bin/python tests/gates/gate_wm_modulator.py
+          .venv-ci/bin/python tests/gates/gate_csr_vectorization_perf.py
+          .venv-ci/bin/python tests/gates/gate_cann_dispatch.py
+          .venv-ci/bin/python tests/gates/gate_cpu_npu_overlap_contract.py
           .venv-ci/bin/python -m compileall -q phdnet train tools
           .venv-ci/bin/python train/train.py --help
           .venv-ci/bin/python train/infer.py --help
       - name: fast 回归（9 项，零回归门槛）
         run: .venv-ci/bin/python tests/run_tests.py fast
       - name: 分词器向量化逐位对拍
-        run: .venv-ci/bin/python tests/verifiers/verify_seg_equiv.py
+        run: .venv-ci/bin/python tests/gates/gate_word_segmenter_equivalence.py
       - name: 词表并行构建逐位对拍
-        run: .venv-ci/bin/python tests/verifiers/verify_vocab_parallel.py
+        run: .venv-ci/bin/python tests/gates/gate_vocab_parallel.py
       - name: 并行核 / 多进程流逐位一致性
-        run: .venv-ci/bin/python tests/verifiers/verify_parallel_consistency.py
+        run: .venv-ci/bin/python tests/gates/gate_parallel_consistency.py
 
   torch-backend:
     name: torch 栈（CPU 参考路径）
@@ -86,7 +86,7 @@ jobs:
           .venv-ci/bin/python -c "import sys; sys.path.insert(0, 'tests'); \
             from checks_backend import t_backend_probe; t_backend_probe(); \
             print('backend probe PASS')"
-          .venv-ci/bin/python tests/verifiers/verify_accel_readout.py
+          .venv-ci/bin/python tests/gates/gate_accel_readout.py
 
   precision:
     name: 精度体系验证（P9）
@@ -105,4 +105,4 @@ jobs:
           .venv-ci/bin/python -m pip install "numpy==2.5.2" "numba==0.67.0" "Cython==3.3.0" setuptools pyarrow psutil
           .venv-ci/bin/python -c "import sys; assert sys.version_info[:2] == (3, 14), sys.version"
       - name: 精度审计（L1 位算法逐位 / L2 带宽 / L3 端到端）
-        run: .venv-ci/bin/python tools/audit_precision.py
+        run: .venv-ci/bin/python tools/eval/audit_precision.py

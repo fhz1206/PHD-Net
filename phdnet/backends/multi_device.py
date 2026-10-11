@@ -44,7 +44,7 @@ OMP/MKL 线程数收敛到 1（避免 CPU 线程与卡内线程争抢；单卡�
 - 跨设备判据是**容差一致**（不是逐位）：归约顺序不同。
 - 但**同设备分片**（同一张 CPU/GPU 上按行切分再 cat）在本实现下是逐位一致的
   ——每行 dot 与分片顺序无关，softmax 在 cat 后的同一向量上计算。
-  `tests/verifiers/verify_multi_device.py` 对此给逐位断言。
+  `tests/gates/gate_multi_device.py` 对此给逐位断言。
 - fp8/fp4 档不参与列并行（码本量化路径为 CPU numba 单路，见 P9）。
 """
 

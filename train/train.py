@@ -15,12 +15,12 @@
   `--vocab-scan full` 可全量扫一遍构建零 OOV 词表；训练流中 OOV token
   跳过该训练步并计数（永不崩溃、永不截断），OOV 率进 [METRIC] 尾行。
 - **流式分词逐位等价**：StreamingTokenizer 与全量贪心匹配逐位一致，
-  `verify_stream_tokenize.py` 四用例对拍 PASS。
+  `gate_stream_tokenize.py` 四用例对拍 PASS。
 - **多核词表与数据加载（fhz 2026-09-25 指令）**：词涌现按 L 层并行；
   全量扫描/head token 收集按批走锚点链并行（`--vocab-workers`，
   默认 = 核心数×0.8）；训练流由生产者进程预取（`PrefetchChars`），
   主循环零等待代码（无 sleep/轮询/忙等）。全部逐位等价，
-  `verify_vocab_parallel.py` 对拍 PASS。
+  `gate_vocab_parallel.py` 对拍 PASS。
 
 定位（同 config_1b.py）
 --------------------
@@ -329,7 +329,7 @@ def main() -> None:
                          "「fp8 位模式存储（uint8）+ 每步 CPU 转换 int8 计算」"
                          "（P154/P155 路径，转换核可用 --fp8-conv 在 torch/nogil 间切换）。"
                          "int 族显式请求仍禁用（P163）；fp4/int4 维持禁用（P152）。"
-                         "保留率代价见 tools/probe_readout_precision.py（P110）")
+                         "保留率代价见 tools/probe/probe_readout_precision.py（P110）")
     ap.add_argument("--torch-compile", dest="torch_compile",
                     action="store_true", default=False,
                     help="P58（fhz 2026-09-29「图优化关了吧」）：默认 OFF——"
@@ -404,7 +404,7 @@ def main() -> None:
                          "  · fused：prange 融合核（昇腾实测慢 3-4×，已否决）"
                          "⚠ **x86 结论不构成昇腾证据**：本机上fused 比 plain 快，"
                          "跨平台训练请按机器选择；对拍见 "
-                         "tests/verifiers/verify_m2_kernels.py（11 例）")
+                         "tests/gates/gate_m2_infer_kernels.py（11 例）")
     ap.add_argument("--encoder-dtype", default="fp32",
                     choices=["fp32", "fp64", "fp16", "bf16"],
                     help="P74/P75/P107：M1 编码器权重存储精度（迭代量恒 fp32）。"
@@ -441,7 +441,7 @@ def main() -> None:
                          "流水，但训练已有 forward_dev 异步提交；额外流水"
                          "尚无保持语义的实现或 NPU 收益实测，"
                          "贸然前移学习会改变铁律③的逐 token 时序。"
-                         "证据见 verify_overlap_contract.py")
+                         "证据见 gate_cpu_npu_overlap_contract.py")
     ap.add_argument("--cann-dispatch", action="store_true",
                     help="P192：**不新增任何行为**，只核对 TASK_QUEUE_ENABLE=2 + "
                          "COMBINED_ENABLE=1 是否真的生效（这两项 P120 起已默认开）。"
@@ -530,6 +530,10 @@ def main() -> None:
     ap.add_argument("--log-file", type=Path, default=None)
     ap.add_argument("--report", action="store_true",
                     help="只打印检查点的大空间表统计后退出")
+    ap.add_argument("--verbose", action="store_true",
+                    help="打印完整启动说明（设计动机 / P 编号考古 / 验收方式"
+                         "等长篇解释）；默认关闭，启动横幅只留一行事实摘要"
+                         "（关键字保留，可 grep）")
     args = ap.parse_args()
     # P119：终端语言随 `--lang` 切换（**默认 en=英文** / zh=中文），必须
     # **早于任何 print**（zh 时是空操作；en 时输出层翻译历史中文文案）。
@@ -582,12 +586,17 @@ def main() -> None:
         from phdnet.backends.multi_device import capability_report
         _cap = capability_report(verbose=False)
         if _cap["accelerators_present"]:
-            print(f"[capability] accelerator(s) detected {_cap['accelerators_present']}, "
-                  f"but production training runs on numba/CPU for M1-M5 (numba only "
-                  f"compiles to CPU machine code); the readout (M6, ~89% of step "
-                  f"time) does run on the accelerator - see the [readout] backend "
-                  f"line below. No full-torch training stack exists (P30 removed "
-                  f"tools/train_torch_lm.py: it lacked 7 mechanisms incl. big_ltm)")
+            # 瘦身：默认一行事实（grep 关键字：capability / accelerator /
+            # numba / readout / P30）；「为什么 M1-M5 不能上加速器」的原理
+            # 说明（numba 只编译 CPU 机器码、P30 删 torch 全栈）挂 --verbose。
+            print(f"[capability] accelerators detected {_cap['accelerators_present']}, "
+                  f"but training runs numba/CPU for M1-M5 (readout M6 uses the"
+                  f" accelerator — see [readout] backend line below; P30)"
+                  + ("" if not args.verbose else
+                     " —— 原理（--verbose）：numba 只能编译到 CPU 机器码，"
+                     "M1-M5 上不了加速器；读出（M6，约占单步 89% 耗时）跑在"
+                     "加速器上；无 full-torch 训练栈（P30 已删 "
+                     "tools/train_torch_lm.py，缺 big_ltm 等 7 项机制）"))
             try:
                 from phdnet.backends.accel_readout import resolve_accel_device
                 _rd = resolve_accel_device("auto")
@@ -596,21 +605,24 @@ def main() -> None:
             except Exception as _e:                          # noqa: BLE001
                 print(f"[capability] readout device resolution failed: {type(_e).__name__}: "
                       f"{str(_e)[:120]}")
-                print("[capability] diagnostics: python tools/accel_doctor.py "
+                print("[capability] diagnostics: python tools/probe/accel_doctor.py "
                       "(env matrix / trial allocation / real-load timing)")
     except Exception:                                       # noqa: BLE001
         pass
     # 2026-10-07 修复（审计 4）：打印**真实**队列 maxsize——与两处 PrefetchChars
     # 构造的 depth=(PREFETCH_DEPTH or 8192) 用同一表达式（原 depth=0 会建无界
     # mp.Queue 却在日志里打 8192，打印值≠实际值）。
+    # 瘦身：默认一行事实（grep 关键字：parallel / prefetch / queue maxsize）；
+    # 队列容量/填充条件等解释性括号只在 --verbose 下打印。
     _q_depth = PREFETCH_DEPTH or 8192
     _inflight_samples = min(_q_depth, 8192) * (PREFETCH_BATCH or 64)
     print(f"[parallel] tokenisation thread (numba nogil)={vw} | prefetch processes={_pf}"
           f" | prefetch depth={_q_depth} (queue maxsize={_q_depth}), batch={PREFETCH_BATCH or 64} samples"
-          f" (queue capacity≈{_inflight_samples:,} samples ≈ millions of tokens;"
-          f" in-flight ≈ producers × lead batches — multiple producers needed to fill the queue)"
-          f" (decode cores/process≈{max(1, _cpu // _pf)}, total≈{_pf * max(1, _cpu // _pf)})"
-          f" | data-side parallelism does not contend with the tokenisation thread")
+          f" | decode cores/process≈{max(1, _cpu // _pf)}, total≈{_pf * max(1, _cpu // _pf)}"
+          + ("" if not args.verbose else
+             f" —— 详细（--verbose）：队列容量≈{_inflight_samples:,} samples"
+             f"（≈数百万 token）；in-flight ≈ producers × lead batches，"
+             f"填满队列需要多个生产者；数据侧并行不与分词线程争用"))
     print(f"[log] log file: {log_path}")
     print(f"[log] start: {datetime.now().isoformat(timespec='seconds')}  "
           f"argv: {' '.join(sys.argv[1:]) or '(defaults)'}")
@@ -675,9 +687,13 @@ def main() -> None:
                         _sz += os.path.getsize(os.path.join(_rt, _f))
                     except OSError:
                         pass
+        # 瘦身：默认一行事实（grep 关键字：numba / cache dir）；「首次编译/
+        # 缓存命中/预期启动时间」的解释挂 --verbose。
         print(f"[numba] cache dir = {_cd or '(module-local __pycache__)'}"
               f" | size = {_sz / 1e6:.1f} MB"
-              f" | 首次运行会全量编译，此后命中缓存（预期启动 ~2.6 s）", flush=True)
+              + ("" if not args.verbose else
+                 " | 首次运行会全量编译，此后命中缓存（预期启动 ~2.6 s）"),
+              flush=True)
     except Exception:                                   # noqa: BLE001
         pass
     if args.numba_threads > 0:
@@ -737,7 +753,7 @@ def main() -> None:
             "--readout-pipeline 已被 P192 关闭：训练步的设备路径本就走 "
             "forward_dev（零同步）+ nll_sync_every（摊薄 .item()），"
             "额外流水尚无保持语义的实现或 NPU 收益实测，贸然前移学习会改变逐 token 时序。"
-            "\n证据见 tests/verifiers/verify_overlap_contract.py 与 "
+            "\n证据见 tests/gates/gate_cpu_npu_overlap_contract.py 与 "
             "docs/PHD-Net_性能评估与迭代方案.md §8.3。"
             "\n真正相关的开关是 --cython-kernels 与 --cann-dispatch。")
     cfg.cann_dispatch = args.cann_dispatch           # CANN 下发流水（默认关）
@@ -757,9 +773,12 @@ def main() -> None:
             raise
         print(f"[p192] cython_kernels={cfg.cython_kernels!r} 未生效："
               f"{type(e).__name__}: {e}", flush=True)
+    # 瘦身：一行事实（grep 关键字：p192 / cython_kernels / readout_pipeline /
+    # cann_dispatch）；「默认 False + 生效值看哪行」的解释挂 --verbose。
     print(f"[p192] readout_pipeline={cfg.readout_pipeline}"
           f" | cann_dispatch={cfg.cann_dispatch}"
-          f"（均默认 False；开启动效值与回落原因见 [pipeline]/[cann-dispatch] 行）",
+          + ("" if not args.verbose else
+             "（均默认 False；开启动效值与回落原因见 [pipeline]/[cann-dispatch] 行）"),
           flush=True)
     if cfg.cann_dispatch:
         # 核对 TASK_QUEUE_ENABLE=2 / COMBINED_ENABLE=1 是否**真的生效**
@@ -998,6 +1017,7 @@ def main() -> None:
     #   拿不到才回落到请求值（并明确标注「requested」）。
     _eff_dtype = cfg.readout_dtype
     _eff_note = ""
+    _eff_detail = ""      # fp8-bits 落地模式长说明（仅 --verbose 展开）
     try:
         _rd = getattr(lm.net, "readout", None)
         _res = getattr(_rd, "_precision_resolved", None) or {}
@@ -1009,39 +1029,59 @@ def main() -> None:
         # P191d（2026-10-07 服务器日志自相矛盾：警告说「降级 fp16」但
         # 实际跑的是 **fp8 位模式存储**（P189 的 _fp8_bits 路径）——
         # 摘要行必须显示真实落地模式，否则 A/B 判定全错（P162 同款教训）。
+        # 瘦身：摘要行只留短标记 `fp8-bits`；「uint8 承载 / fp16 前向迭代 /
+        # P189」的完整说明移到 --verbose 分支。
         if getattr(_rd, "_fp8_bits", False):
             _eff_dtype = "fp8-bits"
-            _eff_note = (f"；请求 {cfg.readout_dtype} → **fp8 e4m3fn 位模式"
-                         f"（uint8 承载）存储 + fp16 前向/迭代**（设备无原生"
-                         f" fp8 算子，P189）")
+            _eff_note = f"；⚠ 请求 {cfg.readout_dtype} → fp8-bits"
+            _eff_detail = ("fp8-bits = fp8 e4m3fn 位模式（uint8 承载）存储"
+                           " + fp16 前向/迭代（设备无原生 fp8 算子，P189）")
     except Exception:                                        # noqa: BLE001
         pass
 
-    if _eff_dtype in ("bf16", "fp16", "fp8", "fp8-bits"):
-        # P147：fp8 已是 **fhz 明确指定的默认**（模型本体 fp8 / 其余 fp16），
-        # 所以这里**不再叫它「生产别用」**，而是如实陈述代价 + 给出复核手段。
-        # P191d：fp8-bits（位模式存储 + fp16 前向/迭代）也归入本分支——
-        # 它落进 else 的「精确 p − t 规则」是错的（P110 代价照旧）。
+    # P147：fp8 已是 **fhz 明确指定的默认**（模型本体 fp8 / 其余 fp16）。
+    # P191d：fp8-bits（位模式存储 + fp16 前向/迭代）也归入本分支——
+    # 它落进 else 的「精确 p − t 规则」是错的（P110 代价照旧）。
+    # ⚠ 瘦身（本次改造）：默认只打**一行事实摘要**——每个信息点都留可 grep
+    #   的关键字（compute precision / requested / checkpoint storage / P110 /
+    #   P146 / probe-every / Hebbian / fhz / P189 / fp32）；完整原理解释
+    #   （保留率实测数字、mantissa 位数、验收方式原文）只在 --verbose 下打印。
+    #   纯打印改动，不触碰任何训练数值行为。
+    _low_prec = _eff_dtype in ("bf16", "fp16", "fp8", "fp8-bits")
+    _hdr = (f"[readout] compute precision = {_eff_dtype} (requested "
+            f"{cfg.readout_dtype}{_eff_note})"
+            f" (checkpoint storage = {args.ckpt_dtype or 'fp32'})")
+    if _low_prec:
         _isdef = (_eff_dtype in ("fp8", "fp8-bits"))
-        _tail = ("这是 fhz 2026-10-07 指定的默认（模型本体 fp8，P189）。"
+        print(_hdr
+              + " — 低精度会舍入丢弃感知器 p − t 的**非目标行**更新"
+                "（P110 实测保留率 fp32 99.95% / fp16 26.67% / bf16 5.79%），"
+                "学习规则部分退化为纯 Hebbian；fp8 量化步长比 fp16 粗约 4 倍"
+                "（mantissa 3bit vs 10bit）"
+              + ("；这是 fhz 2026-10-07 指定的默认（模型本体 fp8，P189）"
                  if _isdef else
-                 "如需精确 p − t 规则请显式 --readout-dtype fp32。")
-        print(f"[readout] compute precision = {_eff_dtype} (requested "
-              f"{cfg.readout_dtype}{_eff_note})"
-              f" (checkpoint storage = {args.ckpt_dtype or 'fp32'}); "
-              f"代价：低精度会舍入丢弃感知器 p − t 的**非目标行**更新"
-              f"（P110 实测保留率 fp32 99.95% / fp16 26.67% / bf16 5.79%"
-              f"@ |dp|~1e-6），即学习规则部分退化为纯 Hebbian；"
-              f"**fp8 的量化步长比 fp16 粗约 4 倍**（mantissa 3bit vs 10bit）"
-              f"，风险更高。{_tail}"
-              f" **验收方式**：用 `--probe-every N` 的固定探针 PPL 做 A/B"
-              f"（训练流 PPL 波动正负 20%，不可用作判据，见 P146）。",
+                 "；如需精确 p − t 规则请显式 --readout-dtype fp32")
+              + "；验收方式：`--probe-every N` 的固定探针 PPL 做 A/B"
+                "（训练流 PPL 波动正负 20%，不可用作判据，见 P146）。",
               flush=True)
+        if args.verbose:
+            print("[readout] 完整精度说明（--verbose）：读出权重走 fp8 e4m3fn "
+                  "位模式（uint8 承载）存储 + fp16 前向/迭代（设备无原生 fp8 "
+                  "算子，P189）。代价机制：感知器 p − t 的非目标行更新量 "
+                  "|dp|~1e-6（|W|~1e-2 档）落在量化步长/半 ULP 附近 → 更新被"
+                  "舍入丢弃，学习规则部分退化为纯 Hebbian（只剩目标行抬升）。"
+                  "实测保留率（tools/probe/probe_readout_precision.py，"
+                  "P110，判据=同精度舍入后元素是否真的变了）：fp32 99.95% / "
+                  "fp16 26.67% / bf16 5.79%；fp8 的量化步长比 fp16 粗约 4 倍"
+                  "（mantissa 3bit vs 10bit）→ 非目标行保留率更低，风险最高。"
+                  "这是知情取舍（访存/存储收益 > 学习精度损失），fhz "
+                  "2026-10-07 指定的默认（模型本体 fp8，P189），不是缺陷。"
+                  "验收方式：用 `--probe-every N` 的固定探针 PPL 做 A/B"
+                  "（探针用同一份冻结文本 + readonly 前向，对训练零污染；"
+                  "训练流 PPL 波动正负 20%，不可用作判据，见 P146）。",
+                  flush=True)
     else:
-        print(f"[readout] compute precision = {_eff_dtype} (requested "
-              f"{cfg.readout_dtype}{_eff_note})"
-              f" (checkpoint storage = {args.ckpt_dtype or 'fp32'})"
-              f" — 精确 p − t 规则", flush=True)
+        print(_hdr + " — 精确 p − t 规则", flush=True)
     print(f"[readout] backend={_rb}"
           + (f" (device {lm.net.readout.device})"
              if _rb.startswith("accel:") else "")
@@ -1049,8 +1089,17 @@ def main() -> None:
              if hasattr(lm.net.readout, "_accel_fallback_reason") else ""))
     print_capacity_report(capacity_report(cfg, vocab))
     print(f"plastic params (as built, count_params basis): {count_params(lm.net):,}")
+    # 瘦身：默认一行事实（可 grep：context / state never reset / big_ltm /
+    # 1M）；「状态永不重置如何承载长程依赖」的原理说明只在 --verbose 下打印。
     print("[context] state never reset (WM/STDP/LTM carried continuously across samples/shards/epochs);"
-          " long-range dependency carried by big_ltm imprints → supports arbitrarily long continuous sequences (target ≥1M tokens)")
+          " long-range dependency carried by big_ltm imprints"
+          " (target ≥1M tokens)"
+          + (""
+             if not args.verbose else
+             " —— 原理（--verbose）：PHD-Net 无位置编码/注意力窗口，context ="
+             " 记忆机制的有效范围；跨样本/分片/epoch 状态全程连续，长程依赖"
+             " 由 big_ltm 事件驱动印迹（1B 突触容量）承载，支持任意长连续"
+             " 序列；每跨 --context-milestone 打一行里程碑证明连续 context 达标"))
 
     if args.init_from is not None and Path(args.init_from).exists():
         meta = load_model(Path(args.init_from), lm)
@@ -1102,8 +1151,12 @@ def main() -> None:
     _n = len(_gc.get_objects())
     _gc.freeze()
     _gc.set_threshold(50_000, 200, 200)
+    # 瘦身：一行事实（grep 关键字：gc / freeze / threshold）；「tracked
+    # objects = 0 属 freeze 正常行为（P105 曾误回滚）」的说明挂 --verbose。
     print(f"[gc] freeze() + threshold(50000, 200, 200); "
-          f"tracked objects = {_n:,}（freeze 后 get_objects 返回 0 属正常）",
+          f"tracked objects = {_n:,}"
+          + ("" if not args.verbose else
+             "（freeze 后 get_objects 返回 0 属正常）"),
           flush=True)
 
     for ep in range(args.epochs):
@@ -1116,99 +1169,99 @@ def main() -> None:
         if remote_active:
             from phdnet.ms_stream import REMOTE_MAX_PROCS
             _pw = min(PREFETCH_W or REMOTE_MAX_PROCS, REMOTE_MAX_PROCS)
-        src = PrefetchChars(data_path, SEP,
+        with PrefetchChars(data_path, SEP,
                             lang=_lang_filter,
                             # 2026-10-07 修复（审计 4）：缺省 0 → 无界队列（与日志
                             # depth=8192 不符）→ 与 batch_samples 的 or 64 同口径
                             depth=(PREFETCH_DEPTH or 8192),
                             batch_samples=PREFETCH_BATCH or 64,
-                            workers=_pw)
-        stream = StreamingTokenizer(lm.tok.seg, src,
-                                   assistant_marker=(args.assistant_marker
-                                                     or None))
-        it = iter(stream)
-        # P26：掩码模式下 next() 返回 (token, trainable)，否则是纯 token
-        def _next_tok():
-            item = next(it, None)
-            if item is None:
-                return None, True
-            if isinstance(item, tuple):
-                return item
-            return item, True
+                            workers=_pw) as src:
+            stream = StreamingTokenizer(lm.tok.seg, src,
+                                       assistant_marker=(args.assistant_marker
+                                                         or None))
+            it = iter(stream)
+            # P26：掩码模式下 next() 返回 (token, trainable)，否则是纯 token
+            def _next_tok():
+                item = next(it, None)
+                if item is None:
+                    return None, True
+                if isinstance(item, tuple):
+                    return item
+                return item, True
 
-        p2, _ = None, True                                 # t_{i-1}（epoch 首步 prev 断开）
-        p1, trainable = _next_tok()                        # t_i
-        t0, _ = _next_tok() if p1 is not None else (None, True)   # t_{i+1}（训练目标）
-        if args.epochs > 1 and ep > 0 and i > 0:
-            print(f"[epoch {ep + 1}/{args.epochs}] continuing stream across epochs: state continuous"
-                  f" (net not reset), first step's prev link severed", flush=True)
-        _stoi = lm.tok.stoi                   # 局部绑定（省每步属性链解析）
-        # P72：主循环分段计时（此前只有 net.step 内部九段，**主循环开销
-        # 从未被测量**——实测分段之和 < 总耗时，差额就落在这里）。
-        _lp = {"tokenize": 0.0, "encode_onehot": 0.0, "step": 0.0}
-        _lpn = 0
-        while t0 is not None:
-            if _STOP["flag"]:
-                break
-            if args.tokens and i - done >= args.tokens:
-                break
-            if args.minutes and (time.perf_counter() - t_start) / 60.0 >= args.minutes:
-                break
-            p2_in = p2 is None or p2 in lm.tok.stoi
-            if p2_in and p1 in lm.tok.stoi and t0 in lm.tok.stoi:
-                # p2 为 OOV 时按 None 处理（组合编码退化为无前词上下文）——
-                # 2026-09-25 审计修复：原条件漏查 p2，OOV 落在 p2 位会 KeyError 崩溃
-                _eo0 = time.perf_counter() if args.step_profiling else 0.0
-                x = lm.tok.encode_composite(p1, p2)
-                _i0 = _stoi[t0]                    # 复用：省两次 dict 查找
-                tgt = lm.tok.onehot(_i0)
-                if args.step_profiling:
-                    _lp["encode_onehot"] += time.perf_counter() - _eo0
-                    _lpn += 1
-                # P69：语种自检用——保留最近 8 个真实 token（每 log_every 反查词表
-                # 拼文本片段 + CJK 占比，一眼看出 --lang 是否生效）
-                _lang_tail.append(int(_i0))
-                if len(_lang_tail) > 8:
-                    _lang_tail.pop(0)
-                # P26 SFT：p1（当前 token）属 prompt 段 → 只推进状态不学习。
-                # 损失由 (p1, p2) → p0 这一步产生，故用 **p0** 的可训练标记。
-                _st0 = time.perf_counter() if args.step_profiling else 0.0
-                d = lm.net.step(x, target=tgt, learn=trainable,
-                                target_idx=_i0)
-                if args.step_profiling:
-                    _lp["step"] += time.perf_counter() - _st0
-                if trainable:
-                    seg_nll.append(d["nll"])
+            p2, _ = None, True                                 # t_{i-1}（epoch 首步 prev 断开）
+            p1, trainable = _next_tok()                        # t_i
+            t0, _ = _next_tok() if p1 is not None else (None, True)   # t_{i+1}（训练目标）
+            if args.epochs > 1 and ep > 0 and i > 0:
+                print(f"[epoch {ep + 1}/{args.epochs}] continuing stream across epochs: state continuous"
+                      f" (net not reset), first step's prev link severed", flush=True)
+            _stoi = lm.tok.stoi                   # 局部绑定（省每步属性链解析）
+            # P72：主循环分段计时（此前只有 net.step 内部九段，**主循环开销
+            # 从未被测量**——实测分段之和 < 总耗时，差额就落在这里）。
+            _lp = {"tokenize": 0.0, "encode_onehot": 0.0, "step": 0.0}
+            _lpn = 0
+            while t0 is not None:
+                if _STOP["flag"]:
+                    break
+                if args.tokens and i - done >= args.tokens:
+                    break
+                if args.minutes and (time.perf_counter() - t_start) / 60.0 >= args.minutes:
+                    break
+                p2_in = p2 is None or p2 in lm.tok.stoi
+                if p2_in and p1 in lm.tok.stoi and t0 in lm.tok.stoi:
+                    # p2 为 OOV 时按 None 处理（组合编码退化为无前词上下文）——
+                    # 2026-09-25 审计修复：原条件漏查 p2，OOV 落在 p2 位会 KeyError 崩溃
+                    _eo0 = time.perf_counter() if args.step_profiling else 0.0
+                    x = lm.tok.encode_composite(p1, p2)
+                    _i0 = _stoi[t0]                    # 复用：省两次 dict 查找
+                    tgt = lm.tok.onehot(_i0)
+                    if args.step_profiling:
+                        _lp["encode_onehot"] += time.perf_counter() - _eo0
+                        _lpn += 1
+                    # P69：语种自检用——保留最近 8 个真实 token（每 log_every 反查词表
+                    # 拼文本片段 + CJK 占比，一眼看出 --lang 是否生效）
+                    _lang_tail.append(int(_i0))
+                    if len(_lang_tail) > 8:
+                        _lang_tail.pop(0)
+                    # P26 SFT：p1（当前 token）属 prompt 段 → 只推进状态不学习。
+                    # 损失由 (p1, p2) → p0 这一步产生，故用 **p0** 的可训练标记。
+                    _st0 = time.perf_counter() if args.step_profiling else 0.0
+                    d = lm.net.step(x, target=tgt, learn=trainable,
+                                    target_idx=_i0)
+                    if args.step_profiling:
+                        _lp["step"] += time.perf_counter() - _st0
+                    if trainable:
+                        seg_nll.append(d["nll"])
+                    else:
+                        prompt_masked += 1
                 else:
-                    prompt_masked += 1
-            else:
-                oov_skipped += 1                          # OOV：跳过该步，流不断
-            i += 1
-            _tk0 = time.perf_counter() if args.step_profiling else 0.0
-            _nxt, _flag = _next_tok()
-            if args.step_profiling:
-                _lp["tokenize"] += time.perf_counter() - _tk0
-            p2, p1, t0, trainable = p1, t0, _nxt, _flag
+                    oov_skipped += 1                          # OOV：跳过该步，流不断
+                i += 1
+                _tk0 = time.perf_counter() if args.step_profiling else 0.0
+                _nxt, _flag = _next_tok()
+                if args.step_profiling:
+                    _lp["tokenize"] += time.perf_counter() - _tk0
+                p2, p1, t0, trainable = p1, t0, _nxt, _flag
 
-            if args.context_milestone and i // args.context_milestone > last_mile:
-                last_mile = i // args.context_milestone
-                ppl_ms = f"sliding PPL {float(np.exp(np.mean(seg_nll[-args.log_every:]))):.3f}" \
-                    if seg_nll else ""
-                print(f"[context milestone] {last_mile * args.context_milestone:,} "
-                      f"tokens processed continuously (state never reset; ≥1M context achieved ×{last_mile}){ppl_ms}",
-                      flush=True)
-                _print_table_stats(lm)
-            # P146：**固定探针集**（每 `probe_every` 步一次，只读前向）。
-            # ⚠ 为什么必须有（用真实日志实测的数字）：
-            #   训练流窗口 PPL 的**变异系数 19.6%**、相邻变化中位 **7.0%**
-            #   （最大 60%），而首→尾趋势只有 **−2.8%** → **信噪比 0.40**，
-            #   趋势被波动完全淹没 → **任何 <20% 的真实差异都测不出来**。
-            #   根因三条：
-            #   ① 窗口覆盖的**语料片段每次不同**（远程流式+ 混合域）
-            #      → 词表/句式/长度分布的差异直接进 PPL，这是**混淆变量**；
-            #   ② 连续 token 的 nll **逐步强相关**（共享语境、共享刚被
-            #      STDP/Oja 改过的权重）→ 2000 个样本的**有效样本数远小于
-            #      2000**，均值标准误被严重低估；
+                if args.context_milestone and i // args.context_milestone > last_mile:
+                    last_mile = i // args.context_milestone
+                    ppl_ms = f"sliding PPL {float(np.exp(np.mean(seg_nll[-args.log_every:]))):.3f}" \
+                        if seg_nll else ""
+                    print(f"[context milestone] {last_mile * args.context_milestone:,} "
+                          f"tokens processed continuously (state never reset; ≥1M context achieved ×{last_mile}){ppl_ms}",
+                          flush=True)
+                    _print_table_stats(lm)
+                # P146：**固定探针集**（每 `probe_every` 步一次，只读前向）。
+                # ⚠ 为什么必须有（用真实日志实测的数字）：
+                #   训练流窗口 PPL 的**变异系数 19.6%**、相邻变化中位 **7.0%**
+                #   （最大 60%），而首→尾趋势只有 **−2.8%** → **信噪比 0.40**，
+                #   趋势被波动完全淹没 → **任何 <20% 的真实差异都测不出来**。
+                #   根因三条：
+                #   ① 窗口覆盖的**语料片段每次不同**（远程流式+ 混合域）
+                #      → 词表/句式/长度分布的差异直接进 PPL，这是**混淆变量**；
+                #   ② 连续 token 的 nll **逐步强相关**（共享语境、共享刚被
+                #      STDP/Oja 改过的权重）→ 2000 个样本的**有效样本数远小于
+                #      2000**，均值标准误被严重低估；
             #   ③ `exp(mean(nll))`（几何平均）**对高频词敏感**，而突触
             #      生长/修剪本就会改变 nll 的**分布形状**—— 而形状变化与
             #      「学得更好」无关。
@@ -1303,6 +1356,7 @@ def main() -> None:
                 _print_table_stats(lm)
         if _STOP["flag"] or (args.tokens and i - done >= args.tokens):
             break
+    # with PrefetchChars 上下文在此结束，自动调用 src.close() 清理进程
 
     # ── 收尾：滚动检查点 + final 模型 ──
     wait_pending_saves()          # P83：先等后台队列写完（滚动 ckpt 的数据一致性）

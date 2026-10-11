@@ -6,7 +6,7 @@
      仅活跃突触前行参与更新，权重截断于 [0, w_max]。
   2. **后端只改 device/dtype**：昇腾用 `npu`、ROCm 走 `cuda` 接口（torch.version.hip）、
      DirectML 用 `privateuseone`；算子代码完全相同。
-  3. **启用前必须过等价性对拍**：`tests/verifiers/verify_accel_readout.py`（容差判据；跨设备不宣称逐位）
+  3. **启用前必须过等价性对拍**：`tests/gates/gate_accel_readout.py`（容差判据；跨设备不宣称逐位）
      （沿用 numba 自检 bug 的教训：不能只靠「权重有没有增长」判据）。
   4. 暂不支持逐突触自适应学习率（T4.1，需逐突触状态与循环）——该开关开启时
      请使用 numpy 后端，避免语义分歧。

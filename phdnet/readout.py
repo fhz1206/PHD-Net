@@ -46,7 +46,7 @@ if NUMBA_OK:                                        # pragma: no cover
 
     # 注：`y = W·h` **没有**换成 numba 并行核——实测它比 OpenBLAS 的 dgemv
     # 慢 0.68×（1540×768）且**不逐位等价**（BLAS 的分块求和顺序不同，最大偏差
-    # 1.4e-14）。故前向仍走 BLAS，融合核只用于更新（tests/verifiers/verify_readout_fused.py）。
+    # 1.4e-14）。故前向仍走 BLAS，融合核只用于更新（tests/gates/gate_readout_fused.py）。
 else:                                               # pragma: no cover
     _ro_dense_update = None
 
@@ -237,7 +237,7 @@ if NUMBA_OK:                                        # pragma: no cover
     # 在 numba 里则静默变成负数 → 权重**符号翻转**且幅度仍在码本内，看起来
     # 「合法」但训练已被静默损坏（这正是 fhz 点名要避免的失败模式）。
     # 故这里**显式** clip 到 [−32767, +32767] / [−2³¹, 2³¹−1]，绝不依赖溢出行为。
-    # 实测（tests/verifiers/verify_readout_intdtypes.py · T3）：一次 η=1e6 的
+    # 实测（tests/gates/gate_readout_int_dtypes.py · T3）：一次 η=1e6 的
     # 极端更新后，int16 全部码落在 ±32767（= 码本端点）、int32 落在
     # ±iinfo(int32).max/min，**无一元素回绕**（回绕会让符号翻转且幅度仍在
     # 码本内 → 看起来「合法」但训练已被静默损坏）。

@@ -17,7 +17,7 @@ Cython 臂要避免同样的结局，就必须**先证明收益、再开默认**
 
 ⚠ **诚实声明**：本机（x86 Windows）**无昇腾/NPU**，因此 Cython 核的
 **端到端收益没有任何昇腾实测**。这里能做的是**结构/容差等价门禁**
-（`tests/verifiers/verify_cykernels.py`）+ 本机微基准；不是浮点逐位保证。
+（`tests/gates/gate_cython_kernels.py`）+ 本机微基准；不是浮点逐位保证。
 收益数字必须等服务器 A/B，见 `docs/PHD-Net_性能评估与迭代方案.md` §八。
 """
 from __future__ import annotations

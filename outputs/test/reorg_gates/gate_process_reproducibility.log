@@ -1,0 +1,4 @@
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+RESULT ppl_char=292133.212005 bpc=18.156267 n_tok=1033 hash_rand=1
+
+[stderr]

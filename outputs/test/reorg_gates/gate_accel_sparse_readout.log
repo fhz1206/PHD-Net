@@ -1,0 +1,132 @@
+==============================================================================
+P111 稀疏加速读出对拍：n_h=64 n_out=40 k=8 device=cpu(torch)
+==============================================================================
+
+[A] 数值等价（容差判据，跨库归约顺序不同故不要求逐位）
+  PASS  A1 前向 y 与 numba 稀疏一致  [max|Δ|=7.397e-08 (|y|max=1.000)]
+  PASS  A2 learn_softmax 后 CSR val 一致  [max|Δ|=5.960e-08 (尺度 1.000, 相对 5.96e-08)]
+  PASS  A3 learn 后 CSR val 一致  [max|Δ|=5.960e-08 (相对 5.96e-08)]
+  PASS  A1b 连续不同 h：gather 缓存逐 h 失效（epoch 判据）  [cache_epoch=6 ht_epoch=6]
+  PASS  A4 与「稠密+零化非连接位」语义等价  [max|Δ|=5.960e-08 (相对 5.96e-08)]
+
+[B] 调用面完整（P23/P24：换后端必须对齐全部访问面）
+  PASS  B1a conn_k 报告真实 k  [conn_k=8]
+  PASS  B1b hidden=0（单级）
+  PASS  B1c n_synapses = n_out*k  [320 vs 320]
+  PASS  B1d dtype_name=fp32（稀疏锁 fp32）  [fp32]
+  PASS  B1e stats 与 Readout 键对齐  [k=8 syn=320]
+  PASS  B1f stats 单列索引占用（不低估稀疏真实开销）  [val=0.001MB + idx=0.003MB]
+  PASS  B2a _csr 的 indptr/idx 与源 CSR 逐位一致
+  PASS  B2b _csr 的 val 与设备 W 当前值一致
+  PASS  B3 val[:]= 写入 + sync_csr_from_host 生效（ckpt 恢复路径）  [max|Δ|=2.980e-08（fp64↔fp32 往返量级）]
+  PASS  B4 W_cpu → load_W 精确往返  [shape=(40, 8)]
+  PASS  B5 未导出就 sync → fail-fast  [sync_csr_from_host() 在 _csr 之前被调用；请先取 _csr、写入 val[:]，再调用]
+
+[C] 拒绝路径（P19：不静默走错算法）
+  PASS  C1 非均匀行宽 CSR → fail-fast  [稀疏读出只支持均匀 k（收到行宽 min=2 max=3）]
+  PASS  C2 稠密切 _csr → NotImplementedError
+  PASS  C3 load_W 形状不符 → 报错
+
+[C4b] 稀疏前向算子 mulsum vs einsum（P116，容差判据）
+  PASS  C4b einsum 与 mulsum 容差内一致（**非逐位**）  [max|Δ|=0.000e+00 相对=0.00e+00（归约顺序不同，预期非0）]
+  PASS  C4b einsum 输出非零（防「丢权重」类静默错误）  [max|y|=0.8558]
+  PASS  C4b einsum 臂的更新路径仍生效（W 已变）
+
+[C4c] gather 缓存 epoch 判据（跨不同 h 的调用序列）
+  PASS  C4c1 缓存 gather 对应 hA（而非被污染的 hB）  [==hA:True ==hB:False]
+  PASS  C4c2 污染后用 hA 前向，y 与干净实例**数值一致**（无静默错误）  [max|Δ|=0.000e+00]
+  PASS  C4c3 同一 h 连续调用仍复用 gather（判据未过度失效）
+
+[C4d] 稀疏读出的 torch.compile 融合核（P128）
+  PASS  C4d1 稀疏路径**可以**启用 torch.compile（P128 前被排除）  [compiled=True]
+  PASS  C4d2 本机 torch.compile 不可用 → 已自动回落 eager（P19 正确行为）  [compiled=False]
+  PASS  C4d4 融合核实现里不含稀疏分支（故放开是安全的）
+
+[C4e] 稀疏更新不物化（P138：P28 禁令的稀疏臂漏改）
+  PASS  C4e1 稀疏更新不用 `add_(dp*g)`（会物化 25.4 MiB 临时张量）  [已改为 addcmul_]
+  PASS  C4e2 用 `addcmul_`（rank-1 AXPY，不物化）
+  PASS  C4e3 addcmul_ 与物化式**容差内一致**（fp32 1 ulp，非逐位）  [max|Δ|=2.384e-07 相对=5.532e-08]
+
+[C4f] gather 精度开关与死代码检查（P145）
+  PASS  C4f1 config 里 readout_gather_impl **只定义一次**（P145 清掉 3 份重试残留）  [实际 1 次]
+  PASS  C4f2 config 默认 gather_dtype=fp16（P147 指令）  [实际='fp16']
+  PASS  C4f2b config 默认 readout_dtype=fp8（P147 指令：模型本体 fp8）  [实际='fp8']
+  PASS  C4f3 fp16 的 g 在**容差内**（实测相对误差 ~2e-4，远松于1e-2）  [max相对Δ=2.193e-04]
+  PASS  C4f4 默认实例的 gather_dtype 是 fp32（未被动过）
+
+[D] 零回归：conn_k=0 稠密路径未被污染
+  PASS  D1 稠密构造仍是 (n_out, n_h) 且 conn_k=0  [(40, 64)]
+  PASS  D2 稠密前向形状不变  [(40,)]
+  PASS  D3 稠密更新仍生效（W 已变）
+
+==============================================================================
+结果：39/39 通过 | 失败 0
+==============================================================================
+
+[stderr]
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0] failed while attempting to run meta for aten.addmm_.default
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0] Traceback (most recent call last):
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_subclasses\fake_tensor.py", line 3086, in _dispatch_impl
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     r = func(*args, **kwargs)
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_ops.py", line 875, in __call__
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     return self._op(*args, **kwargs)
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]            ~~~~~~~~^^^^^^^^^^^^^^^^^
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_decomp\decompositions.py", line 5846, in inplace_op
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     out = outplace_op(*args, **kwargs)
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_ops.py", line 1279, in __call__
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     return self._op(*args, **kwargs)
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]            ~~~~~~~~^^^^^^^^^^^^^^^^^
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_prims_common\wrappers.py", line 313, in _fn
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     result = fn(*args, **kwargs)
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_decomp\decompositions.py", line 91, in inner
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     r = f(*tree_map(increase_prec, args), **tree_map(increase_prec, kwargs))
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_decomp\decompositions.py", line 1646, in addmm
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     return out + beta * self
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]            ~~~~^~~~~~~~~~~~~
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_prims_common\wrappers.py", line 313, in _fn
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     result = fn(*args, **kwargs)
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_compile.py", line 54, in inner
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     return disable_fn(*args, **kwargs)
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_dynamo\eval_frame.py", line 1446, in _fn
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     return fn(*args, **kwargs)
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_prims_common\wrappers.py", line 151, in _fn
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     result = fn(**bound.arguments)
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_refs\__init__.py", line 1218, in add
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     a, b = _maybe_broadcast(a, b)
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]            ~~~~~~~~~~~~~~~~^^^^^^
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_refs\__init__.py", line 475, in _maybe_broadcast
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     common_shape = _broadcast_shapes(
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]         *(t.shape if isinstance(t, TensorLike) else None for t in args)
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     )
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\_refs\__init__.py", line 463, in _broadcast_shapes
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     torch._check(
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     ~~~~~~~~~~~~^
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]         common_shape[idx] == shape[idx],
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     ...<2 lines>...
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]         f"should be broadcastable to {common_shape}",
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     )
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     ^
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\__init__.py", line 1768, in _check
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     _check_with(RuntimeError, cond, message)  # pyrefly: ignore [bad-argument-type]
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]   File "C:\Users\ASUS\AppData\Local\Programs\Python\Python314\Lib\site-packages\torch\__init__.py", line 1750, in _check_with
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0]     raise error_type(message_evaluated)
+E1011 16:55:25.061000 9592 site-packages\torch\_subclasses\fake_tensor.py:3090] [0/0] RuntimeError: Attempting to broadcast a dimension of length 8 at -1! Mismatching argument at index 1 had torch.Size([40, 8]); but expected shape should be broadcastable to [40, 64]
+D:\AiModel\train\phdnet\backends\accel_readout.py:1223: RuntimeWarning: torch.compile 融合核执行失败，永久回落 eager（原因：TorchRuntimeError: RuntimeError when making fake tensor call
+  Explanation: Dynamo failed to run FX node with fake tensors: call_method addmm_(*(FakeTensor(..., size=(40, 8)), FakeTensor(..., size=(40, 1)), FakeTensor(..., size=(1, 64))), **{'alpha': -0.15}): got RuntimeError('Attempting to broadcast a dimension of length 8 at -1! Mismatching argument at index 1 had torch.Size([40, 8]); but expected shape should be broadcastable to [40, 64]')
+  Hint: Your code may result in an error when running in eager. Please double check that your code doesn't contain a similar error when actually running eager/uncompiled. You can do this by removing the `torch.compile` call, or by using `torch.compiler.set_stance("force_eager")`. 
+
+  Developer debug context: 
+
+ For more details about this graph break, please visit: https://meta-pytorch.github.io/compile-graph-break-site/gb/gb4315.html
+
+from user code:
+   File "D:\AiModel\train\phdnet\backends\accel_readout.py", line 1149, in _train_step_core
+    self.W.addmm_(dp.reshape(-1, 1), ht.reshape(1, -1), alpha=-float(eta))
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
+）
+  warnings.warn(f"torch.compile 融合核执行失败，永久回落 eager"

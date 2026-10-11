@@ -255,7 +255,7 @@ MoE 的稀疏是**学出来的路由**，PHD-Net 的稀疏是**长在结构上�
 1. **口径绑定**。PPL 锚点只有一组有效：**4K 段 394.4687 / 全语料 359.2603**
    （256 维栈、`eta_readout=0.15`，2026-09-28 换中文维基语料后重测）。
    更早的 78.16 / 90.2480 / 73.1166 属**旧语料口径**，只存于 git 历史，**不可混用**。
-   ⚠ 读出精度默认已多轮变更（fp32→fp16→fp8，P189）——与这些锚点**不可直接比**（口径不同），需用 `tools/rebaseline.py` 重测。
+   ⚠ 读出精度默认已多轮变更（fp32→fp16→fp8，P189）——与这些锚点**不可直接比**（口径不同），需用 `tools/eval/rebaseline.py` 重测。
 2. **同 fraction、同机器、同数据才可比**。远程语料是分片级前缀抽样
    （`--remote-fraction` 默认 0.3），改 fraction 等于换数据分布。跨 run 比 PPL 前必须先对齐
    `data / remote / remote_fraction / lang / 分片数`。
@@ -301,8 +301,8 @@ MoE 的稀疏是**学出来的路由**，PHD-Net 的稀疏是**长在结构上�
   `build_powlaw_csr`（行宽不等，`indptr` 用 cumsum）。但：
   - `phdnet/readout.py` **不 import `sparse_alloc`**（`grep -n "sparse_alloc\|assign_conn_counts" phdnet/readout.py` 无命中）；
   - 模块自己的 docstring 写明：「本模块是**纯分配函数**：不参与前向/反向，**也未接入 `readout.py`**」；
-  - `tests/verifiers/verify_readout_sparse_gate.py:37` 的 G4 幂律分组门禁处于
-    `[SKIP] sparse_alloc 不可 import` 状态；`tools/bench_readout_sparse.py:113` 注释仍写
+  - `tests/gates/gate_readout_sparse_structure.py:37` 的 G4 幂律分组门禁处于
+    `[SKIP] sparse_alloc 不可 import` 状态；`tools/bench/bench_readout_sparse.py:113` 注释仍写
     「预留接口；`sparse_alloc.py` 由另一位同事并行实现中」——**注释已过期**。
 - ⚠ **接线的前置阻塞**：加速器对**非均匀行宽 fail-fast**
   （`phdnet/backends/accel_readout.py:148-153`：`稀疏读出只支持均匀 k`），
@@ -351,7 +351,7 @@ RNE 舍回 fp8 位模式——访存收益是完整的，**代价落在学习规
 fp8 的量化步长比 fp16 **粗约 4 倍**，非目标行更新保留率因此**最低**（下表）：
 「只提升目标行」的抑制项被吞掉，学习偏向纯 Hebbian。
 ⚠ 这是**知情取舍，不是缺陷**；如需精确 `p − t`，显式 `--readout-dtype fp32`。
-实测非目标行更新保留率（`tools/probe_readout_precision.py`，判据=同精度舍入后元素是否真变了）：
+实测非目标行更新保留率（`tools/probe/probe_readout_precision.py`，判据=同精度舍入后元素是否真变了）：
 
 | 精度 | 非目标行保留率 | 目标行保留率 | 语义后果 |
 |---|---|---|---|
@@ -414,10 +414,10 @@ fp8 的量化步长比 fp16 **粗约 4 倍**，非目标行更新保留率因此
 | M5 调制（`σ(a·z)` 门控） | `phdnet/modulator.py:1-16` |
 | M6 读出感知器 `ΔW = −η(p−t)⊗h` | `phdnet/readout.py:1147-1155` |
 | M6 稀疏读出仅均匀 k | `phdnet/readout.py:806-809` |
-| 幂律分配器**已接入**（P124，`alpha=0` 逐位等价均匀 k） | `phdnet/readout.py:574-579` import `sparse_alloc.build_powlaw_csr`。⚠ `tools/bench_readout_sparse.py:113` 仍写「预留接口 / 由另一位同事并行实现中」= **过期注释** |
+| 幂律分配器**已接入**（P124，`alpha=0` 逐位等价均匀 k） | `phdnet/readout.py:574-579` import `sparse_alloc.build_powlaw_csr`。⚠ `tools/bench/bench_readout_sparse.py:113` 仍写「预留接口 / 由另一位同事并行实现中」= **过期注释** |
 | 加速器非均匀 CSR fail-fast | `phdnet/backends/accel_readout.py:148-153` |
 | M6 CLI 默认 `conn_k=128`（4.2%） | `train/train.py:467`（P108 / fhz 2026-10-01）；库默认 0 = `phdnet/config.py:197` |
-| M2 CLI 默认核 = `plain`（行级 prange） | `train/train.py:394` `default="plain"`（P113 实测后改）；门禁 `tests/verifiers/verify_m2_kernels.py`（13 例）。⚠ 库默认 `pc_fused_kernel=True` 是另一条路径 |
+| M2 CLI 默认核 = `plain`（行级 prange） | `train/train.py:394` `default="plain"`（P113 实测后改）；门禁 `tests/gates/gate_m2_infer_kernels.py`（13 例）。⚠ 库默认 `pc_fused_kernel=True` 是另一条路径 |
 | 无反向传播 | `grep backward/autograd/requires_grad/torch.optim` 于 `phdnet/ train/ tools/` 无命中 |
 | 逐 token 语义 / 状态不重置 | `train/train.py:719, 805`；`phdnet/model.py:204` |
 | 各机制默认开关 | `phdnet/config.py`（铁律④） |
