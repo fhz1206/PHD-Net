@@ -144,6 +144,36 @@ class PHDNetConfig:
     prune_threshold: float = 0.01   # 突触修剪阈值（|w| 低于则归零）
 
     # ───────────────────────────────────────────────────────────────────────
+    # P194（2026-10-12）：**学习能力修复四件套**（fhz：按诊断报告解决
+    # 问题 1–4，保持脑同构）。全部在**既有机制**上接线，不引入新算子：
+    # ───────────────────────────────────────────────────────────────────────
+
+    # (Q1) 微批量并行：训练流以 B 个 token 为一组喂入，组内梯度平均后一次
+    #      提交读出（B7 机制），主干/STDP/LTM 仍按 token 严格保序（脑同构：
+    #      微小兴奋性神经元簇并行放电的抽象；不改变逐 token 时序语义）。
+    #      1 = 旧行为逐 token 提交；8/16/32 = 吞吐/统计效率↑（B7）。
+    micro_batch: int = 1
+    # (Q2) 表征发育窗口：>0 时前 N 步 PC/编码器可塑（eta_pc 按 1−t/N 余弦
+    #      退火到 0），之后冻结——脑对应发育临界期（P3/P83 的"表征先塑、
+    #      后固"两阶段发育，只是把『何时冻结』从手工开关变成按步数自动）。
+    #      0 = 旧行为（eta_pc 恒 0 或恒定，由 eta_pc 字段本身决定）。
+    pc_dev_steps: int = 0
+    # (Q3) 读出连接结构：0 = 稠密（旧行为）；>0 = 每输出单元 k 条结构性稀疏
+    #      连接（CSR，O1-3）。脑对应皮层→输出投射同样稀疏（不是全连接）。
+    #      幂律异质连接（readout_powlaw_alpha > 0）把高频词给更多连接、
+    #      长尾词被修剪到 k_min（更接近大脑的 rich-get-richer 结构可塑性）。
+    readout_conn_k: int = 0
+    readout_powlaw_alpha: float = 0.0
+    readout_powlaw_kmin: int = 1
+    readout_powlaw_kmax: int = 0
+    readout_powlaw_density: float | None = None
+    # (Q4) 读出权重精度：默认 **fp32**（精确 p−t 语义，非目标行更新保留率 99.95%）。
+    #      fp16/bf16/fp8/int8 仍可显式指定（带宽敏感且接受 Hebbian 近似时）。
+    #      P110 实测反证必须留在案：fp16 下非目标行更新保留率仅 26.67%，
+    #      即只保留目标行提升退化为纯 Hebbian；fp8 步长粗 4 倍，风险更高。
+    readout_dtype: str = "fp32"
+
+    # ───────────────────────────────────────────────────────────────────────
     # 路线图第二轮全量优化（2026-09-19，M9）：补齐剩余轨道
     # T1.2 / T2.2 / T3.2 / T3.3 / T3.4 / T4.4 / T5.1–T5.3
     # + PC 突破三方向 + 情景记忆双向校验。全部默认关闭 = 旧行为（非破坏）。
@@ -190,11 +220,8 @@ class PHDNetConfig:
     #   字段本身——它已恒为 True 且无消费者，留着只会让人以为还能关。
     conn_k: int = 0             # 每神经元入边数 k（0 = 自动取各层 n_in//8 ≈ 12.5%）
 
-    # O1-3：**读出头的结构性稀疏连接**（默认关闭）。
-    # 脑对应：皮层→输出投射同样稀疏（每个下游细胞只接收部分上游输入），
-    # 而非稠密全连接矩阵。启用后读出权重以 CSR 承载（每输出单元 k 条存在的入边），
-    # 学习规则不变（softmax 交叉熵的末端梯度），仅连接存在性结构改变。
-    readout_conn_k: int = 0     # 0 = 稠密读出（旧行为）；>0 = 每输出单元 k 条入边
+    # O1-3：读出头的结构性稀疏连接（readout_conn_k）定义已上移到
+    #      「P194 四件套」一节（:161-169）；此处不再重复定义。
     # P75：M2 推理核选择。True = 融合核（P52，x86 快 1.15-2.16×）；False = 原始
     # 5 次独立核调用。**昇腾 aarch64 实测融合核段 2.4 → 20-27 ms/tok**（疑似
     # prange + fastmath 在该平台退化）→ 保留开关做 A/B，不擅自改默认。
@@ -241,8 +268,7 @@ class PHDNetConfig:
     # PC 突破①：发育期后强制巩固表征——前 pc_dev_steps 步 PC/编码器可塑，
     #      之后冻结（eta_pc/eta_oja/eta_enc → 0），针对「表征漂移 × 恒定
     #      读出率 → 灾难性遗忘」的根因（M8.A 诊断链的对症机制）。
-    pc_dev_steps: int = 0
-
+    #      P194：字段定义已上移到「P194 四件套」一节（:160），此处只留说明。
     # PC 突破②：回放稳定读出——储备库保存旧 (输入, 目标) 对，每 replay_every
     #      步把一条旧输入在**当前表征**下前向（只读）并重训读出——
     #      以旧目标重新锚定漂移后的表征，缓解读出灾难性遗忘。
@@ -321,7 +347,8 @@ class PHDNetConfig:
     #   → `tools/probe/probe_readout_precision.py` 可复核这条反证。
     # fp8 的算子可用性由 `phdnet/backends/fp8_capability.py` **运行时探测**
     #   （原生 fp8 / 只有 int8→自动转 / 都无→报错），不再硬编码禁用（P86 解除）。
-    readout_dtype: str = "fp8"
+    #   P194：readout_dtype 定义已上移到「P194 四件套」一节（:174，默认 fp32），
+    #   fp8 仍可显式指定（--readout-dtype fp8）。
     # M1 稀疏编码器权重的**存储** dtype。
     # ⚠ 2026-10-07 更正注释（原注释写「默认 fp32」、还说 readout_dtype 默认 bf16，
     #   **两处都与代码不符**，P188 那轮就是被它误导的）：
@@ -402,22 +429,8 @@ class PHDNetConfig:
     # ② N>=2 会因同一 step_count 下多次 learn 造成 dt=0 → 迹不衰减 →
     #   权重污染（生产尺寸 max|Δw| 达 7~12；小尺寸测会漏掉）。
     ltm_imprint_amortize: int = 1
-    # P124：M6 读出的**幂律异质连接**分配（`phdnet/sparse_alloc.py` 接线）。
-    # k_i ∝ counts_i^alpha（counts = 每个输出单元的词频），行宽不等 → CSR 的
-    # indptr 用 cumsum。生物学依据：突触巩固/修剪（"use it or lose it"）。
-    #   alpha = 0.0 → **精确退化到均匀 k-conn**（与 P108 的 conn_k 路径逐位一致）
-    #   alpha > 0   → 高频词更多入边、长尾词被修剪到 k_min（更接近大脑的 rich-get-richer）
-    # ⚠ **默认 0.0 = 关闭**：这是结构变更，会改变模型的归纳偏置（长尾词容量下降、
-    #   高频词容量上升），**必须先用 PPL A/B 验证收益再开**。
-    # ⚠ alpha 过大（>=0.5）会在 Zipf 词频上大量撞 k_min/k_max 两端（见 sparse_alloc
-    #   模块 docstring「已知局限」），实践中 [0, 0.5] 更合适。
-    readout_powlaw_alpha: float = 0.0
-    # 幂律分配的预算：目标平均连接率（mean(k)/n_in）。None = 由 alpha=0 或
-    # k_max 自然决定。⚠ 无论 alpha 取值，**总 nnz 不超过 uniform_k*n_out**（预算控顶）。
-    readout_powlaw_density: float | None = None
-    # 每行入边数夹紧（长尾不归零、高频不铺满 n_in）
-    readout_powlaw_kmin: int = 1
-    readout_powlaw_kmax: int = 0        # 0 = 不设上限（= n_in）
+    # P124：M6 幂律异质连接（readout_powlaw_*）定义已上移到
+    #      「P194 四件套」一节；此处不再重复定义。
     # P34：nll 同步周期（AccelReadout）。1=每步同步（旧行为）；N>1 时
     # nll 累积到设备、每 N 步同步一次 → CPU/NPU 重叠（NPU 上端到端约 -30~40%）。
     # P62（2026-09-29）：默认 1 → **8**。服务器日志证据：读出 12.9 ms/tok、

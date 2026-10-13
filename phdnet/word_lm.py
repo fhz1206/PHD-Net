@@ -171,6 +171,14 @@ class PHDWordLM:
                             bad = 0
         if seg:
             nlls.append(float(np.mean(seg)))
+        # P194 (Q1)：流结束必须 flush 未提交的微批量梯度（B 步窗口未满时
+        # 挂起的读出累积）——否则最后不足 B 步的梯度静默丢失。
+        if self.net.cfg.micro_batch > 1:
+            pend = self.net.readout.pending_grad_n()
+            if pend > 0:
+                self.net.readout.commit_grad(self.net._ro_eta, n=pend)
+                self.net._mb_count = 0
+                self.net._mb_nll_sum = 0.0
         return nlls
 
     def train_stream(self, text: str, log_every: int = 1000,

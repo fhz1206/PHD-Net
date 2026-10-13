@@ -439,8 +439,12 @@ def main() -> int:
     check(str(_PC5().readout_gather_dtype) == "fp16",
           "C4f2 config 默认 gather_dtype=fp16（P147 指令）",
           f"实际={_PC5().readout_gather_dtype!r}")
-    check(str(_PC5().readout_dtype) == "fp8",
-          "C4f2b config 默认 readout_dtype=fp8（P147 指令：模型本体 fp8）",
+    # P194 (Q4，2026-10-12，fhz「按诊断报告解决问题 1–4」)：默认改为 **fp32**。
+    # 依据：P110 实测反证——fp16 下非目标行更新保留率仅 26.67%，读出学习
+    # 退化为纯 Hebbian（只保留目标行提升）；fp8 步长粗 4 倍风险更高。
+    # 学习信号完整性优先于带宽收益；fp8 仍可显式指定（--readout-dtype fp8）。
+    check(str(_PC5().readout_dtype) == "fp32",
+          "C4f2b config 默认 readout_dtype=fp32（P194 Q4：学习信号完整性优先）",
           f"实际={_PC5().readout_dtype!r}")
     # 数值契约：fp32 逐位不变；fp16 在容差内（实测相对误差 ~2e-4）
     _, ro32, _, _ = build_pair(n_h, n_out, k, seed=43)

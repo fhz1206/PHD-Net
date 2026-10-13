@@ -120,6 +120,12 @@ class PHDNet:
         self.step_count = 0
         self._sleep_count = 0                       # C2：consolidate 节流计数
 
+        # P194 (Q1)：微批量累积缓冲——主干/记忆仍按 token 严格保序（脑同构：
+        # 微小兴奋性神经元簇并行放电的抽象），仅读出梯度累积到 B 步平均提交。
+        self._micro_batch = int(getattr(cfg, "micro_batch", 1))
+        self._mb_accum: dict | None = None
+        self._mb_count = 0
+
         # P35：step 分段计时（诊断 CPU 侧耗时分布；默认关，零开销）
         self._prof_on = bool(getattr(cfg, "step_profiling", False))
         self._prof: dict = {}
@@ -394,7 +400,33 @@ class PHDNet:
             y = self.readout(h)
         nll = 0.0
         if target is not None and learn:
-            if cfg.readout_softmax:
+            # P194 (Q1)：micro_batch>1 时读出梯度**累积到 B 步再平均提交**
+            #（B7 机制的多步形式）。主干（PC/STDP/WM/LTM）与状态推进仍按
+            # token 严格保序 —— 这与脑同构不冲突：皮层的微回路本就以
+            # 「小簇并行放电 + 突触时间整合」工作（B7 的机制注释）。
+            # 累积期的 nll 返回**本步即时值**（诊断口径不变）。
+            if self._micro_batch > 1:
+                # 累积步：η=0 仅前向取 nll + 累积梯度到内部缓冲
+                nll_step = self.readout.learn_softmax(h, target, 0.0,
+                                                      y_pre=(y_dev if _dev_readout else y),
+                                                      target_idx=(int(target_idx) if target_idx is not None
+                                                                else int(np.argmax(target)))) if _dev_readout else \
+                            self.readout.learn_softmax(h, target, 0.0, y_pre=y)
+                self.readout.accumulate_grad(h, target)
+                self._mb_count += 1
+                if not hasattr(self, "_mb_nll_sum"):
+                    self._mb_nll_sum = 0.0
+                self._mb_nll_sum += nll_step
+                if self._mb_count >= self._micro_batch:
+                    # 提交：按平均梯度更新 W，返回 B 步平均 NLL
+                    nll = self.readout.commit_grad(
+                        self._ro_eta * learn_scale,
+                        n=self._mb_count)
+                    self._mb_count = 0
+                    self._mb_nll_sum = 0.0
+                else:
+                    nll = nll_step
+            elif cfg.readout_softmax:
                 # P6 性能修复：前向 y 已算得，传给 learn_softmax 省一次 W@h
                 # （与内部重算逐位一致；y_pre 不被原地修改，下方返回值不受影响）
                 # P40：设备直通路径传 target_idx（int）——target onehot 在
@@ -477,13 +509,23 @@ class PHDNet:
             # 脑同构 M6：发育期临界期——经验累积后学习率衰减（关闭可塑性窗口）
             cp_scale = (1.0 / (1.0 + cfg.crit_rate * self._exp)) if cfg.critical_period else 1.0
             mod_scale = (0.3 + 0.7 * gate) * task_scale * cp_scale
-            # PC 突破①：发育期后强制巩固表征（pc_dev_steps>0 时，前 N 步可塑、
-            # 之后冻结 PC/编码器——表征停止漂移，读出在稳定表征上继续学习）
-            dev_frozen = (cfg.pc_dev_steps > 0 and self.step_count >= cfg.pc_dev_steps)
+            # PC 突破①（P194 Q2 重写）：发育期余弦退火到 0——前 pc_dev_steps 步
+            # PC/编码器可塑（eta_pc 按 1−cos(π·t/N)/2 退火），之后冻结。
+            # 脑对应发育临界期（"表征先塑、后固"两阶段）；原硬切 dev_frozen
+            # 改为平滑退火（避免学习率断点导致的权重跳变）。
+            dev_frac = (self.step_count / cfg.pc_dev_steps) if (cfg.pc_dev_steps > 0) else 0.0
+            if cfg.pc_dev_steps > 0 and dev_frac >= 1.0:
+                pc_dev_gate = 0.0  # 完全冻结
+            elif cfg.pc_dev_steps > 0:
+                # 余弦退火：1 → 0（t=0 为 1，t=N 为 0）
+                import math
+                pc_dev_gate = 0.5 * (1.0 + math.cos(math.pi * dev_frac))
+            else:
+                pc_dev_gate = 1.0  # 旧行为：不退火，由 eta_pc 字段本身决定
             if self.learn_pc:
-                pc_scale = mod_scale * ((1.0 - stability) if cfg.auto_development else 1.0)
+                pc_scale = mod_scale * pc_dev_gate * ((1.0 - stability) if cfg.auto_development else 1.0)
                 _p = self._prof_t('PC_learn')
-                if not dev_frozen:
+                if pc_scale > 0.0:
                     if cfg.pc_predictive_target and self._prev_pc is not None:
                         # T1.2 预测编码主目标化：生成权重学习「下一时间步」表示
                         self.pc.learn_predictive(

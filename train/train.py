@@ -473,6 +473,11 @@ def main() -> None:
                          "入边数（0=稠密）。1B 档 128/3072 = 4.2%% 连接率，"
                          "访存 320→39 MB（省 8×）。默认 128 取自 4M 档 A/B："
                          "k=128 时 PPL 477 vs 稠密 608 且速度持平。")
+    ap.add_argument("--micro-batch", type=int, default=1,
+                    help="P194 (Q1)：读出梯度微批量累积步数（1=旧行为逐步提交）。"
+                         "主干/记忆仍按 token 严格保序（脑同构：微小簇并行放电+突触时间整合），"
+                         "仅读出末端做 B 步平均梯度更新（B7 机制的多步形式）。"
+                         "B=8/16/32 可显著提升吞吐与统计效率。")
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--epochs", type=int, default=1,
                     help="语料流过遍数（状态跨 epoch 连续不重置）")
@@ -720,6 +725,7 @@ def main() -> None:
     cfg = build_cfg(args.preset, args.width, args.big_n,
                     args.csr_online, args.readout_conn_k, args.seed)
     cfg.readout_dtype = args.readout_dtype            # P9 精度（默认 fp32）
+    cfg.micro_batch = int(args.micro_batch)           # P194 (Q1)：读出微批量（1=逐步）
     # P116：稀疏读出前向算子
     cfg.sparse_fwd_kernel = args.sparse_fwd_kernel
     # P122：imprint 摊销已移除；>1 交给 `SparseLTM.imprint` fail-fast 报错，

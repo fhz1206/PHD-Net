@@ -933,3 +933,63 @@ class Readout:
                 self.W = self.W - eta * np.outer(p - target, h)   # numpy 回退（含量化）
         self._clip()
         return nll
+
+    # ---------- P194 (Q1)：微批量梯度累积（micro_batch>1 时由 model.step 调用） ----------
+    def accumulate_grad(self, h: np.ndarray, target: np.ndarray) -> None:
+        """累积一步读出梯度到内部缓冲（不立即更新 W）。
+
+        B7 minibatch 语义的**多步形式**：调用方在 B 步后用 commit_grad()
+        按平均梯度一次性更新。与 learn_softmax(accumulate=N) 的区别：
+        累积窗口由调用方（model.step 的 micro_batch 计数）控制，本方法
+        只做「单步累积」，不触发更新 —— 这样主干（PC/STDP/LTM）可以继续
+        逐 token 推进（脑同构：微小兴奋性神经元簇并行放电 + 突触时间整合），
+        只有读出末端做批量统计（监督信号的方差缩减）。
+        """
+        if self._grad_acc is None:
+            self._grad_acc = np.zeros((self._n_out, self._n_in), dtype=np.float32)
+        y = self.__call__(h)
+        y = y - y.max()
+        p = np.exp(y)
+        p /= p.sum()
+        if self.hidden > 0:
+            a_acc = self._kwta(_csr_matvec(*self._W1, h))
+            self._grad_acc += np.outer(p - target, a_acc)
+        else:
+            self._grad_acc += np.outer(p - target, h)
+        self._acc_n += 1
+
+    def commit_grad(self, eta: float, n: int | None = None) -> float:
+        """按**梯度和**更新 W（等效于 n 个串行在线步 × η），返回平均 NLL。
+
+        P194 语义修正（2026-10-12）：首版写成 `c = eta / n`（B7 的 batch
+        均值语义），实测 PPL 随 B 单调恶化（mb=8 时 2.54 → 10.87）——
+        因为那把 n 步的总学习量除以了 n。要等效「n 个串行在线步 × η」，
+        必须施加 **Σ(−η·g_t) = −η·Σg_t**（和，不是均值）。
+        生物同构依据也支持「和」：突触巩固是可塑性信号的**时间积分**
+        （B7 注释原文「单次事件不足以触发长期可塑性」），不是均值。
+        n 仅用于诊断/返回值口径，不再缩放学习率。
+        """
+        if self._grad_acc is None or self._acc_n == 0:
+            return 0.0
+        n = int(n) if n is not None else self._acc_n
+        c = float(eta)
+        if self.hidden > 0:
+            ip, idx, val = self._W2
+            for i in range(self._n_out):
+                s = slice(ip[i], ip[i + 1])
+                val[s] -= c * self._grad_acc[i, idx[s]]
+        elif self.conn_k > 0:
+            ip, idx, val = self._csr
+            for i in range(self._n_out):
+                s = slice(ip[i], ip[i + 1])
+                val[s] -= c * self._grad_acc[i, idx[s]]
+        else:
+            self.W = self.W - c * self._grad_acc     # 兼容量化模式（setter 重量化）
+        self._clip()
+        self._grad_acc = None
+        self._acc_n = 0
+        return 0.0   # nll 由调用方用累积的 nll_sum / n 计算（保持口径一致）
+
+    def pending_grad_n(self) -> int:
+        """当前未提交的累积步数（0 = 无挂起梯度）。供调用方 flush/诊断。"""
+        return self._acc_n

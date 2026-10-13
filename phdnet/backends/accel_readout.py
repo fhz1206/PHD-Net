@@ -1394,6 +1394,107 @@ class AccelReadout:
             self._nll_n = 0
         return self._last_nll
 
+    # ---------- P194 (Q1)：微批量梯度累积（micro_batch>1 时由 model.step 调用） ----------
+    def accumulate_grad(self, h, target, target_idx: int | None = None) -> None:
+        """设备侧累积一步读出梯度（η=0 前向 + dp 累加，不更新 W）。
+
+        与 numba Readout.accumulate_grad 同语义：调用方 B 步后 commit_grad()
+        按平均梯度一次更新。梯度缓冲是**设备张量**（与 W 同形状、同设备），
+        累积用 add_（rank-1 外积）——B 步内不落主机、不重量化 W，
+        消除「每步反量化→更新→重量化」×(B−1) 次的精度损失与带宽
+        （这是 micro_batch 对 fp8/int8 存储的额外收益：低精度写回次数 ÷B）。
+        """
+        ht, _ = self._lookup_ht(h)
+        if getattr(self, "_mb_grad", None) is None:
+            self._mb_grad = torch.zeros_like(self.W, dtype=torch.float32)
+            self._mb_n = 0
+            self._mb_nll_sum = 0.0
+        y = self._matmul(ht)
+        y32 = y.float()
+        p = torch.softmax(y32, dim=0)
+        if target_idx is None:
+            target_idx = int(np.argmax(np.asarray(target)))
+        nll = float((torch.logsumexp(y32, dim=0) - y32[int(target_idx)]).item())
+        self._mb_nll_sum += nll
+        p[int(target_idx)] -= 1.0
+        dp = p.to(self._mb_grad.dtype)
+        if self._sparse:
+            g = self._sp_gather(ht.to(dp.dtype))
+            self._mb_grad.add_(dp.reshape(-1, 1) * g)
+        else:
+            self._mb_grad.addmm_(dp.reshape(-1, 1),
+                                 ht.reshape(1, -1).to(dp.dtype))
+        self._mb_n += 1
+
+    def commit_grad(self, eta: float, n: int | None = None) -> float:
+        """按**梯度和**更新 W（等效于 n 个串行在线步 × η）；返回平均 NLL。
+
+        P194 语义修正（与 numba Readout.commit_grad 同步）：施加
+        Σ(−η·g_t) = −η·Σg_t（**和**，不是均值）——「均值」版实测 PPL
+        随 B 单调恶化（mb=8 时 2.54 → 10.87）。累积阶段是 fp32 域
+        （消除了 fp8/int8 的 (B−1) 次反量化往返），更新域走
+        `_upd_dtype` 规则一次重量化写回。
+        """
+        if getattr(self, "_mb_grad", None) is None or self._mb_n == 0:
+            return 0.0
+        n = int(n) if n is not None else self._mb_n
+        avg = self._mb_grad * float(eta)
+        if self._sparse:
+            # 稀疏：W 形状是 (n_out, k)，不能直接 add_ 稠密矩阵。
+            # 走 gather 路径：avg_g = avg[:, Wi]（同 forward 的 gather 语义）。
+            if self.Wi is None:
+                raise RuntimeError(
+                    "commit_grad(sparse)：缺 Wi 索引（构造期应已建立）")
+            avg_g = avg[:, self.Wi]
+            upd_dtype = torch.float16 if self.W.dtype in (
+                torch.float16, torch.float8_e4m3fn, torch.uint8) else self.tdtype
+            if self.W.dtype == upd_dtype:
+                self.W.add_(avg_g.to(upd_dtype), alpha=-1.0)
+            else:
+                _Wq = self.W.to(upd_dtype) * float(getattr(self, "_wscale", 1.0))
+                _Wq.add_(avg_g.to(upd_dtype) * float(getattr(self, "_wscale", 1.0)),
+                         alpha=-1.0)
+                if self.W.dtype == torch.int8:
+                    _sc = float(getattr(self, "_wscale", 1.0)) or 1.0
+                    _codes = torch.clamp(torch.round(_Wq.to(torch.float32) / _sc),
+                                         -_INT8_QMAX, _INT8_QMAX)
+                    self.W.copy_(_codes.to(torch.int8))
+                else:
+                    self.W.copy_(_Wq.to(self.W.dtype))
+            if self.w_clip > 0.0:
+                self.W.clamp_(-self.w_clip, self.w_clip)
+        else:
+            upd_dtype = torch.float16 if self.W.dtype in (
+                torch.float16, torch.float8_e4m3fn, torch.uint8) else self.tdtype
+            if self.W.dtype == upd_dtype:
+                self.W.add_(avg.to(upd_dtype), alpha=-1.0)
+                if self.w_clip > 0.0:
+                    self.W.clamp_(-self.w_clip, self.w_clip)
+            else:
+                _Wq = self.W.to(upd_dtype) * float(getattr(self, "_wscale", 1.0))
+                _Wq.add_(avg.to(upd_dtype) * float(getattr(self, "_wscale", 1.0)),
+                         alpha=-1.0)
+                if self.w_clip > 0.0:
+                    _Wq.clamp_(-self.w_clip, self.w_clip)
+                if self.W.dtype == torch.int8:
+                    _sc = float(getattr(self, "_wscale", 1.0)) or 1.0
+                    _codes = torch.clamp(torch.round(_Wq.to(torch.float32) / _sc),
+                                         -_INT8_QMAX, _INT8_QMAX)
+                    self.W.copy_(_codes.to(torch.int8))
+                elif self.W.dtype == torch.float8_e4m3fn:
+                    self.W.copy_(_Wq.to(torch.float8_e4m3fn))
+                else:
+                    self.W.copy_(_Wq.to(self.W.dtype))
+        nll_avg = self._mb_nll_sum / float(max(1, self._mb_n))
+        self._mb_grad = None
+        self._mb_n = 0
+        self._mb_nll_sum = 0.0
+        return nll_avg
+
+    def pending_grad_n(self) -> int:
+        """当前未提交的累积步数（0 = 无挂起梯度）。"""
+        return int(getattr(self, "_mb_n", 0))
+
     def _eager_step(self, y32, ht, t, correct: int, eta: float):
         """eager 逐步执行（softmax→nll→addmm_）；compiled 回落时也走这里。
 

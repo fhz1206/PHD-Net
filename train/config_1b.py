@@ -64,8 +64,23 @@ def build_cfg(preset: str = "1b", width: int = 0, big_n: int = 0,
     """构造 1B 档配置。
 
     与生产基线（tools/train_production.py build_cfg）同配方：
-    表征冻结（eta_pc=eta_oja=0）、pred_in_readout、结构性稀疏主干（conn_k）、
-    big_ltm 1B 容量栈；另开放 csr_online / readout_conn_k 供长跑与大词表场景。
+    pred_in_readout、结构性稀疏主干（conn_k）、big_ltm 1B 容量栈；另开放
+    csr_online / readout_conn_k 供长跑与大词表场景。
+
+    P194（2026-10-12，fhz：按诊断报告解决问题 1–4，保持脑同构）：
+    **表征冻结默认解除**——eta_pc 从硬 0 改为「发育窗口」模式：
+    eta_pc=0.02、pc_dev_steps=20000（前 2 万步余弦退火到 0，之后冻结）。
+    依据：P113 实测 eta_pc=0 时主干表征不学、PPL 增益只来自检索/记忆通路
+    （PPL 19602–38101 的主因之一）。2 万步的窗口给主干足够时间形成
+    词汇表征，之后冻结避免「表征漂移 × 恒定读出率」的灾难性遗忘
+    （M8.A 诊断链的对症机制；历史冻结是**没有发育窗口**时的无奈之举）。
+    显式传 eta_pc=0 可回到旧行为（完全冻结）。
+
+    其余 P194 项（micro_batch / readout_conn_k / readout_dtype）不在此改默认：
+    - micro_batch：由 CLI --micro-batch 控制（训练流侧接线）；
+    - readout_conn_k：由 CLI --readout-conn-k 控制（现有机制）；
+    - readout_dtype：默认已从 fp8 改为 fp32（P110 反证：低精度把学习
+      退化成纯 Hebbian；带宽收益让位给学习信号完整性）。
     """
     p = PRESETS[preset]
     w = width if width > 0 else p["width"]
@@ -74,7 +89,8 @@ def build_cfg(preset: str = "1b", width: int = 0, big_n: int = 0,
     return PHDNetConfig(
         n_sdr=w, n_mid=w, n_top=w,
         k_sparse=max(8, w // 8),                 # 稀疏编码 6.25%（库默认 16，此处按档位放大）
-        eta_pc=0.0, eta_oja=0.0,                 # 表征冻结（铁律：多轮实测最优解）
+        eta_pc=0.02, eta_oja=0.02,               # P194：表征发育（pc_dev_steps 窗口后冻结）
+        pc_dev_steps=20000,                      # P194 (Q2)：前 2 万步余弦退火，之后冻结
         eta_stdp=0.02, seed=seed,
         pred_in_readout=True,
         conn_k=k,                                # 结构性稀疏主干（唯一实现）
@@ -82,6 +98,8 @@ def build_cfg(preset: str = "1b", width: int = 0, big_n: int = 0,
         big_ltm=True,                            # 1B 主体：大空间事件驱动容量栈
         big_ltm_N=n, big_ltm_m=p["big_m"], big_ltm_k=p["k_hash"],
         csr_online=csr_online,                   # O1：在线可写 CSR（长跑内存更优，逐位等价）
+        readout_dtype="fp32",                    # P194 (Q4)：精确 p−t 语义（fp8 可显式指定）
+        homeostasis=True,                        # P194：稳态缩放防表征发散（Turrigiano 2008）
     )
 
 

@@ -4,11 +4,11 @@
 
 [(a)(b)] 同文本连评两次：PPL 逐位相等、step_count 不变、全状态零副作用
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
-  PASS  (a0) PPL 是有效正数（评估真的跑了）  [ppl=2.784164510198206]
-  PASS  (a1) 两次 evaluate 的 PPL **逐位相等**（==，非容差）  [2.784164510198206 vs 2.784164510198206  Δ=0.000e+00]
+  PASS  (a0) PPL 是有效正数（评估真的跑了）  [ppl=2.6730407086607237]
+  PASS  (a1) 两次 evaluate 的 PPL **逐位相等**（==，非容差）  [2.6730407086607237 vs 2.6730407086607237  Δ=0.000e+00]
   PASS  (a2) evaluate 不推进 net.step_count  [344 → 344（修复前 +171）]
   PASS  (b) evaluate 前后快照全一致（stdp.W/wm.slots/_last_rate/modulator）  [第1次: 34 项全部逐位一致 | 第2次: 34 项全部逐位一致]
-  PASS  (b*) _nll 兼容路径零状态副作用  [nll=0.480716 | 34 项全部逐位一致]
+  PASS  (b*) _nll 兼容路径零状态副作用  [nll=0.208509 | 34 项全部逐位一致]
 
 [(c)] 一份中间插 evaluate、一份不评估 → 继续同数据训练后等权
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
@@ -23,7 +23,7 @@
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
   PASS  (d0) 两份同 seed 模型评估前逐位一致  [34 项全部逐位一致]
-  PASS  (d1) 顺序无关：两种执行顺序的准确率**逐位相等**  [n=8: 0.081505 vs 0.081505 | n=4: 0.062893 vs 0.062893]
+  PASS  (d1) 顺序无关：两种执行顺序的准确率**逐位相等**  [n=8: 0.059561 vs 0.059561 | n=4: 0.050314 vs 0.050314]
   PASS  (d2) 评估循环不推进 step_count  [719 → 719 / 719]
 
 [(e)] 源码守卫：调用点显式 readonly=True + task1 计时两口径分离
