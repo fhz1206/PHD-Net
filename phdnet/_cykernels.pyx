@@ -431,7 +431,7 @@ def selftest() -> bool:
         #     Python int `2` 参与混算时走了自己的提升路径，与 C 端
         #     「全是 float」的提升点不同 → fp32 舍入落在不同一侧。
         #     **本自检断言的是实测值，不是推导值**；真正的「同值」保证
-        #     来自 `tests/verifiers/verify_cykernels.py` 对拍 numba 核。
+        #     来自 `tests/gates/gate_cython_kernels.py` 对拍 numba 核。
         if abs(float(Ws[0, 0]) - 0.075) > 1e-6:
             return False          # LTP 路：与 numba 核一致的实测值
         if Ws[0, 1] != 0.0:

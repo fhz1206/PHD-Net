@@ -372,8 +372,14 @@ _RO_STATE = {"ok": None}      # None=未探测 / True=可用 / False=回退 nump
 # ——即**它一直是整数量化**，只是名字误导。更重要的是：**P92 把它当 fp8 在
 # 加速器上禁用了，等于误禁了昇腾真正支持的 INT8 Cube 路径**。现在正名并按
 # 设备能力重新裁决。int4/fp4 已按 P191e 删除。
-_RO_DTYPE_ALIASES = {"fp8": "int8"}      # 旧名 → 新名（兼容）
-# P191e：int4/fp4 已整体删除（P152 定案）——显式请求 fail-fast。
+#
+# P193（2026-10-12 去兼容层）：`fp8` 曾是 `int8` 的**旧名别名**
+# （`_RO_DTYPE_ALIASES = {"fp8": "int8"}`）—— 但 CLI 的
+# `--readout-dtype` 默认值就是 `fp8`（P189 用户可见的请求语义），
+# 且 `pick_readout_backend` 的回落路径把它直接传给本类 → 别名表是
+# 「一个默认值在用的隐藏映射」。既然无需对旧版本兼容，**把 `fp8`
+# 提升为正式成员**（语义 = int8 码本路径：numba 侧没有 fp8 位模式实现，
+# 位模式存储只在加速器臂 `_fp8_bits` 里存在）。别名表整体删除。
 RO_DTYPES = ("fp32", "fp16", "bf16", "int8", "int16", "int32")
 
 # P101 整数定点码本的量化上限（= 格点数）。饱和裁剪与量化都用这两个常量，
@@ -441,7 +447,6 @@ lut_int16, lat_int16, sb_int16 = _build_lut("int16")   # P101：int16 建表（i
 
 
 def _q_tables(fmt: str):
-    fmt = _RO_DTYPE_ALIASES.get(fmt, fmt)          # P100
     if fmt not in _Q_TABLES:
         lut, lat, sb = _build_lut(fmt)
         _Q_TABLES[fmt] = (lut, lat, sb)
@@ -529,15 +534,23 @@ class Readout:
         self.hid_k = int(hid_k)
         self.eta_hid = float(eta_hid)
         # P9 精度体系（2026-09-26，fhz 指令）：**停止 fp64 支持**；可选
-        # fp32（默认）/ fp16 / bf16 / int8（旧名 fp8 为别名；int4/fp4 已按
-        # P191e 删除）。低精度 = 原生位型码本存储 +
-        # 查表反量化计算 + 重新量化写回（P9 融合核），softmax/NLL 保持 fp64。
+        # fp32 / fp16 / bf16 / int8 / int16 / int32（int4/fp4 已按 P191e 删除）。
+        # 低精度 = 原生位型码本存储 + 查表反量化计算 + 重新量化写回（P9 融合核），
+        # softmax/NLL 保持 fp64。
         # 注：结构性稀疏模式暂用 fp32 CSR（与量化码本不叠加——组合另行立项）。
-        dtype = _RO_DTYPE_ALIASES.get(str(dtype).lower(), str(dtype).lower())
+        # P193（去兼容层）：CLI 的 `--readout-dtype fp8`（P189 用户可见请求）
+        # 在本类里的落地语义 = **int8 码本路径**（numba 侧没有 fp8 位模式实现，
+        # 位模式存储只存在于加速器臂 `AccelReadout._fp8_bits`）。此处显式归一，
+        # 不再靠隐藏的别名表。
+        _req = str(dtype).lower()
+        if _req == "fp8":
+            dtype = "int8"
+        else:
+            dtype = _req
         if dtype not in RO_DTYPES:
             raise ValueError(
                 f"readout dtype 须为 {RO_DTYPES} 之一"
-                f"（兼容旧名 fp8→int8；int4/fp4 已按 P191e 删除），实际: {dtype!r}"
+                f"（int4/fp4 已按 P191e 删除），实际: {dtype!r}"
                              "（fp64 已按 fhz 指令停止支持）")
         self.dtype_name = dtype if self.conn_k == 0 else "fp32"
         self.qfmt = self.dtype_name if self.dtype_name != "fp32" else None

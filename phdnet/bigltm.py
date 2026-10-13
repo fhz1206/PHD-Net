@@ -1,7 +1,6 @@
 """M4 容量层适配器 —— 把 n_dim 维表示经确定性哈希接入大空间印迹表。
 
-存储本体（SparseSynapseTable）已拆分至 phdnet/sparse_table.py，
-此处保留 SparseLTM 并再导出 SparseSynapseTable 以兼容旧引用。"""
+存储本体（SparseSynapseTable / OnlineCSRTable）在 phdnet/sparse_table.py。"""
 
 import numpy as np
 
@@ -9,9 +8,9 @@ from .ltm_kernel import (NUMBA_LTM, _recall_project,
                          _recall_project_sparse,
                          _recall_project_hashed)
 from .sparse_table import OnlineCSRTable, SparseSynapseTable
-from .tokenizer import U64, _mix64
+from .tokenizer import U64, mix64
 
-__all__ = ["SparseLTM", "SparseSynapseTable", "OnlineCSRTable"]
+__all__ = ["SparseLTM"]
 
 
 
@@ -47,7 +46,7 @@ class SparseLTM:
         self.idx = np.empty((n_dim, k_hash), dtype=np.int64)
         for j in range(n_dim):
             x = U64(j) * U64(7919) + np.arange(k_hash, dtype=np.uint64) * U64(2654435761)
-            self.idx[j] = (_mix64(x + s) % U64(n_neurons)).astype(np.int64)
+            self.idx[j] = (mix64(x + s) % U64(n_neurons)).astype(np.int64)
         # 反投影索引：大空间索引 → 与之绑定的表示维度（避免召回时逐维扫描 n_dim 次）
         self.rev: dict[int, list[int]] = {}
         for j in range(n_dim):

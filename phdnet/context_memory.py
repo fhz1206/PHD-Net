@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .tokenizer import U64, _mix64
+from .tokenizer import U64, mix64
 
 
 class ContextMemory:
@@ -52,7 +52,7 @@ class ContextMemory:
     # ---------- 模式分离：为每段情节派生去相关的起始上下文（DG/CA3） ----------
     def _episode_code(self, idx: int) -> np.ndarray:
         x = U64(idx) * U64(7919) + np.arange(self.k, dtype=np.uint64) * U64(2654435761)
-        i = (_mix64(x + U64(self.seed)) % U64(self.n)).astype(np.int64)
+        i = (mix64(x + U64(self.seed)) % U64(self.n)).astype(np.int64)
         c = np.zeros(self.n, dtype=self.ctx.dtype)
         c[i] = 1.0
         return c

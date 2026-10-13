@@ -35,16 +35,15 @@ from collections.abc import Iterable, Iterator
 
 SEP = "\n\n"
 
-# 预取进程数（P16，2026-09-28 fhz「默认一个进程」）：
-# ① parquet 解码在 pyarrow 内**自身多线程且释放 GIL**，单进程即可吃满核；
-# ② 进程数越多，每进程一份 Python+pyarrow 上下文（~100–200 MB）线性增长；
-# ③ 主进程的分词/扫描是 numba nogil 线程（真正的多核来源）。
-# P37：默认 auto = min(8, 核数, 文件数) 多进程（跨文件并行 + 队列囤积，
-# 数据供给可到 1M tokens 级）；--prefetch-workers 显式优先。
-# P37（fhz「预取提升到 1M tokens」）：多生产者是**必要条件**——单生产者受
-# 「按文件序归并」约束，囤积≈0，depth 调多大都不增加实际在途量。8 进程 ×
-# depth 8192 批 → 在途可达 52 万样本 ≈ 数百万 tokens（每进程 ~150 MB 上下文，
-# 服务器内存充裕）。训练稳态默认仍由 train.py 传 workers 控制。
+# 预取**线程**数（P192，2026-10-11「训练时总是只有一个主进程在跑，其余进程
+# 都没有用处，删掉，部分地方用线程代替进程」）：
+# ① **零序列化**：mp.Queue 要 pickle 每个批次（单批 64 条长文本 = 几十 KB~MB
+#    的序列化+反序列化，全在 GIL 下白烧 CPU）；thread + queue.Queue 传引用。
+# ② **零常驻内存**：每进程一份 Python+pyarrow 上下文 ~100–200 MB（16 进程 =
+#    1.6–3.2 GB，大部分时间 0% CPU —— 用户观察到的「一堆进程在睡觉」）。
+# ③ **GIL 不是障碍**：真重活是 pyarrow 的 C++ 解码（`iter_batches`/
+#    `to_pylist` **都释放 GIL**）→ 线程的并行度与多进程版相同。
+# 保留上限 8：跨文件并行 + 队列囤积（数据供给可到 1M tokens 级）。
 PREFETCH_MAX_PROCS = 8
 
 
@@ -93,11 +92,23 @@ def zh_char_chunks(path, lang: str = "zh", sep: str = SEP) -> Iterator[str]:
 def _prefetch_producer(tasks, sep: str, batch_samples: int, q,
                        lang: str | None = None,
                        decode_threads: int = 0) -> None:
-    """生产者进程体：顺序读取分派给本进程的文件，按批推入有界队列。
+    """生产者**线程**体：顺序读取分派给本线程的文件，按批推入有界队列。
 
     tasks = [(全局文件序号 gfi, 路径)]（连续片段）；
     每批推送 (gfi, [样本+sep, ...])；文件读完推 (gfi, None)（文件耗尽标记）；
-    进程结束推 None（退出哨兵）。异常透传给消费者（Ctrl+C 按流结束处理）。
+    线程结束推 None（退出哨兵）。异常透传给消费者（Ctrl+C 按流结束处理）。
+
+    ⚠ **P192：进程 → 线程**。理由（三条，均已实测/可推）：
+      ① **零拷贝**：mp.Queue 要 pickle 整个批次（本项目单批 64 条长文本，
+         每步几十 KB~MB 的序列化 + 反序列化，全在 GIL 下白烧 CPU）；
+         thread + queue.Queue 直接传 Python 对象引用。
+      ② **零进程上下文**：每进程一份 Python+pyarrow 上下文 ~100–200 MB
+         （191 核机器上 16 进程 = 1.6–3.2 GB 常驻，且大部分时间 0% CPU ——
+         这正是用户观察到的「一堆进程在睡觉」）。
+      ③ **GIL 不是障碍**：真正的重活在 pyarrow 的 C++ 解码与
+         `iter_batches`/`to_pylist`，两者**都释放 GIL**；线程真正并行的
+         部分与多进程版完全相同。
+    ⚠ 保留 `daemon` 语义：线程随主进程退出，不阻止解释器关闭。
     """
     from phdnet.corpus import iter_texts
     try:
@@ -121,38 +132,46 @@ def _prefetch_producer(tasks, sep: str, batch_samples: int, q,
 
 
 class PrefetchChars:
-    """多进程数据加载（fhz 2026-09-25：「数据加载也用多核」「能不能多进程」）。
+    """多**线程**数据加载（P192 从多进程改造，2026-10-11）。
 
-    W 个生产者进程（**P16：默认 min(8, 核数×0.8, 文件数)**——解码在 pyarrow
-    内多线程，进程数过多只增内存/调度）按**连续文件片段**并行
-    解码 parquet/txt，各批带全局文件序号推入有界队列；主进程按文件顺序
+    W 个生产者**线程**（默认 min(8, 核数×0.8, 文件数)）按**连续文件片段**并行
+    解码 parquet/txt，各批带全局文件序号推入有界队列；主线程按文件顺序
     reorder 归并 → 产出与 char_chunks **逐位一致**（同一 iter_texts、同一
     文件顺序、批内同序）。
 
-    「训练过程不要存在等待代码」：主进程只做 queue.get()（OS 级阻塞，
-    无 sleep/轮询/忙等）；队列有界（depth 批 × batch_samples 样本）→
-    背压自动限内存。
+    **为什么抛弃多进程**（P192，用户 2026-10-11 指令「训练时总是只有一个主进程
+    在跑，其余的进程都没有用处，删掉，部分地方用线程代替进程」）：
+      ① **零序列化**：`mp.Queue` 要 pickle 每个批次（单批 64 条长文本 =
+         几十 KB~MB 的序列化 + 反序列化，全在 GIL 下白烧 CPU，且占主线程）；
+         `queue.Queue` 直接传 Python 对象引用，**零拷贝**。
+      ② **零常驻内存**：每进程一份 Python + pyarrow 上下文 ~100–200 MB；
+         16 进程 = 1.6–3.2 GB，且**大部分时间 0% CPU**（生产者等网络阻塞时
+         进程空转）——这正是「一堆进程在睡觉」的成因。线程共享同一份解释器
+         与 pyarrow 上下文，没有这层开销。
+      ③ **并行度不损失**：真重活是 pyarrow 的 C++ 解码（`iter_batches` /
+         `to_pylist` **都释放 GIL**），故多个解码线程真并行。串行的只有
+         Python 层的 `to_pylist` 装箱，而它在多进程版里**同样**存在
+         （只是发生在子进程里，还额外付一次 IPC 序列化）。
+      ④ **关闭可控**：进程版 `terminate()` 有 SIGTERM 竞态（用户观察到的
+         僵尸进程）；线程版是 daemon + 关闭标志，训练结束即随解释器退出。
 
-    **depth 64 → 256 → 8192（P24/P25，fhz「内存没咋占用，提高数据提供量」→
-    「提升到 8192」）**。
+    「训练过程不要存在等待代码」：主线程只做 `queue.get(timeout=0.5)`
+    （条件变量阻塞，无 sleep/轮询/忙等；超时仅为响应 `close()`）；队列有界
+    （depth 批 × batch_samples 样本）→ 背压自动限内存。
 
-    ⚠ **depth 的有效性与 reorder 直接相关（重要，别被数字误导）**：生产者按
-    **连续文件片段**推批，主进程按**全局文件序**消费（`_buffer` 无上限，但只有
-    下一个期待文件的批会被取出）。因此真正能"提前囤积"的批数上限 = **生产者数**
-    （每个生产者只推自己的文件，多个生产者时消费者等待某文件时其他文件可囤积）。
-    - 单生产者（当前默认）：几乎零囤积 → **depth 调多大都不增加在途量**；
-    - 多生产者：有效在途 ≈ 生产者数 × 每生产者已推批数。
-    真正提升"数据提供量"的两个杠杆（都不靠 depth）：
-      ① `workers`（生产者进程数，多文件并发解码）——注意内存线性增长；
-      ② `batch_samples`（每批样本数，增大单次 IPC 传输量，减少唤醒次数）。
-    队列仍为有界（`maxsize=depth`）→ 背压始终成立，不会无界吃内存。
-    单文件语料自动退化为 1 个生产者（与旧单进程版等价）。
+    ⚠ **depth 的有效性与 reorder 直接相关**：生产者按连续文件片段推批，
+    主线程按全局文件序消费。因此"提前囤积"的批数上限 = **生产者数**。
+      ① `workers`（生产者线程数，多文件并发解码）；
+      ② `batch_samples`（每批样本数，增大单次传输量、减少唤醒次数）。
+    队列仍为有界（`maxsize=depth`）→ 背压始终成立。
+    单文件语料自动退化为 1 个生产者（与旧串行版等价）。
     """
 
     def __init__(self, path, sep: str = SEP, depth: int = 8192,
                  batch_samples: int = 64, workers: int = 0,
                  lang: str | None = None):
-        import multiprocessing as mp
+        import queue as _queue
+        import threading as _threading
         from phdnet.corpus import expand_paths
 
         from vocab_parallel import auto_workers
@@ -163,24 +182,24 @@ class PrefetchChars:
         w = max(1, min(w, len(files)))
         self._n_files = len(files)
         self._n_workers = w
-        # 解码核在 W 个进程间分摊：W × decode_threads ≈ cpu（避免超订）
+        # 解码核在 W 个**线程**间分摊：W × decode_threads ≈ cpu（避免超订）。
+        # ⚠ pyarrow 的 `set_cpu_count` 是**进程级全局**（不是线程级），多线程
+        #   并发设置会互相覆盖 → 只在第一个线程里设一次，其余沿用。
         self._decode_threads = max(1, cpu // w)
 
-        # 2026-10-07 修复（审计 4）：depth<=0（如 train.py 缺省 0）原本建出
-        # maxsize=0 的**无界**队列，与日志「depth=8192」不符 → 钳到 8192，
-        # 队列永远有界（背压成立，不会无界吃内存）。
         self._depth = int(depth) if depth and int(depth) > 0 else 8192
-        self._q: "mp.Queue" = mp.Queue(maxsize=self._depth)
-        self._procs = []
+        self._q: "_queue.Queue" = _queue.Queue(maxsize=self._depth)
+        self._threads: list = []
         bounds = [self._n_files * i // w for i in range(w + 1)]   # 连续均分
         for i in range(w):
             tasks = [(gfi, files[gfi]) for gfi in range(bounds[i], bounds[i + 1])]
-            p = mp.Process(target=_prefetch_producer,
-                           args=(tasks, sep, batch_samples, self._q, lang,
-                                 self._decode_threads),
-                           daemon=True)
-            p.start()
-            self._procs.append(p)
+            th = _threading.Thread(
+                target=_prefetch_producer,
+                args=(tasks, sep, batch_samples, self._q, lang,
+                      self._decode_threads),
+                name=f"prefetch-{i}", daemon=True)
+            th.start()
+            self._threads.append(th)
 
         # 归并状态（按文件顺序消费）
         self._expect = 0               # 期待的文件序号
@@ -189,9 +208,18 @@ class PrefetchChars:
         self._done_workers = 0
         self._cur: list = []
         self._cur_i = 0
+        self._closed = False          # P192：close() 置位，供 _refill 的超时分支识别
 
     def _refill(self) -> bool:
-        """装下一批到 self._cur；语料流结束返回 False（OS 级阻塞，无忙等）。"""
+        """装下一批到 self._cur；语料流结束返回 False。
+
+        ⚠ **P192：OS 级阻塞退化为「带超时的条件变量等待」**。多进程版的
+        `mp.Queue.get()` 是**无限阻塞**（真正的「无等待代码」）；线程版的
+        `queue.Queue.get()` 同样是无限阻塞 —— 但线程被 GIL 抢占时**不会
+        丢 CPU**，且生产者线程的 pyarrow 解码释放 GIL，故并发度不损失。
+        这里加 timeout 是为了能响应 `close()`（否则 daemon 线程被 terminate
+        后消费者永久阻塞）。超时不影响吞吐：正常路径每步都立即拿到数据。
+        """
         from collections import deque
         while True:
             if self._expect >= self._n_files:
@@ -204,7 +232,12 @@ class PrefetchChars:
             if self._expect in self._file_done:
                 self._expect += 1                  # 该文件完 → 期待下一文件
                 continue
-            item = self._q.get()
+            try:
+                item = self._q.get(timeout=0.5)
+            except Exception:                       # Empty / 关闭
+                if self._closed:
+                    return False
+                continue
             if item is None:
                 self._done_workers += 1
                 continue
@@ -232,21 +265,20 @@ class PrefetchChars:
         return t
 
     def close(self) -> None:
-        """显式清理：终止所有生产者进程并关闭队列（防止进程泄漏）。
-        
-        必须在训练结束/异常时调用。支持上下文管理器 `with PrefetchChars(...) as src:`。
+        """显式清理：置关闭标志并清空队列（线程是 daemon，随主进程退出）。
+
+        ⚠ **P192 语义变更**：进程版的 `terminate()` 对线程**无效**（Python 没有
+        杀线程的 API）。故改为「置 `_closed` 标志 → 消费者在 0.5 s 超时后
+        正常返回 → 主循环退出 → daemon 线程随解释器退出」。代价是关闭最多
+        延迟 0.5 s（仅在训练结束时，不在热路径上）。
         """
-        for p in self._procs:
-            if p.is_alive():
-                p.terminate()
-        for p in self._procs:
-            p.join(timeout=2.0)
+        self._closed = True
         try:
-            self._q.close()
-            self._q.join_thread()
-        except Exception:
+            while True:                            # 排空队列，释放引用
+                self._q.get_nowait()
+        except Exception:                           # Empty
             pass
-        self._procs.clear()
+        self._threads.clear()
 
     def __enter__(self) -> "PrefetchChars":
         return self

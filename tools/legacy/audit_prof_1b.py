@@ -31,7 +31,7 @@ def build(cfg_kwargs: dict, vocab_text: str):
         n_sdr=WIDTH, n_mid=WIDTH, n_top=WIDTH,
         k_sparse=max(8, WIDTH // 8),
         eta_pc=0.0, eta_oja=0.0, eta_stdp=0.02, seed=11,
-        pred_in_readout=True, sparse_conn=True, conn_k=128,
+        pred_in_readout=True, conn_k=128,
         big_ltm=True, big_ltm_N=1 << 24, big_ltm_m=60, big_ltm_k=4,
         **cfg_kwargs)
     lm = PHDWordLM(vocab_text, cfg)

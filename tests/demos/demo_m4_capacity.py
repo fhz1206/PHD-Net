@@ -25,9 +25,9 @@ import time
 import numpy as np
 import psutil
 
-from phdnet.bigltm import SparseSynapseTable
+from phdnet.sparse_table import SparseSynapseTable
 from phdnet.config import PHDNetConfig
-from phdnet.tokenizer import U64, _mix64
+from phdnet.tokenizer import U64, mix64
 from phdnet.word_lm import PHDWordLM
 
 N_NEURONS = 1 << 24
@@ -39,7 +39,7 @@ SEED = 0xA5A55A5A
 def sdr_of(sym: int, n_active: int = N_ACTIVE) -> list[int]:
     """符号 → 大空间 SDR 活跃集（确定性哈希）。"""
     x = U64(sym) * U64(7919) + np.arange(n_active, dtype=np.uint64) * U64(2654435761)
-    return (_mix64(x + U64(SEED)) % U64(N_NEURONS)).astype(np.int64).tolist()
+    return (mix64(x + U64(SEED)) % U64(N_NEURONS)).astype(np.int64).tolist()
 
 
 def part1_capacity(n_steps: int = 300) -> dict:

@@ -180,10 +180,12 @@ create / cast / matmul 全部 ERR01007，torch.ops 里零个 fp8 算子 ——
 → 非目标行更新被量化吃掉。目标行 `|dp|` ≈ 1 远大于步长，**必须完整保留**
 （verifier 用 fp16 参考对拍把关）。这是「int8 存储降 4× 访存」的代价，不是 bug。
 
-⚠ **`fp8` 现在是 `int8` 的别名**（P100 正名：`fp8` 本来就是 1 字节码本）。
-P147 起 fp8 **不是** int8 的别名：`_DTYPE_ALIASES = {"fp8": "float8_e4m3fn"}`，
-fp8 是独立精度档（P189 后为默认：位模式 uint8 存储 + fp16 迭代 + int8 计算
-可选）。numba CPU 路径走 P9/P12 位算法量化核。
+⚠ P100 曾把 `fp8` 正名为 `int8`（那时它确实是 1 字节码本）。
+P147 起 fp8 是**独立精度档**（`_DT` 映射到 `float8_e4m3fn`），
+P189 后为默认：位模式 uint8 存储 + fp16 迭代 + int8 计算可选；
+P193 起两处别名表（`readout._RO_DTYPE_ALIASES` / `accel_readout._DTYPE_ALIASES`）
+都已删除，fp8 在 numba 侧被显式归一为 int8 码本路径。
+numba CPU 路径走 P9/P12 位算法量化核。
 
 ### 3.4 稀疏读出锁定 fp32
 
@@ -351,7 +353,7 @@ P30 删除前的 `TorchPHDNet.__init__` 有一段显式拒绝表。**这些机�
 这一组最危险 —— 构造成功、训练照跑，但**与 numpy 逐张量不同**。
 按模块 docstring「显式拒绝，不做静默近似」的承诺才改为构造时拒绝。
 
-**第三组（结构约束）**：`sparse_conn=False`（要求稠密主干）显式拒绝 ——
+**第三组（结构约束）**：稠密主干（原 `sparse_conn=False`）已随稠密栈删除而不复存在 ——
 torch 栈恒用稀疏 CSR 语义（`TorchSparsePC` 只实现 CSR 边表示）；
 `readout_dtype ∈ {fp8, fp4}` 拒绝。
 ⚠ **这是 P30 删除旧 torch 栈时的历史拒绝表，不是现行加速后端的能力表**：

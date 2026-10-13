@@ -1,6 +1,6 @@
 """M4a 工作记忆 —— 对应背外侧前额叶的持续放电与基底核门控写入。
 
-（自 memory.py 拆分；原路径 `from phdnet.memory import WorkingMemory` 仍可用）"""
+（2026-09-18 自 memory.py 拆分为独立模块）"""
 
 import numpy as np
 

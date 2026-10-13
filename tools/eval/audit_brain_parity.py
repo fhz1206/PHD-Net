@@ -12,7 +12,7 @@
   A9 权重符号平衡（兴奋/抑制比）        A10 权重分布形态（重尾/对数正态 vs 高斯）
   A11 突触容量与事件驱动性              A12 记忆/睡眠/调制等模块的脑区对应
 
-用法：python tools/eval/audit_brain_parity.py [--sparse-conn] [--big-ltm]
+用法：python tools/eval/audit_brain_parity.py [--big-ltm]
 """
 from __future__ import annotations
 
@@ -49,7 +49,6 @@ def coupling_ratio(W: np.ndarray) -> float:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sparse-conn", action="store_true")
     ap.add_argument("--big-ltm", action="store_true")
     ap.add_argument("--cortical-init", action="store_true",
                     help="启用 O1-4 皮层式初始化（重尾 + E/I 比）")
@@ -64,8 +63,6 @@ def main() -> None:
     args = ap.parse_args()
 
     cfg_d = dict(BASE)
-    if args.sparse_conn:
-        cfg_d.update(sparse_conn=True)
     if args.big_ltm:
         cfg_d.update(big_ltm=True)
     if args.cortical_init:
@@ -88,7 +85,7 @@ def main() -> None:
     d = net.step(x_in, learn=False, readonly=True)
 
     print("=" * 88)
-    print(f"脑同构审计  |  sparse_conn={cfg.sparse_conn}  big_ltm={cfg.big_ltm}  "
+    print(f"脑同构审计  |  big_ltm={cfg.big_ltm}  "
           f"n_sdr={cfg.n_sdr} k_sparse={cfg.k_sparse}")
     print("=" * 88)
 
@@ -107,7 +104,7 @@ def main() -> None:
         rec("A1 主干连接率（结构性稀疏）",
             "皮层：稀疏连接（局部 ~10% 量级）",
             f"稠密矩阵：{tot:,} 元素全部存在 → 连接率 100%",
-            "✗ 偏离（稠密）——应启用 sparse_conn")
+            "✗ 偏离（稠密主干——不应出现，稠密栈已删）")
 
     # ---- A2 记忆表连接率 ----
     if cfg.big_ltm:
@@ -230,8 +227,8 @@ def main() -> None:
         "脑：计算量 ∝ 活跃神经元数（稀疏发放）而非总神经元数",
         "记忆表：每步只读写活跃神经元的已生长突触（✓ 与容量无关）；"
         "主干（稀疏连接版）：只遍历存在的边（✓ 与稠密等价规模解耦）",
-        "✓ 一致（记忆表 + 稀疏主干均为事件驱动）" if cfg.sparse_conn or cfg.big_ltm
-        else "△ 部分（记忆表事件驱动；主干稠密 → 启用 sparse_conn 后一致）")
+        "✓ 一致（记忆表 + 稀疏主干均为事件驱动）" if cfg.big_ltm
+        else "△ 部分（记忆表事件驱动；主干稀疏）")
 
     # ---- A12 脑区对应 ----
     rec("A12 模块-脑区映射",

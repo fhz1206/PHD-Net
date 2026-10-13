@@ -77,7 +77,7 @@ def build_cfg(preset: str = "1b", width: int = 0, big_n: int = 0,
         eta_pc=0.0, eta_oja=0.0,                 # 表征冻结（铁律：多轮实测最优解）
         eta_stdp=0.02, seed=seed,
         pred_in_readout=True,
-        sparse_conn=True, conn_k=k,              # 结构性稀疏主干（库默认开启）
+        conn_k=k,                                # 结构性稀疏主干（唯一实现）
         readout_conn_k=readout_conn_k,           # 0 = 稠密读出（主路径）；>0 = CSR 稀疏读出
         big_ltm=True,                            # 1B 主体：大空间事件驱动容量栈
         big_ltm_N=n, big_ltm_m=p["big_m"], big_ltm_k=p["k_hash"],

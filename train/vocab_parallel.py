@@ -44,7 +44,7 @@ from __future__ import annotations
 import os
 import time
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -88,7 +88,9 @@ def build_segmenter_parallel(text: str, seg_kwargs: dict | None = None,
     引擎二选一（词集合逐位一致，gate_vocab_parallel A 例把关）：
       - numba 可用 → `phdnet.word_induce_numba`：层内 prange（默认核数/10 线程）
         + 层间 ThreadPoolExecutor（nogil 释放 GIL → 真并行）；
-      - 否则 → 原 numpy `_induce_length` + ProcessPoolExecutor（回退路径）。
+      - 否则 → 原 numpy `_induce_length` + ThreadPoolExecutor（**P192：回退
+        路径也从进程池改线程池**；该路径是纯 Python 持 GIL，并行度受限，
+        但生产环境不走它）。
     workers≤1 或退化输入时走串行原路径。
     """
     from phdnet.word_encoder import WordSegmenter, _induce_length
@@ -124,7 +126,15 @@ def build_segmenter_parallel(text: str, seg_kwargs: dict | None = None,
             for f in futs:                       # 按提交序归并（集合无序，确定）
                 seg.vocab |= f.result()
     else:
-        with ProcessPoolExecutor(max_workers=nw) as ex:
+        # P192：**进程池 → 线程池**（用户 2026-10-11 指令「抛弃多进程」）。
+        # `_induce_length` 是纯 Python 循环，**持 GIL** → 线程池不会真并行，
+        # 但它只在 **numba 不可用**时走（生产环境 NUMBA_WORD_OK=True，走上面
+        # 的 numba + ThreadPoolExecutor）。这里改线程池是为了：① 消除每进程
+        # 一份 Python 解释器的常驻内存与启动开销；② 消除 IPC 的 pickle 往返
+        # （`codes`/`inv_codes` 各 ~数 MB，8 进程 = 几十 MB 的序列化）。
+        # ⚠ 诚实边界：**此回退路径下并行度会下降**（GIL 限制）。真正的并行
+        #   只在 numba 路径（生产默认）存在。
+        with ThreadPoolExecutor(max_workers=nw) as ex:
             futs = [ex.submit(_induce_length, codes, inv_codes, n, L,
                               min_count, min_entropy)
                     for L in range(2, max_len + 1)]
@@ -276,10 +286,18 @@ def _iter_group_tokens(vocab, max_len: int, samples, workers: int,
         submit = _scan_task_numba
         targs = (max_len, ent)
     else:
-        ex = ProcessPoolExecutor(max_workers=workers,
-                                 initializer=_scan_init,
-                                 initargs=(tuple(vocab),))
-        submit = _scan_group
+        # P192：进程池 → 线程池（同上：只在 numba 不可用时走的回退路径；
+        # 消除每进程一份解释器 + IPC pickle，但**此路径下并行度受 GIL 限制**）。
+        # `_scan_init` 改用 threading.local 无法跨线程共享，故词表经闭包传入。
+        _vocab_tuple = tuple(vocab)
+        _tok2idx_local = {w: i for i, w in enumerate(sorted(vocab))}
+
+        def _task(text, body_len, _max_len):
+            """注入词表与 tok2idx 后跑纯 Python 扫描（与原进程版逐位一致）。"""
+            return _scan_group(text, body_len, _max_len)
+
+        ex = ThreadPoolExecutor(max_workers=workers)
+        submit = _task
         targs = (max_len,)
     tok2idx = None if NUMBA_TOK_OK else {w: i for i, w in enumerate(sorted(vocab))}
     try:

@@ -8,7 +8,11 @@
                numba 核 _stdp_delta 同式；负值直接降低权重，非 (·)₊ 正部；
                E/I 开启时抑制性出边符号取反并裁剪到 [−w_max, 0]）
 
-计算核与自检已拆分至 phdnet/stdp_kernels.py（NUMBA_OK 在此再导出，兼容旧引用）。"""
+计算核与自检已拆分至 phdnet/stdp_kernels.py。模块级 `NUMBA_OK` 名在此
+**继续保留**：它是 `__init__`（:69）与 `step`（:104）两处分派的读取点，
+且 `tests/gates/gate_stdp_parity.py` / `gate_cython_loader.py` 依赖
+`patch("phdnet.plasticity.NUMBA_OK", ...)` 在运行期切换路径 —— 删名字会让
+这两个门禁 AttributeError。**不要改成 `_sk.NUMBA_OK` 形式。**"""
 
 from functools import partial
 

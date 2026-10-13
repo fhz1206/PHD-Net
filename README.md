@@ -17,8 +17,8 @@ Python + numba + Cython + PyTorch/昇腾 NPU。
 2. **每个机制必须有神经认知对应**，不接受「工程上好用但无认知对应」的部件。
 3. **逐 token 语义**：状态跨 token / 跨分片 / 跨 epoch 连续演化，读出 W 每步原地更新
    → **不允许批处理**。这是语义约束，不是性能取舍。
-4. **行为变更以 config 开关承载，且默认关闭**。例外三个：`csr_online` / `k_sparse` /
-   `sparse_conn`（default-on）。
+4. **行为变更以 config 开关承载，且默认关闭**。例外两个：`csr_online` / `k_sparse`
+   （default-on）。
 
 ---
 

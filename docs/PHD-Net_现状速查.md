@@ -6,10 +6,10 @@
 
 - 禁 self-attention / 位置编码 / 堆叠层；每项机制须有神经认知对应物（M1–M13，M7–M12 认知层 + M13 上下文漂移情景记忆）。
 - 逐 token 流式语义：状态跨 token/shard/epoch 连续，**禁止批处理**（预训练不可批；仅 RL rollout 可批）。
-- 新增行为一律 config 开关默认关闭、默认路径逐位不变；例外（fhz 拍板）：`sparse_conn=True`、`k_sparse=16`、读出 `conn_k=128`。
+- 新增行为一律 config 开关默认关闭、默认路径逐位不变；例外（fhz 拍板）：`k_sparse=16`、读出 `conn_k=128`。
 - 表征冻结 `eta_pc=0`（可塑性改进多轮全负）；PPL 增益只来自检索/记忆通路。
 - 🔴 **分层定案（P170，曾）**：Python 顶层（编排/门禁/回落/日志）+ Rust 编译 cdylib 作无状态算子库。⚠ **`phdnet_rs/` 已整体删除（P188「删除 rust 版本，默认全部改回 python」）** —— 现为纯 Python + numba（+ 可选 Cython nogil 核，P192）。
-- 稠密 PC 栈已删：`SparsePCStack` 唯一实现，`sparse_conn=False` config 期 fail-fast。
+- 稠密 PC 栈已删：`SparsePCStack` 唯一实现（`sparse_conn` 开关已于 P193 删除，不再有「关掉稀疏」选项）。
 
 ## 2. 工程 / 目录现状
 
@@ -25,7 +25,7 @@
 
 | 项 | 默认 | 备注 |
 |---|---|---|
-| sparse_conn / k_sparse | True / 16 | fhz 拍板例外 |
+| k_sparse | 16 | fhz 拍板例外 |
 | eta_pc / eta_oja | 0 / 0 | 表征冻结 |
 | eta_readout | 0.15 | fhz 拍板 |
 | 读出 conn_k | 128（连接率 4.2%）| 已上加速器 gather-GEMV（P111）|

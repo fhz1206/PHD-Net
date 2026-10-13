@@ -98,7 +98,6 @@ LTM 突触、调制器 Welford 统计量、`step_count`、读出 W）**全部跨
 
 | 项 | 值 | 位置 | 理由 |
 |---|---|---|---|
-| `sparse_conn` | `True` | `phdnet/config.py:187` | 稠密 PC 栈已于 2026-09-28 **删除**（`phdnet/pc.py` 移除），主干唯一实现是 `SparsePCStack`；传 `False` 在配置期 **fail-fast**（`phdnet/config.py:342-345`），不做静默稀疏化 |
 | `k_sparse` | `16` | `phdnet/config.py:11` | 2026-09-24 起默认（原 32 = 12.5%）。实测依据（4,000 字符口径）：k=16（6.25%）PPL **−1.43%** 优于 k=32；k=8（3.125%）**+12.5%**（容量不足，有害）。**评测脚本显式传 `k_sparse=32`**（`tests/evals/eval_common.py:16`），故该默认变更不影响既有评测口径 |
 | `csr_online` | CLI `--csr-online` `default=True` | `train/train.py:281-282` | 在线可写 CSR 已是生产默认（dict 版每条目 ~100+ B → CSR 版 ~16 B）。库字段 `csr_online` 本身默认 `False`（`phdnet/config.py:262`），由 CLI 显式打开 |
 
@@ -326,7 +325,7 @@ M4b 有**两种实现**，由 `big_ltm` 开关切换（`model.py:73-84`）：
 | 存储本体 | `phdnet/sparse_table.py`（`SparseSynapseTable` / `OnlineCSRTable`） | 邻接存储 + STDP 式生长 |
 
 **哈希分布式编码**（`bigltm.py:44-53`）：每个维度 `j` 经 `U64(j)*7919 + arange(k_hash)*2654435761`
-再 `_mix64` 取模 `n_neurons`，得 `k_hash` 个大空间索引（默认 `big_ltm_k = 4`，`config.py:99`）。
+再 `mix64` 取模 `n_neurons`，得 `k_hash` 个大空间索引（默认 `big_ltm_k = 4`，`config.py:99`）。
 **反投影索引** `rev` 一次性构建后**零维护成本**预 CSR 化供 numba 核用（`bigltm.py:50-57`）。
 
 **A2 契约校验**（`bigltm.py:95-111`）：`SparseLTM` 只接受**稀疏率**（激活维度 ≤ n_dim/4）。
@@ -686,8 +685,9 @@ LUT 反量化到 fp32、更新后重量化写回。**内存流量 ∝ 存储位�
 `RO_DTYPES`（**`readout.py:377`**）：`fp32` / `fp16` / `bf16` / `int8` / `int16` / `int32`。
 ⚠ **这张表里既没有 `fp8` 也没有 `fp4`**：
 `int4`/`fp4` 已按 **P191e**（P152 定案：每步 unpack 抵消存储收益）整体删除，
-显式请求构造期 fail-fast；`fp8` 在 **numba 侧**只是 `int8` 的**兼容别名**
-（`_RO_DTYPE_ALIASES = {"fp8": "int8"}`，`readout.py:375`，P100 正名）。
+显式请求构造期 fail-fast；`fp8` 是 **CLI `--readout-dtype` 的用户可见请求**
+（P189 默认值），在 numba 侧被**显式归一**为 `int8` 码本路径
+（P193，`readout.py:545-549`；位模式存储只存在于加速器臂 `_fp8_bits`）。
 **softmax/NLL 一律在 fp64 上计算** —— 这是低精度训练的标准「高精度主回路」结构。
 
 ⚠ **但默认不是 `RO_DTYPES` 里的任何一项 —— 默认是 `fp8`**（`config.py:318`
@@ -926,7 +926,7 @@ W 以 **fp8 e4m3fn 位模式由 uint8 承载**（1 B/元素，访存收益完整
 | 8 | `docs/文档写作规范.md` §2.8 | 写 `--readout-conn-k 0` | 实际 **128**（P108，`train/train.py:467`） |
 | 9 | `phdnet/sparse_encoder.py:12-14` 模块 docstring vs `config.py:330` | docstring 说「M1 默认 `fp32`」（且第 14 行仍写「读出侧 bf16 已由 `--readout-dtype` **默认启用**」—— 读出侧默认早已不是 bf16，见本表第 7 行） | **config 是 `fp64`**（`sparse_encoder.py` 的形参默认是 `dtype="fp32"`，但 `model.py:49` 传的是 `cfg.encoder_dtype`） |
 | 10 | ~~`train/train.py:250-255`~~ | ~~`--m2-kernel` 的 `default="serial"`，但 help 文本写「**默认 plain**」~~ | **P113 已修**：默认改`plain`（有服务器实测支撑），help 同步为实测数字（现行 `train/train.py:394`）。见§1 M2 三态核 |
-| 11 | `phdnet/sparse_pc.py:29-32` 文档字符串 | 说「开关（默认关闭，默认路径逐位不变）：`cfg.sparse_conn` —— True 时主干改用本模块」 | **已过时**（写于稠密栈仍在时）。2026-09-28 稠密栈已删除，`sparse_conn` 恒 `True`，False 会 fail-fast |
+| 11 | ~~`phdnet/sparse_pc.py:29-32` 文档字符串~~ | ~~说「开关（默认关闭，默认路径逐位不变）：`cfg.sparse_conn` —— True 时主干改用本模块」~~ | **P193 已删**：`sparse_conn` 字段整体移除（稠密栈 2026-09-28 已删，主干唯一实现 SparsePCStack，无消费者） |
 | 12 | `phdnet/config.py:84-85` vs `phdnet/model.py:53-57` | config 仍保留 `backend` / `torch_dtype` 字段和「昇腾部分型号建议 float16」的说明 | `model.py` 对非 `auto/numpy/cpu` 的 backend **fail-fast**（旧 torch 栈已随 P30 删除）。字段为**兼容保留** |
 | 13 | ~~`tools/bench/bench_readout_sparse.py:113-115` 注释~~ | ~~「`sparse_alloc.py` 由另一位同事并行实现中」~~ | ✅ **已过时并已解决**：`phdnet/sparse_alloc.py` 已存在，**且 P124 已接入 `readout.py`**（`:574-579`，幂律路径 import `sparse_alloc.build_powlaw_csr`，`alpha=0` 逐位等价于均匀 k）。该注释仍在声称「预留接口 / 未就绪」→ 🔴 **活跃的误导性注释，建议回修**（与本表第 20 行是同一件事的两面） |
 | 14 | `tools/eval/audit_brain_parity.py:139-146` | A4 结论仍写「直接稀疏化读出不可接受」 | 该结论基于 256 维栈 `conn_k=8`（1.0%）。1B 档取 k=128（4.2%）后 PPL 反而**更优**（477 vs 608，4M 档）—— 两者不矛盾但**口径不同**，须标明维度 |

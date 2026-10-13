@@ -13,13 +13,13 @@
 ================================================================================
 五组用例，各自「为什么要有」
 ================================================================================
-【T1】9 种写法（7 个规范名 + 2 个旧名别名）都能构造 / 前向有限 / learn 跑通
+【T1】7 种写法（6 个规范名 + fp8 请求）都能构造 / 前向有限 / learn 跑通
   为什么：`RO_DTYPES` 与实际 dispatch 键是**两处独立维护**的列表（前者是白名单，
   后者是 `__call__` 与 `_apply_update` 的 dict/if 链）。新增格式时漏改 dispatch
   是最典型也最难发现的错误——构造成功、`learn` 不报错，但 `__call__` 抛
   `KeyError` 或静默走了错误内核。本组把「白名单 ∩ dispatch 键」显式断言，
-  且用**旧名 fp8/fp4** 验证 `_RO_DTYPE_ALIASES` 归一后仍命中新码本
-  （P100 正名的兼容性契约）。
+  并用 CLI 的用户可见请求 `fp8`（P189）验证它在 numba 臂被**显式归一**为
+  int8 码本（P193：删别名表，不再有隐藏映射）。
 
 【T2】量化误差序：int32 < int16 < int8（同一随机 W）
   为什么：位宽越大精度必须越好——这是**码本存在意义**的根属性。若某次改动让
@@ -107,17 +107,17 @@ def rel_roundtrip_err(fmt: str, W: np.ndarray) -> tuple[float, float]:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# T1 · 9 种写法：构造 + 前向有限 + learn跑通
+# T1 · 7 种写法：构造 + 前向有限 + learn跑通
 # ────────────────────────────────────────────────────────────────────────────
 def t1_construct_forward_learn() -> None:
     print("\n" + "=" * 88)
-    print("T1 · 7 种写法（6 规范名 + fp8 旧名别名；int4/fp4 已按 P191e 删除）："
+    print("T1 · 7 种写法（6 规范名 + fp8 请求归一；int4/fp4 已按 P191e 删除）："
           "构造 / 前向有限 / learn")
     print("=" * 88)
     print(f"  RO_DTYPES = {RO_DTYPES}（共 {len(RO_DTYPES)} 个规范名）")
 
     # 白名单必须恰好是这 6 个（P191e 删 4-bit 后；防「加了格式忘了加进白名单」）。
-    check("RO_DTYPES 含全部 6 个规范名（无 4-bit）",
+    check("RO_DTYPES 含全部 6 个规范名（无 4-bit、无旧名别名）",
           set(RO_DTYPES) == {"fp32", "fp16", "bf16", "int8",
                              "int16", "int32"},
           f"RO_DTYPES = {RO_DTYPES}")
@@ -142,9 +142,10 @@ def t1_construct_forward_learn() -> None:
             check(f"{dtype:<5} 构造 / 前向有限 / learn 跑通", False,
                   f"{type(exc).__name__}: {exc}")
 
-    # 旧名必须归一到新名（否则 `fp8` 会走一条无人验证的独立路径）。
+    # P193：fp8 是 CLI 的用户可见请求（P189），在本类里**显式归一**为 int8
+    # 码本路径（numba 侧无 fp8 位模式实现）。不再有隐藏的 `_RO_DTYPE_ALIASES`。
     ro8 = Readout(N_IN, N_OUT, rng, dtype="fp8")
-    check("旧名 fp8 → int8（旧名正名兼容契约，P100）",
+    check("fp8 请求 → int8 码本（P193 显式归一，无别名表）",
           ro8.dtype_name == "int8" and ro8.qfmt == "int8",
           f"fp8 → dtype_name={ro8.dtype_name}")
     # P191e：4-bit 已删除 → int4/fp4 显式请求必须在白名单处 fail-fast。

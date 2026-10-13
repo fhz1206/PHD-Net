@@ -23,7 +23,7 @@ import numpy as np
 
 from phdnet.config import PHDNetConfig
 from phdnet.model import PHDNet
-from phdnet.memory import LongTermMemory
+from phdnet.ltm import LongTermMemory
 from phdnet.modulator import Neuromodulator
 from phdnet.plasticity import NUMBA_OK as NUMBA_AVAILABLE
 

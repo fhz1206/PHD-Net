@@ -94,20 +94,13 @@ def bench_cpu_flops(n=1024, reps=20):
 
 
 def bench_1b(steps=1500):
-    import train as T
-    net = T.BillionSynapseNet()
-    sdr = [T.sdr_of(s) for s in range(3)]
-    prev = None
-    c0_cpu = time.process_time()
-    w0 = time.perf_counter()
-    for t in range(steps):
-        cur = sdr[t % 3]
-        net.step(cur, prev)
-        prev = cur
-    wall = time.perf_counter() - w0
-    cpu = time.process_time() - c0_cpu
-    edges = sum(len(b) for b in net.out.values())
-    return wall, cpu, peak_rss_mb(), edges
+    """⚠ 已废弃（P193）：原实现 `import train as T; T.BillionSynapseNet()`
+    依赖的 `train` 顶级模块 + `BillionSynapseNet` 类**均已不存在**
+    （`train/` 现在是包目录；全仓库 grep 0 命中）。保留函数签名以免
+    破坏 import 面，调用即抛 NotImplementedError。"""
+    raise NotImplementedError(
+        "bench_1b() 已废弃：train.BillionSynapseNet 已随架构重构删除。"
+        "当前 1B 档性能基准请用 tools/bench/bench_cpu_local.py。")
 
 
 if __name__ == "__main__":

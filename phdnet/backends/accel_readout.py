@@ -35,19 +35,11 @@ except Exception:                                            # pragma: no cover
 # 加速臂 `_DT` 与 numba 侧 `RO_DTYPES` 均无 4-bit，显式请求构造期 fail-fast。
 _DT = {"fp32": "float32", "fp16": "float16", "bf16": "bfloat16",
        "int8": "int8",
-       # P147：fp8 不再是 int8 的别名 → 能力表必须有它，
-       # 否则 §「别名归一化」之后会在 `dtype not in _DT` 处 ValueError。
-       # P191e：fp4/int4 已整体删除（P152 定案），不在此表 → 显式请求
-       # 走 `dtype not in _DT` 的 ValueError fail-fast。
+       # P147：fp8 是**独立路径**（有原生 fp8 算子就用 fp8，否则转 int8），
+       # 不再是 int8 的别名 —— 能力表必须有它，否则会在 `dtype not in _DT`
+       # 处 ValueError。P191e：fp4/int4 已整体删除（P152 定案），不在此表
+       # → 显式请求走 `dtype not in _DT` 的 ValueError fail-fast。
        "fp8": "float8_e4m3fn"}
-# P105 旧名别名（与 readout.py 的 _RO_DTYPE_ALIASES 同口径）。
-# ⚠⚠ **P147 修正**：原来这里是 `{"fp8": "int8"}`（fp8 是 int8 的别名，P100 正名），
-#   而那个别名在 `__init__` **开头**就把 `dtype` 归一化了 → 后面
-#   `_fp8_req = dtype == "fp8"` **恒为 False** → **整个 fp8 三级自适应是死代码**。
-#   实测：fp8 臂与 int8 臂 `tdtype` 完全相同、**零告警零探测**。
-#   现在 fp8 是**独立路径**（有原生 fp8 算子就用 fp8，否则转int8），
-#   不再是别名。int8 走P105 的既有路径，两者在 `__init__` 里**汇合**。
-_DTYPE_ALIASES: dict = {}
 
 # int8 模式的**计算** dtype：存储是 int8 码本，但 ht/y 的 matmul 在 fp16 域做
 # （昇腾/CUDA 的 fp16 矩阵乘是原生快路径）。构造期探测失败则整体回落 fp16。
@@ -130,7 +122,7 @@ class AccelReadout:
         #   "torch"（默认，实测快 5.1×：27 vs 137 ms @1b 档），多 76 MiB 中间张量
         #   "nogil"（0 中间张量 + 释放 GIL，慢 5.1×）
         self._fp8_conv = str(fp8_conv or "torch").lower()
-        dtype = _DTYPE_ALIASES.get(str(dtype), str(dtype))
+        dtype = str(dtype)
         if dtype not in _DT:
             raise ValueError(f"不支持 dtype={dtype!r}；可用 {sorted(_DT)}")
         self.device = resolve_accel_device(device)
@@ -1144,72 +1136,117 @@ class AccelReadout:
     # P192：NPU Graph Capture（--beta 实验性优化；仅稠密路径，稀疏不适用）
     # ════════════════════════════════════════════════════════════════════
     def enable_npu_graph(self, beta: set[str] | None = None) -> bool:
-        """尝试捕获 NPU/CUDA 计算图（稠密 + fp32 主路径）。成功返回 True。
+        """捕获「前向 + 学习」一体计算图（一次 replay 跑完整步）。
 
-        ⚠ **仅稠密（`_sparse=False`）适用**：稀疏 gather 的 idx/val 是动态视图，
-        Graph 捕获会把 idx 固化——而实际训练中 idx 结构不变但**语义上每步
-        重新 gather**，固化的 gather 缓存会跳过 `W` 每步更新的读。
-        ⚠ fp8/int8 码本路径的反量化每步都变 → Graph 固化**会算错**，仅当
-        W 是原生浮点（fp32/fp16/bf16）时启用。
-        ⚠ torch.npu/cuda 的 graph API 名称不同 → 探测式尝试，失败静默回落。
+        ## 支持的精度（P192 修正：先前只放行 fp32 稠密是**过窄**的）
 
-        beta 阶段控制：
-          p0 = Graph Capture（forward + learn 基础图）
-          p1 = Forward+Learn Graph Fusion（合并为单图 replay）
-          p2 = Async H2D/D2H（预留，后续实现）
-          p3 = 双缓冲流水线（预留，后续实现）
+        | 存储形态 | 可入图 | 理由 |
+        |---|---|---|
+        | fp32 / fp16 / bf16 原生浮点 | ✅ | W 原生张量，直接 matmul/addmm_ |
+        | **int8 码本**（`_int8_like`，P105） | ✅ | `_int8_update` 全程设备算子：反量化 → addmm_ → round/clamp → 写回，**零主机交互** |
+        | **fp8-bits 位模式**（uint8 承载，P189） | ✅ | `_fp8_bits_to_real`（设备端 LUT gather）+ `_real_to_fp8_bits`（纯 int64 位运算）都在设备上 |
+        | fp8 原生张量 | ✅ | `view(uint8)` 与位模式同语义，走同一 LUT |
+
+        **关键更正（P192）**：先前排除 int8/fp8 的理由是「反量化每步都变 →
+        图固化会算错」。这是**错的** —— 图固化的是**张量地址**不是**张量值**；
+        反量化被固化进图后，每次 replay 仍从 `self.W` 的**当前值**重算
+        （W 由同一张图原地更新），语义与 eager 完全一致。
+
+        ## 真正不能入图的（它们含主机交互）
+        - `_int8_compute` 分支：`_gmax = float(_gf.abs().max())` 是**设备同步**
+          （`.item()`），图捕获期会挂起；
+        - `_fp8_to_int8_cpu`：D2H → CPU 转换 → H2D 的**每步往返**（P154 指令
+          强制走 CPU），图内无法表达；
+        - **稀疏臂**（`_sparse`）：gather 的 `Wi` 语义上每步重算，固化会跳过
+          `W` 的更新读（`_sp_gather` 缓存判据失效）。
+
+        beta 阶段控制：p0 = 图捕获；p1 = 前向+学习融合单图（当前实现）。
         """
-        # 解析 beta 阶段集合
         beta = beta or set()
-        do_p0 = "p0" in beta
-        do_p1 = "p1" in beta
-        if not do_p0:
+        if "p0" not in beta:
             return False
-        if self._sparse or self._int8 or self._int8_like or \
-                getattr(self, "_fp8_bits", False) or self._fp8_native:
+        # ── 排除项：稀疏 / 含主机交互的 int8 计算域 / fp8→int8 CPU 往返 ──
+        if self._sparse or self._int8_compute:
+            return False
+        if getattr(self, "_fp8_conv_int8_cpu", False):
             return False
         try:
-            g = torch.cuda.CUDAGraph() if self.device.startswith("cuda") \
-                else getattr(torch.npu, "NPUGraph", None)()
+            g = (torch.cuda.CUDAGraph() if self.device.startswith("cuda")
+                 else torch.npu.NPUGraph())
         except Exception:
             return False
-        if g is None:
-            return False
-        # 侧流捕获（Graph capture 要求在非默认流上）
         stream = (torch.cuda.Stream() if self.device.startswith("cuda")
                   else torch.npu.Stream())
         try:
-            with torch.cuda.graph(g, stream=stream) if self.device.startswith("cuda") \
-                    else torch.npu.graph(g, stream=stream):
+            with (torch.cuda.graph(g, stream=stream)
+                  if self.device.startswith("cuda")
+                  else torch.npu.graph(g, stream=stream)):
+                # 图的唯一三个主机输入：h、target 索引、学习率
                 self._graph_ht = torch.zeros(self.n_h, device=self.device,
                                              dtype=self._cdtype)
-                # P192：correct / eta 用**设备标量**承载（运行期 fill_ 切换）
                 self._graph_correct_t = torch.zeros((), device=self.device,
                                                     dtype=torch.int64)
                 self._graph_eta_t = torch.zeros((), device=self.device,
                                                 dtype=torch.float32)
-                y = self._matmul(self._graph_ht)
+                # ── 前向：按存储形态取「实值权重视图」（反量化在图内，每 replay 重算）──
+                _Wreal = self._graph_dequant()
+                y = torch.mv(_Wreal, self._graph_ht)
                 self._graph_out = y
                 y32 = y.float()
-                # CE 恒等展开：logsumexp(y) − y[correct]（P188 同款，零主机交互）
+                # CE 恒等展开（零主机交互，P188 同款）
                 self._graph_nll = (torch.logsumexp(y32, dim=0)
                                    - y32[self._graph_correct_t]).reshape(())
-                p = torch.softmax(y32, dim=0)
-                dp = p.to(self._cdtype)
+                # ── 学习：dp = softmax(y) − onehot(correct)，alpha = −eta ──
+                dp = torch.softmax(y32, dim=0).to(self._graph_upd_dtype())
                 dp[self._graph_correct_t] -= 1.0
-                self.W.addmm_(dp.reshape(-1, 1),
-                              self._graph_ht.reshape(1, -1),
+                _Wreal.addmm_(dp.reshape(-1, 1), self._graph_ht.reshape(1, -1),
                               alpha=self._graph_eta_t.neg())
                 if self.w_clip > 0.0:
-                    self.W.clamp_(-self.w_clip, self.w_clip)
-        except Exception:
+                    _Wreal.clamp_(-self.w_clip, self.w_clip)
+                # ── 重量化写回同一块存储（图内闭环，W 地址不变）──
+                self._graph_requant(_Wreal)
+        except Exception as e:
+            self._degrade_reason = f"graph capture failed: {type(e).__name__}: {str(e)[:120]}"
             return False
         self._npu_graph = g
-        self._graph_eta = -0.01
-        self._graph_correct = 0
         self._npu_graph_ready = True
-        self._beta_stages = beta  # 记录启用的阶段
+        self._beta_stages = beta
         return True
+
+    # ── 图捕获的三件套：反量化 / 更新域 dtype / 重量化 ────────────────────
+    def _graph_dequant(self):
+        """图内反量化：存储 → 实值（每 replay 重算，故不staleness）。
+
+        与 `_matmul` 的分支同序同口径，保证 graph 与 eager **逐位一致**。
+        """
+        if self._int8_like and self._wscale is not None:
+            return self.W.to(self._cdtype) * float(self._wscale)
+        if getattr(self, "_fp8_bits", False) or self.W.dtype == torch.float8_e4m3fn:
+            return self._fp8_bits_to_real()          # 设备端 LUT gather
+        return self.W.to(self._cdtype)                # 原生浮点
+
+    def _graph_upd_dtype(self):
+        """图内更新域 dtype（与 `_eager_step` 的 `_upd_dtype` 同口径）。"""
+        if self._int8_like:
+            return torch.float32
+        if self.W.dtype in (torch.float16, torch.float8_e4m3fn, torch.uint8):
+            return torch.float16
+        return self.tdtype
+
+    def _graph_requant(self, W_real) -> None:
+        """图内重量化：实值 → 存储精度，写回 `self.W`（原地，保持地址不变）。"""
+        if self._int8_like:
+            sc = float(self._wscale) or 1.0
+            codes = torch.clamp(torch.round(W_real.to(torch.float32) / sc),
+                                -_INT8_QMAX, _INT8_QMAX)
+            self.W.copy_(codes.to(torch.int8))
+            return
+        if getattr(self, "_fp8_bits", False) or self.W.dtype == torch.float8_e4m3fn:
+            bits = self._real_to_fp8_bits(W_real)
+            self.W.copy_(bits.view(torch.float8_e4m3fn)
+                         if self.W.dtype == torch.float8_e4m3fn else bits)
+            return
+        self.W.copy_(W_real.to(self.W.dtype))
 
     def _forward_dev_graph(self, h):
         """Graph replay 版 forward_dev：拷贝输入 → replay → 返回设备 y。"""

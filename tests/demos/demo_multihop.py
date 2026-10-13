@@ -19,7 +19,8 @@ _DOC = _ROOT / "eval_corpus" / "internal_corpus.txt"    # 默认语料
 
 import numpy as np
 
-from phdnet.memory import LongTermMemory, WorkingMemory
+from phdnet.ltm import LongTermMemory
+from phdnet.wm import WorkingMemory
 
 N, N_PAIRS, N_DISTRACT = 256, 5, 12
 

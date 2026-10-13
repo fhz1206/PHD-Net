@@ -5,8 +5,7 @@
     2. M2 预测编码推理       5. M4a 工作记忆（门控写入）
     3. M3 时序预测           6. M4b 长期记忆（编码/检索）
     7. M6 读出（可选监督）    8. 全模块局部规则学习
-
-注：Readout（M6 读出头）已拆分至 phdnet/readout.py，此处再导出以兼容旧引用。"""
+"""
 
 import time
 import warnings
@@ -16,14 +15,14 @@ import numpy as np
 from .config import PHDNetConfig
 from .device import use_torch_backend
 from .bigltm import SparseLTM
+from .ltm import LongTermMemory
+from .wm import WorkingMemory
 from .sparse_pc import SparsePCStack
-from .memory import LongTermMemory, WorkingMemory
 from .modulator import Neuromodulator, MultiModulator
 from .plasticity import STDPCore
-from .readout import Readout
 from .sparse_encoder import SparseEncoder
 
-__all__ = ["PHDNet", "Readout"]
+__all__ = ["PHDNet"]
 
 
 
@@ -45,8 +44,7 @@ class PHDNet:
         self.encoder = SparseEncoder(cfg.n_input, cfg.n_sdr, cfg.k_sparse, rng,
                                      dtype=getattr(cfg, "encoder_dtype", "fp32"))  # M1
         # M2 主干：结构性稀疏 CSR（唯一实现）。2026-09-28 按 fhz 指令删除稠密
-        # PredictiveCodingStack（phdnet/pc.py）；cfg.sparse_conn 仅为兼容保留，
-        # 传 False 会在 config 校验期 fail-fast。
+        # PredictiveCodingStack（phdnet/pc.py）；P193 起 `sparse_conn` 开关也删了。
         self.pc = SparsePCStack(cfg.n_sdr, cfg.n_mid, cfg.n_top,                  # M2（结构性稀疏）
                                 cfg.eta_pc, cfg.eta_oja, rng, conn_k=cfg.conn_k,
                                 w_max=cfg.pc_w_max,

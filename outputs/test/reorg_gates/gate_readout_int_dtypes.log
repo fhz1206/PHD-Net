@@ -5,10 +5,10 @@ python 3.14.5 | numpy 2.5.2
 ========================================================================================
 
 ========================================================================================
-T1 · 7 种写法（6 规范名 + fp8 旧名别名；int4/fp4 已按 P191e 删除）：构造 / 前向有限 / learn
+T1 · 7 种写法（6 规范名 + fp8 请求归一；int4/fp4 已按 P191e 删除）：构造 / 前向有限 / learn
 ========================================================================================
   RO_DTYPES = ('fp32', 'fp16', 'bf16', 'int8', 'int16', 'int32')（共 6 个规范名）
-  [PASS] RO_DTYPES 含全部 6 个规范名（无 4-bit）  — RO_DTYPES = ('fp32', 'fp16', 'bf16', 'int8', 'int16', 'int32')
+  [PASS] RO_DTYPES 含全部 6 个规范名（无 4-bit、无旧名别名）  — RO_DTYPES = ('fp32', 'fp16', 'bf16', 'int8', 'int16', 'int32')
   [PASS] fp32  构造 / 前向有限 / learn+learn_softmax 跑通  — dtype_name=fp32 nll=4.3374 max|W|=0.5494
   [PASS] fp16  构造 / 前向有限 / learn+learn_softmax 跑通  — dtype_name=fp16 nll=4.5161 max|W|=0.5259
   [PASS] bf16  构造 / 前向有限 / learn+learn_softmax 跑通  — dtype_name=bf16 nll=4.9387 max|W|=0.6211
@@ -16,7 +16,7 @@ T1 · 7 种写法（6 规范名 + fp8 旧名别名；int4/fp4 已按 P191e 删�
   [PASS] int16 构造 / 前向有限 / learn+learn_softmax 跑通  — dtype_name=int16 nll=4.6749 max|W|=0.4148
   [PASS] int32 构造 / 前向有限 / learn+learn_softmax 跑通  — dtype_name=int32 nll=5.1985 max|W|=0.4126
   [PASS] fp8   构造 / 前向有限 / learn+learn_softmax 跑通  — dtype_name=int8 nll=4.0561 max|W|=0.8125
-  [PASS] 旧名 fp8 → int8（旧名正名兼容契约，P100）  — fp8 → dtype_name=int8
+  [PASS] fp8 请求 → int8 码本（P193 显式归一，无别名表）  — fp8 → dtype_name=int8
   [PASS] 显式请求 int4 被 fail-fast 拒绝（P191e）
   [PASS] 显式请求 fp4 被 fail-fast 拒绝（P191e）
   [PASS] conn_k>0 时 int8 被强制回落 fp32（码本不与 CSR 叠加）  — conn_k=16 → dtype_name=fp32

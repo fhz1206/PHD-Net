@@ -38,7 +38,7 @@ Cython 核门禁（P192）
   PASS C3 wm_decay_read strength 衰减值逐位  [max|d|=0.000e+00]
   PASS C3b wm_decay_read slots 衰减值逐位（首版漏衰减，被抓）  [max|d|=0.000e+00]
   PASS C4 wm_decay_read 读出值与 numpy 两趟数值等价  [max|d|=0.000e+00（numpy 向量化归约、顺序不同 → 容差非逐位）]
-  PASS D1 nogil 核与 Python 线程可并发（GIL 未被独占）  [40 次 gemv 墙钟 687.2 ms，spin tick=12422420]
+  PASS D1 nogil 核与 Python 线程可并发（GIL 未被独占）  [40 次 gemv 墙钟 381.8 ms，spin tick=3721916]
   PASS E1 mode=off 门面不提供核属性（不会静默改道）
 
 ==============================================================

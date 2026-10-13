@@ -1,7 +1,7 @@
 """M2 词级语言接口 —— 词级 LM（T2.1 词涌现 + T2.3 上下文绑定）。
 
-词法（WordSegmenter / WordTokenizer）已拆分至 phdnet/word_encoder.py，
-n-gram 基线拆分至 phdnet/ngram.py；此处仅保留 PHDWordLM 并再导出以兼容旧引用。"""
+词法（WordSegmenter / WordTokenizer）在 phdnet/word_encoder.py，
+n-gram 基线（WordNGram）在 phdnet/ngram.py。"""
 
 from collections import Counter
 from math import log
@@ -10,10 +10,9 @@ import numpy as np
 
 from .config import PHDNetConfig
 from .model import PHDNet
-from .ngram import WordNGram
-from .word_encoder import WordSegmenter, WordTokenizer
+from .word_encoder import WordTokenizer
 
-__all__ = ["PHDWordLM", "WordSegmenter", "WordTokenizer", "WordNGram"]
+__all__ = ["PHDWordLM"]
 
 
 

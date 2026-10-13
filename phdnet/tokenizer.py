@@ -11,17 +11,11 @@ _K1, _K2, _K3 = U64(0x9E3779B97F4A7C15), U64(0xBF58476D1CE4E5B9), U64(0x94D049BB
 
 
 def mix64(z: np.ndarray) -> np.ndarray:
-    """splitmix64 终混（确定性、可向量化）—— SDR / 大空间索引的伪随机来源。
-
-    公开名；`_mix64` 为兼容旧引用的别名（历史上以私有名导出，多处 import）。
-    """
+    """splitmix64 终混（确定性、可向量化）—— SDR / 大空间索引的伪随机来源。"""
     z = (z + _K1).astype(np.uint64)
     z = ((z ^ (z >> U64(30))) * _K2).astype(np.uint64)
     z = ((z ^ (z >> U64(27))) * _K3).astype(np.uint64)
     return z ^ (z >> U64(31))
-
-
-_mix64 = mix64          # 兼容别名（C5 重构 2026-09-22：去重 tools/train.py 的副本）
 
 
 class CharTokenizer:
@@ -38,7 +32,7 @@ class CharTokenizer:
         self._sdrs = {}
         for i, c in enumerate(self.chars):
             x = U64(i) * U64(2654435761) + np.arange(n_active, dtype=np.uint64)
-            idx = (_mix64(x + U64(seed)) % U64(n_sdr)).astype(np.int64)
+            idx = (mix64(x + U64(seed)) % U64(n_sdr)).astype(np.int64)
             s = np.zeros(n_sdr)
             s[idx] = 1.0                      # 二值 SDR（事件驱动语义）
             self._sdrs[c] = s

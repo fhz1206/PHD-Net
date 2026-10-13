@@ -35,7 +35,7 @@
 ③ **逐 token 语义**——状态跨 token/shard/epoch 连续演化，`W` 每步原地更新 → **不允许批处理**；
 ④ 行为变更以 config 开关承载且**默认关闭**。
 
-> ⚠ ④的**例外**（fhz 明确指令，default-on）：`sparse_conn=True`、`k_sparse=16`、`csr_online=True`。
+> ⚠ ④的**例外**（fhz 明确指令，default-on）：`k_sparse=16`、`csr_online=True`。
 > 库默认值与 CLI 默认值**可以不一致**（例：`config.encoder_dtype=fp64` 而生产 CLI 覆盖为 `fp32`），
 > 但**必须是有意的**，且文档要写明是哪一个在生效。
 

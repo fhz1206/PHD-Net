@@ -16,7 +16,7 @@ import numpy as np
 from eval_common import BASE, _tf_acc, _tf_fit
 from phdnet.config import PHDNetConfig
 from phdnet.lm import PHDNetLM
-from phdnet.memory import LongTermMemory
+from phdnet.ltm import LongTermMemory
 
 
 def task3_oneshot(n_dim: int = 256, n_items: int = 20, noise: float = 0.3,

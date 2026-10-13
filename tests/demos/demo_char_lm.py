@@ -20,7 +20,8 @@ import time
 import numpy as np
 
 from phdnet.config import PHDNetConfig
-from phdnet.lm import NGramBaseline, PHDNetLM
+from phdnet.lm import PHDNetLM
+from phdnet.ngram import NGramBaseline
 
 if __name__ == "__main__":
     with open(str(_DOC), encoding="utf-8") as f:

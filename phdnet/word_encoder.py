@@ -5,7 +5,7 @@
 
 import numpy as np
 
-from .tokenizer import U64, _mix64
+from .tokenizer import U64, mix64
 
 
 def _induce_length(codes, inv_codes, n: int, L: int, min_count: int,
@@ -159,7 +159,7 @@ class WordTokenizer:
         self._sdrs: dict[str, np.ndarray] = {}
         for i, t in enumerate(self.tokens):
             x = U64(i) * U64(2654435761) + np.arange(n_active, dtype=np.uint64)
-            idx = (_mix64(x + U64(seed)) % U64(n_sdr)).astype(np.int64)
+            idx = (mix64(x + U64(seed)) % U64(n_sdr)).astype(np.int64)
             s = np.zeros(n_sdr)
             s[idx] = 1.0
             self._sdrs[t] = s

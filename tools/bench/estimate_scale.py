@@ -1,6 +1,6 @@
 """规模-吞吐实测：为「256M 参数生产模型」可行性判断提供实测依据。
 
-方法：固定配方（稀疏主干 `sparse_conn`，conn_k = 各层 n_in//8，即 12.5% 连接），
+方法：固定配方（结构性稀疏主干，conn_k = 各层 n_in//8，即 12.5% 连接），
       逐档放大主干宽度与词表规模，实测 (参数量, ms/token)，并外推 256M 档的
       训练时间。同时给出**内存需求**（权重 + 事件驱动记忆表）。
 
@@ -31,7 +31,7 @@ from phdnet.word_lm import PHDWordLM            # noqa: E402
 SFT = _ROOT / "datasets" / "sft" / "ultrainteract_sft.txt"
 SEG = dict(max_len=6, min_count=5, min_entropy=1.0)
 BASE = dict(k_sparse=0, eta_pc=0.0, eta_oja=0.0, eta_stdp=0.02, seed=11,
-            pred_in_readout=True, sparse_conn=True)
+            pred_in_readout=True)
 
 # (标签, n_sdr=n_mid=n_top, k_sparse 比例)
 SCALES = [

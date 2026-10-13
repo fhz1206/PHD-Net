@@ -26,9 +26,8 @@
 （CSR 求和顺序按列索引升序；与 BLAS 内部求和顺序不保证逐位相同，
 对拍判据见 tests/gates/gate_parallel_consistency.py）。
 
-开关（默认关闭，默认路径逐位不变）：
-  cfg.sparse_conn  —— True 时主干改用本模块
-  cfg.conn_k       —— 每神经元入边数 k（0 = 自动取 n_in//8）
+连接密度参数：
+  cfg.conn_k  —— 每神经元入边数 k（0 = 自动取 n_in//8 ≈ 12.5%）
 """
 
 from __future__ import annotations

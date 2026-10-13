@@ -27,8 +27,9 @@ import time
 import numpy as np
 
 from phdnet.config import PHDNetConfig
-from phdnet.lm import NGramBaseline
-from phdnet.word_lm import PHDWordLM, WordNGram
+from phdnet.ngram import NGramBaseline
+from phdnet.word_lm import PHDWordLM
+from phdnet.ngram import WordNGram
 
 if __name__ == "__main__":
     with open(str(_DOC), encoding="utf-8") as f:

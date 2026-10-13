@@ -186,8 +186,8 @@ class PHDNetConfig:
     #   实测依据——连接率 12.5%（k=32）时 PPL 与稠密持平（+0.03%~−0.30%），
     #   k=16（6.25%）时 −0.51%；突触存储压缩 6.7–32×、PC 层加速 1.68–4.02×。
     # **2026-09-28 起（fhz 指令「删稠密功能」）稠密栈已删除**（phdnet/pc.py 移除），
-    #   主干唯一实现为 SparsePCStack；本字段仅为配置兼容保留，False 会 fail-fast。
-    sparse_conn: bool = True
+    #   主干唯一实现为 SparsePCStack。P193（2026-10-12）删除 `sparse_conn`
+    #   字段本身——它已恒为 True 且无消费者，留着只会让人以为还能关。
     conn_k: int = 0             # 每神经元入边数 k（0 = 自动取各层 n_in//8 ≈ 12.5%）
 
     # O1-3：**读出头的结构性稀疏连接**（默认关闭）。
@@ -531,13 +531,10 @@ class PHDNetConfig:
                 f"k_sparse({self.k_sparse}) 不得超过 n_sdr({self.n_sdr})"
                 "——k-WTA 每层只有 n_sdr 个神经元可选。")
         # 2026-09-28（fhz 指令「删稠密功能」）：稠密 PC 栈已删除，主干唯一实现
-        # 为 SparsePCStack；sparse_conn=False 显式拒绝（不做静默稀疏化）。
-        if self.sparse_conn is not True:
-            raise ValueError(
-                "sparse_conn=False 已不可用（fhz 2026-09-28 删除稠密 PC 功能）："
-                "主干唯一实现为 SparsePCStack（CSR 稀疏图），请使用默认 True。")
+        # 为 SparsePCStack（CSR 稀疏图）——P193 起连 `sparse_conn` 开关也删了，
+        # 不再有「关掉稀疏」这个选项。
         # P192：fail-fast 校验新开关的取值域（**不做静默纠正** ——
-        # 与 sparse_conn 同纪律：写了非法值要立刻报错，而不是悄悄换个语义）。
+        # 写了非法值要立刻报错，而不是悄悄换个语义）。
         if self.cython_kernels not in ("off", "auto", "force"):
             raise ValueError(
                 f"cython_kernels={self.cython_kernels!r} 非法；"

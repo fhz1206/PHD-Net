@@ -50,7 +50,7 @@ def _help_consts(tree: ast.AST):
 
 def main() -> int:
     files = []
-    for sub in ("train", "tools", "phdnet", "phdnet/backends", "tests/verifiers"):
+    for sub in ("train", "tools", "phdnet", "phdnet/backends", "tests/gates"):
         d = _ROOT / sub
         if d.is_dir():
             files += sorted(d.glob("*.py"))

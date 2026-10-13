@@ -2,16 +2,15 @@
 
 信息流（架构文档 §5）：字符 → SDR → M1/M2/M3 全链路 → M6 读出（softmax 感知器）。
 学习全在线：训练即推理，无 epoch、无反向传播。
-字符级 n-gram 基线已拆分至 phdnet/ngram.py，此处再导出以兼容旧引用。"""
+字符级 n-gram 基线（NGramBaseline）在 phdnet/ngram.py。"""
 
 import numpy as np
 
 from .config import PHDNetConfig
 from .model import PHDNet
-from .ngram import NGramBaseline
 from .tokenizer import CharTokenizer
 
-__all__ = ["PHDNetLM", "NGramBaseline"]
+__all__ = ["PHDNetLM"]
 
 
 

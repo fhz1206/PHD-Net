@@ -158,8 +158,7 @@ def part_b(n_chunks: int = 64) -> None:
         par.append(c)
         if len(par) >= n_chunks:
             break
-    for p in pf._procs:
-        p.terminate()
+    pf.close()          # P192：多进程改多线程后，清理 API 从 terminate() 变 close()
     same = (ser == par)
     print(f"zh 流 块数: 串行={len(ser)} 并行={len(par)}  逐位一致: {same}")
     if not same:

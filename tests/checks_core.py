@@ -51,14 +51,14 @@ def t_core_demo() -> None:
 
 
 def t_capacity_small() -> None:
-    from phdnet.bigltm import SparseSynapseTable
-    from phdnet.tokenizer import U64, _mix64
+    from phdnet.sparse_table import SparseSynapseTable
+    from phdnet.tokenizer import U64, mix64
     N, M, A = 1 << 12, 16, 16
     tb = SparseSynapseTable(N, M, lam=0.7, eta=0.08, seed=7)
 
     def sdr(sym: int) -> list[int]:
         x = U64(sym) * U64(7919) + np.arange(A, dtype=np.uint64) * U64(2654435761)
-        return (_mix64(x + U64(7)) % U64(N)).astype(np.int64).tolist()
+        return (mix64(x + U64(7)) % U64(N)).astype(np.int64).tolist()
 
     prev = None
     for s in range(90):

@@ -28,7 +28,7 @@ import time
 import numpy as np
 
 from phdnet.context_memory import ContextMemory
-from phdnet.tokenizer import U64, _mix64
+from phdnet.tokenizer import U64, mix64
 
 ALPHA = "abcdefghijkl"
 N_DIM = 2048
@@ -41,7 +41,7 @@ def sdrs(alphabet: str) -> dict[str, np.ndarray]:
     out = {}
     for i, ch in enumerate(alphabet):
         x = U64(i) * U64(7919) + np.arange(K_SDR, dtype=np.uint64) * U64(2654435761)
-        idx = (_mix64(x + U64(SEED)) % U64(N_DIM)).astype(np.int64)
+        idx = (mix64(x + U64(SEED)) % U64(N_DIM)).astype(np.int64)
         s = np.zeros(N_DIM, dtype=np.float32)
         s[idx] = 1.0
         out[ch] = s

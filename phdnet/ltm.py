@@ -1,6 +1,6 @@
 """M4b 长期记忆 —— 海马快印迹 + 皮层慢巩固（CLS）与吸引子模式补全。
 
-（自 memory.py 拆分；原路径 `from phdnet.memory import LongTermMemory` 仍可用）"""
+（2026-09-18 自 memory.py 拆分为独立模块）"""
 
 import numpy as np
 

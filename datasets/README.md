@@ -105,7 +105,7 @@ ds = load_dataset('fhzfhz/Mixture-General-Mini', 'pretrain', streaming=True)
 `pyarrow.ParquetFile`，**原始分片从不落盘**（需 `fsspec` + `aiohttp`）。
 只支持 ModelScope（数据集托管 modelscope.cn；atomgit 限额 1 GiB 本就推不全）。
 超时 60 s、重试 3 次、指数退避 2 s；远程模式预取进程上限 4（避免打爆服务端）。
-实现见 `phdnet/ms_stream.py`，对拍见 `tests/verifiers/verify_ms_stream.py`。
+实现见 `phdnet/ms_stream.py`，对拍见 `tests/gates/gate_ms_stream.py`。
 
 **`--remote-fraction F`（默认 0.3）= 分片级前缀抽样**：把分片名排序后取**前 F 比例**，
 不是随机采样、不是按行采样；经环境变量 `PHDNET_REMOTE_FRACTION` 传给 worker 进程。

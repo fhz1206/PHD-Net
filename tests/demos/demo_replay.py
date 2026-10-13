@@ -19,7 +19,7 @@ _DOC = _ROOT / "eval_corpus" / "internal_corpus.txt"    # 默认语料
 
 import numpy as np
 
-from phdnet.memory import LongTermMemory
+from phdnet.ltm import LongTermMemory
 
 
 def make_ltm():
