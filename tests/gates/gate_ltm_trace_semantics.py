@@ -14,15 +14,17 @@
      `consolidate` 已加该守卫：>100 会让 float 路径 `f=1-0.01f<0` 把权重
      整体变负，而 int8 路径 clip 到 0 —— **两路径语义相反**，是静默误用）。
 
-⚠ **(a) 组在本机当前全红**（`NUMBA_LTM=True`）：惰性迹与本 verifier 自建的
-  「每步 flush 急切参考」之间存在**真实的语义差**（`ratio = 0.939770`，期望
-  ≈1.0000；`max|ΔW| = 8.832e-02`）。
-  **已验证这是既有失败、与任何新改动无关** —— 把本会话全部改动 stash 后重跑，
-  (a) 组**同样**失败。(b)(c)(d) 三组全绿 ⇒ 快照保真 / 分片状态恢复 / 巩固钳位
-  这三条语义都是对的。
-  **退出码因此保持 1**：不得为了「看起来全绿」把它降级成警告，那会让这个真实
-  差异被永久掩盖。定位它需要一次独立立项（责任在 `phdnet/sparse_table.py`
-  的迹补偿 vs 本参考实现的断档处理，不是别处）。
+⚠ **(a) 组的修复（P193，2026-10-12）**：根因是 **LTD 的第二条迹
+  `t_pre[k]` 走裸读**（`self.t_pre.get(k, 0.0)`，`sparse_table.py:153`）
+  —— 而 `k` 取自 `grow_order=cur`，**不保证在 `prev` 里**，它的
+  `stamp_pre[k]` 可能来自很久以前的某次 `_touch`。惰性衰减只在触达时发生，
+  于是该处读出的是「上次 touch 时刻」的值，**缺 λ^Δt 补偿** → LTD 偏大 →
+  权重被过度抑制（实测 40 步序列 ΣW ratio=0.9398、单边 max|ΔW|=8.8e-2）。
+  修法：与同公式的另两条迹一样走 `_decay_read`；批量路径的 `g_tpre`
+  同步改。三条配置（dict / csr_py / csr_batch）现与急切参考
+  `max|ΔW|=5.551e-17`、`ratio=1.000000`。
+  ⚠ 突变测试的判据同时改为**方向无关**（见 `check_a` 内注释）。
+  (b)(c)(d) 三组始终全绿 —— 快照保真 / 分片状态恢复 / 巩固钳位这三条语义都对。
 
 运行：py -3.14 tests/gates/gate_ltm_trace_semantics.py
 """
@@ -133,8 +135,13 @@ def check_a(seq: list) -> None:
         dmax = max((abs(wl[k] - we[k]) for k in set(wl) & set(we)), default=0.0)
         s_e = sum(we.values()) if we else float("nan")
         ratio = sum(wl.values()) / s_e          # ΣW 惰性 / ΣW 急切（修复后 ≈1）
-        # 修复前行为回放（_decay_read 直读原值，无 λ^Δt 补偿）：
-        # 稳态 dt=1、λ=0.7 ⇒ η_eff≈1.43η；本序列含更长断档 ⇒ 偏大更多。
+        # 突变测试：**关掉** λ^Δt 读侧补偿（`_decay_read` 直读原值）必须
+        # 被本组检出 —— 判据是「与参考显著不同」，**方向无关**。
+        # P193 更正：原断言写死 `ratio_pre > 1.1`（假定未补偿必偏大），
+        # 但补偿缺失同时放大 LTP 与 LTD（LTD 的 `t_pre[k]` 是裸读，见
+        # sparse_table.py:153），净方向由两者相对量决定 —— 实测是**偏小**
+        # （ratio_pre≈0.81，ΣW 被 LTD 压低）。把方向写进断言会掩盖真实形态，
+        # 也会让「换个 case 恰好偏大」的假通过。改为双侧阈值。
         pre = _mk(cfg)
         pre._decay_read = lambda trace, stamp, i: trace.get(i, 0.0)
         _drive(pre, seq)
@@ -145,8 +152,11 @@ def check_a(seq: list) -> None:
         check(f"(a) {cfg}: max|ΔW|<=1e-9 且键集一致", keys_ok and dmax <= 1e-9,
               f"max|ΔW|={dmax:.3e} ratio={ratio:.6f} edges={len(wl)}")
         # 门禁有效性（突变测试）：关掉补偿必须能被本组检出
-        check(f"(a) {cfg}: 未补偿（修复前）可被识别", ratio_pre > 1.1 and d_pre > 1e-3,
-              f"ratio_pre={ratio_pre:.4f} max|ΔW|_pre={d_pre:.4f}")
+        # （ratio_pre 偏离 1 超过 10%，或单边权重差 > 1e-3）
+        deviates = abs(ratio_pre - 1.0) > 0.10 or d_pre > 1e-3
+        check(f"(a) {cfg}: 未补偿（修复前）可被识别", deviates,
+              f"ratio_pre={ratio_pre:.4f}（偏离 1.0 达 "
+              f"{abs(ratio_pre - 1.0) * 100:.1f}%）max|ΔW|_pre={d_pre:.4f}")
 
 
 def _expected(t):
@@ -306,24 +316,9 @@ def main() -> None:
     check_c(_seq(15, 777), _seq(11, 778))
     check_d()
     bad = [n for n, ok in CASES if not ok]
-
-    # ⚠⚠ **(a) 组当前在本机全红，且这是**既有问题**、不是任何新改动的回归**。
-    #   已用「把本会话全部改动 stash 掉再跑」验证过：(a) 组在**干净工作树**上
-    #   同样失败（`max|ΔW| = 8.832e-02`，`ratio = 0.939770`，期望 ≈1.0000）。
-    #   即惰性迹表与本 verifier 自建的「每步 flush 急切参考」之间存在**真实的
-    #   语义差**，责任在 `phdnet/sparse_table.py` / 本参考实现，不在别处。
-    #   (b)(c)(d) 三组全绿 ⇒ 快照保真、分片状态恢复、巩固钳位三条语义都是对的。
-    #   **本门禁的退出码因此仍为 1** —— 不得为了「全绿」而把它降级成警告：
-    #   那样会把这个真实差异永久藏起来。它需要一次独立立项去定位
-    #   （见文件头「已知失败」一节）。
-    only_a = bad and all(n.startswith("(a)") for n in bad)
     print(f"\n{'PASS' if not bad else 'FAIL'}: {len(CASES) - len(bad)}/{len(CASES)} 项通过")
     for n in bad:
         print(f"  x {n}")
-    if only_a:
-        print("\n  [!] 失败**全部集中在 (a) 组** —— 惰性迹 vs 急切参考的对齐问题，")
-        print("      已验证为**既有失败**（stash 掉全部新改动后同样失败）。")
-        print("      (b)(c)(d) 全绿。退出码保持 1 以免这个差异被永久掩盖。")
     sys.exit(1 if bad else 0)
 
 

@@ -937,7 +937,7 @@ python train/train.py --preset 1b --data pretrain --data-lang zh --remote-data \
 | **`gate_cython_kernels.py`（41/41，P192 新增）** | **Cython 核 vs numba 对拍**，**两档判据**：语义级（索引口径 / clip / 事件驱动分支 / 整数用例逐位）严；数值级（`fastmath` 的 ~1 ulp）容差并**如实打出 `max\|d\|`**（管道已转义，否则会多切一列）。另含 A3 OpenMP 真伪（读 `_OPENMP` 宏，不自证）与 D1 nogil 释放检查 |
 | **`gate_cython_switch.py`（18/18，P192 新增）** | **`--cython-kernels` 开关不变量**：`off` 轨迹两次独立构造**逐位相同**；`auto` 漂移有界（实测 8.595e-08 @`stdp.W`）；取值域 fail-fast；int64 `post_idx` 被正确归一；**G 组「启动自检日志不许说假话」** —— `get_kernels()` 返回的是**原始扩展模块**而非 `Kernels` 门面，故判断生效要用 `is not None`，**读 `.active` 会 AttributeError**。这是 P192 首版的真实 bug：异常被 `except` 吞成「未生效」，紧接下一行又打印 `active=True`，日志自相矛盾且会误导事后复盘 |
 | **`gate_cpu_npu_overlap_contract.py`（19/19，P192 新增）** | **CPU/NPU 重叠的事实核对**：钉死「训练步设备路径已零同步（P117）」、`step()` 内无 `y_dev` D2H、PC/STDP 学习段不读 `y`、`--readout-pipeline` 未接线且**传了即 fail-fast**（不是「开了没反应」的开关）、`--cann-dispatch` 只核对不新增且幂等只读 |
-| `gate_ltm_trace_semantics.py`（**26/32**） | LTM 迹补偿/快照/分片恢复/巩固钳位。⚠ **(a) 组 6 例当前失败，且是既有失败**：惰性迹 vs 自建急切参考 `ratio=0.939770`（期望≈1.0）。已用「stash 全部新改动后重跑」验证与任何新改动无关；(b)(c)(d) 全绿。**退出码保持 1 以免差异被掩盖**（P192 只把 (d) 组从 `forget=150` 改为断言 fail-fast，因为 `bigltm.py` 已加 >100 的守卫） |
+| `gate_ltm_trace_semantics.py`（**32/32**） | LTM 迹补偿/快照/分片恢复/巩固钳位。✅ **P193 已全绿**：根因是 **LTD 的第二条迹 `t_pre[k]` 走裸读**（`k` 取自 `cur`、不保证在 `prev` 里，其 `stamp_pre[k]` 可能来自很久以前的某次 touch）→ 缺 λ^Δt 补偿 → LTD 偏大 → 权重被过度抑制（ΣW ratio=0.9398、单边 max\|ΔW\|=8.8e-2）。改走 `_decay_read` 后三配置（dict/csr_py/csr_batch）与急切参考 `max\|ΔW\|=5.551e-17`、`ratio=1.000000`。⚠ **这是学习规则层面的语义变更**：LTD 强度此前系统性偏大，历史 PPL 数字不再可比，须重测 |
 
 ### 9.5 日志字段完整速查表
 

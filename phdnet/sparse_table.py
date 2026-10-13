@@ -67,22 +67,6 @@ class SparseSynapseTable:
         if self.prune and len(trace) > self.prune and (t & 1023) == 0:
             self._prune_oldest(trace, stamp)
 
-    def _flush_all(self) -> None:
-        """急切参考兼容：每步 learn 前把所有迹 flush 到当前 step_count。
-
-        与 _EagerMixin._flush 行为完全一致：遍历 t_pre/t_post 所有键，
-        应用 λ^Δt 衰减，并把 stamp 更新到当前 step_count。
-        这是为了与急切参考表（门禁中的 EagerDict/EagerCSR）数值完全对齐。
-        """
-        t = self.step_count
-        lam = self.lam
-        for trace, stamp in ((self.t_pre, self.stamp_pre), (self.t_post, self.stamp_post)):
-            for i in list(trace.keys()):
-                dt = t - stamp.get(i, t)
-                if dt:
-                    trace[i] = trace[i] * (lam ** dt)
-                stamp[i] = t
-
     @staticmethod
     def _prune_oldest(trace: dict, stamp: dict) -> None:
         """淘汰最旧的一部分迹：下次触碰时该迹从 1.0 重新积累（遗忘旧痕，释放内存）。"""
@@ -145,7 +129,6 @@ class SparseSynapseTable:
         # → 两式不再恒等；读侧仍走 _decay_read 的 λ^Δt 惰性补偿，未触碰的
         # 滞后迹在读取时补到当前时刻（惰性扫描语义不变）。
         self._touch(prev, self.t_pre, self.stamp_pre)
-        self._touch(prev, self.t_post, self.stamp_post)  # P192: prev 的 post 迹也需每步衰减
         out, eta, w_max = self.out, self.eta, self.w_max
         int8 = self.int8_store
         q = self._q
@@ -166,8 +149,17 @@ class SparseSynapseTable:
                     continue
                 if bucket is not None and k in bucket:
                     w_now = bucket[k] / q if int8 else bucket[k]
+                    # P193 修复：第二条迹 `t_pre[k]` 此前走**裸读**
+                    # `self.t_pre.get(k, 0.0)` —— 但 `k` 取自 `grow_order=cur`，
+                    # **不保证在 prev 里**，它的 `stamp_pre[k]` 可能来自很久
+                    # 以前的某次 touch。惰性衰减只发生在 `_touch` 触达时，
+                    # 于是这里读出的是「上次 touch 时刻」的值，而缺 λ^Δt
+                    # 补偿 → LTD 偏大 → 权重被过度抑制（实测 40 步序列
+                    # ΣW ratio=0.9398、单边 max|ΔW|=8.8e-2）。
+                    # 与 `tpi` / `t_post[i]` 一样走 `_decay_read` 才与
+                    # 「每步急切衰减」的参考实现同口径。
                     ltd = (eta * self._decay_read(self.t_post, self.stamp_post, i)
-                           * self.t_pre.get(k, 0.0))
+                           * self._decay_read(self.t_pre, self.stamp_pre, k))
                     bucket[k] = self._enc(min(max(w_now + ltp - ltd, 0.0), w_max))
                 else:                                   # 结构可塑性：生长新突触
                     if bucket is None:
@@ -359,8 +351,6 @@ class OnlineCSRTable(SparseSynapseTable):
     def learn(self, prev: list[int], cur: list[int]) -> None:
         if not cur:
             return
-        # 与急切参考对齐：每步 learn 前把所有迹 flush 到当前 step_count
-        self._flush_all()
         # 与 dict 版同步（漏报1/漏报2）：①cur 无条件先 touch（prev 为空时只
         # touch 就返回）；②t_pre 只按 prev（突触前角色）touch —— 原来两迹
         # 同刻同键 ⇒ LTP≡LTD ⇒ 已存在突触永不更新。详见 dict 版注释。
@@ -368,7 +358,6 @@ class OnlineCSRTable(SparseSynapseTable):
         if not prev:
             return
         self._touch(prev, self.t_pre, self.stamp_pre)
-        self._touch(prev, self.t_post, self.stamp_post)  # P192: prev 的 post 迹也需每步衰减
         eta, w_max, int8, q = self.eta, self.w_max, self.int8_store, self._q
         # 与 dict 版一致：生长顺序在 prev 循环外确定一次（按当前入度升序）
         grow_order = cur
@@ -397,8 +386,10 @@ class OnlineCSRTable(SparseSynapseTable):
                 slot = self._find_slot(i, k)
                 if slot is not None:
                     w_now = (int(self.vals[i][slot]) / q) if int8 else float(self.vals[i][slot])
+                    # P193：与 dict 版同款修复 —— `t_pre[k]` 走 `_decay_read`
+                    # 而非裸读（`k` 来自 grow_order=cur，其 stamp 可能很久以前）。
                     ltd = (eta * self._decay_read(self.t_post, self.stamp_post, i)
-                           * self.t_pre.get(k, 0.0))
+                           * self._decay_read(self.t_pre, self.stamp_pre, k))
                     self._write_slot(i, slot, w_now + ltp - ltd)
                 elif self.size[i] < self.m_out:          # 结构可塑性：生长新突触
                     self._append(i, k, min(ltp, w_max))
@@ -448,10 +439,14 @@ class OnlineCSRTable(SparseSynapseTable):
             tpi[r] = float(self._decay_read(self.t_pre, self.stamp_pre, i))
             tpi_post[r] = float(self._decay_read(self.t_post, self.stamp_post, i))
         ks = np.asarray(grow_order, dtype=np.int64)
+        # `k ∈ grow_order=cur`：g_tpost 当步刚 _touch（stamp==step_count）⇒ 裸读
+        # 与 _decay_read 等价；但 **g_tpre 必须走 _decay_read**（P193）——
+        # `k` 不保证在 prev 里，其 stamp_pre 可能来自很久以前的 touch，
+        # 裸读会漏掉 λ^Δt 补偿 → LTD 偏大（与单条路径同款缺陷）。
         g_tpost = np.asarray([self.t_post.get(k, 0.0) for k in grow_order],
                              dtype=np.float64)
-        g_tpre = np.asarray([self.t_pre.get(k, 0.0) for k in grow_order],
-                            dtype=np.float64)
+        g_tpre = np.asarray([float(self._decay_read(self.t_pre, self.stamp_pre, k))
+                             for k in grow_order], dtype=np.float64)
         before = S.copy()
         _ltm_learn_rows(K, V, S, tpi, tpi_post, ks, g_tpost, g_tpre,
                         float(eta), float(w_max), float(q), bool(int8),
