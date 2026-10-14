@@ -83,7 +83,9 @@
 |---|---|---|
 | `--step-profiling` | 关 | **唯一的分段计时来源**（九段 + 主循环三段）。关闭时零开销；不开只剩端到端一个数，无法归因 |
 | `--readout-conn-k` | **128** | M6 读出稀疏度（0 = 稠密）。**128/3072 = 4.2% 连接率**，决定读出访存量（省 8.0×）。P108 取自 4M 档 A/B：k=128 时 PPL 477 vs 稠密 608 |
-| `--readout-dtype` | **fp8** | 读出计算精度。**P189（fhz 2026-10-07）默认改 fp8**：fp8 e4m3fn 位模式（uint8 承载）存储 + fp16 迭代计算；910B 无 fp8 算子 → 每步 CPU 转换 int8 计算可选（`--fp8-conv`）。P110 的保留率实测仍是低精度代价的依据（§6.1） |
+| `--readout-dtype` | **fp32**（P194 Q4） | 读出**存储**精度。P194 起默认 fp32（P110：低精度把感知器 p−t 的非目标行更新舍入丢弃 → 学习退化为纯 Hebbian）。要 fp8 的访存收益请配 `--readout-master-weight`（P195 DeepSeek-V4-Flash：fp8 影子只做前向、更新落 fp32 master → 本机实测 PPL 与 fp32 基线差 1.1%，而无 master 的 fp8 差 33%，见 §6.2）。910B 无 fp8 算子 → 每步 CPU 转换 int8 计算可选（`--fp8-conv`） |
+| `--readout-master-weight` | **off** | P195：fp32 主权重 + 低精度影子副本（DeepSeek-V4-Flash 模式）。所有更新作用在 fp32 master（非目标行更新 100% 保留），影子只做前向 GEMV，每 N 步重量化一次。代价：多一份 fp32 master（1b 档 866.7 MiB）+ 最多 N 步 staleness；torch.compile 被禁用、NPU Graph 重量化移出图外。**默认 off**——fp32 存储时无收益（影子即 master） |
+| `--readout-shadow-refresh` | 8 | P195：主权重模式下影子重量化间隔（步）。越小前向越新但量化越频。本机 A/B：r=4 → PPL 2.15、r=8 → 2.15、r=16 → 2.20 |
 | `--fp8-conv` | **torch** | P189：fp8→int8 CPU 转换核（**torch/nogil**）。🔴 **原第三选项 `rust` 已随 P188「删除 rust 版本」整体移除**，传旧值**静默按 torch 处理**（不报错，两条 Python 路径逐位一致）。~~x86 实测 rust 量化 LUT 核 8.44× 快（3.73 vs 31.5ms @1b 档）~~ **该数字已作废**（产出它的 `phdnet_rs/` 代码已被删除），**不可作为选型依据**。现行只有 torch（默认）/ nogil 两条 |
 | `--m2-kernel` | **`plain`** | `plain` 走 `_csr_matvec`（`sparse_pc.py:43-53`，**有行级 `prange`**）——**P113 起为默认**，服务器实测 5.41×（§2.1）。`serial` 是 P99 加的**单核**融合核（**历史默认**）；`fused` 在昇腾退化 3–4×（已否）。⚠ `phdnet/config.py:198` 的库默认 `pc_fused_kernel=True` 是**另一条路径**（= fused），引用时必须指明层级（附录 A第 13 条口径差异） |
 | `--encoder-dtype` | **fp32** | M1 编码器权重精度。⚠ help 文本写「默认 fp64」，**与实际默认值不符**（见附录 A） |
@@ -566,9 +568,42 @@ fp32 权重 @ fp64 输入会**脱离 BLAS 的 sgemv**，走逐元素慢路径，
 
 > ### 结论（P110 仍有效，口径随 P189 更新）：低精度的速度收益伴随语义损失，不能只看快。
 > `p − t` 规则的非目标行更新被舍入 → 学习**部分退化为纯 Hebbian**
-> （只提升目标行，无抑制）。**现行默认 fp8（P189）** 是 fhz 2026-10-07 的
-> 知情决策（访存减半的收益 > 非目标行损失），**验收只能靠 probe_PPL**
-> （`--probe-every`）确认学习仍在进行。启动日志按精度分叉打印警告。
+> （只提升目标行，无抑制）。
+
+### 6.2 P195：DeepSeek-V4-Flash 主权重模式（解除 §6.1 的舍入丢失）
+
+fhz 2026-10-12 指令「模仿 DeepSeek-V4-Flash：保持 fp8 的精度和 fp16 的迭代精度」。
+§6.1 的失败模式**不是 fp8 本身的问题**，而是**没有高精度累加器**：
+
+| 组件 | 精度 | 作用 |
+|---|---|---|
+| **master weight** | **fp32**（常驻） | 所有更新作用于此 → 非目标行更新 **100% 保留** |
+| **影子副本** | fp8/bf16/fp16 位模式 | 只用于前向 GEMV → 保留低精度访存收益 |
+| 重量化 | 每 `shadow_refresh` 步一次（默认 8） | 摊薄量化成本（P84 `fp8_refresh` 同思路） |
+
+即：**「fp8 的精度」= 前向访存/存储省 2–4×；「fp16 的迭代精度」= 实际更新在
+fp32 master 上，比 fp16 更准**（dp/ht 仍按 `_cdtype`=fp16 算，保持迭代精度口径）。
+
+**本机 A/B**（`tests/checks_p195.py --ab`，固定探针集，P146 纪律）：
+
+| 配置 | PPL | vs 无 master | vs fp32 基线 |
+|---|---|---|---|
+| accel fp8 无 master | 2.84 | — | +33.5% |
+| **accel fp8 + master (r=8)** | **2.15** | **−24.2%** | **+1.1%** |
+| numba int8(=e4m3) 无 master | 2.83 | — | +33.2% |
+| **numba int8 + master (r=8)** | **2.15** | **−24.1%** | **+1.2%** |
+
+`r=4 → 2.15 / r=16 → 2.20`（staleness 与量化频度的权衡，默认 8 = DeepSeek 同款折中）。
+
+**两条臂行为一致**（加速 / numba 回落）——这是 GAP-4 修复的结果：主权重参数
+原来只接线到 `AccelReadout`，`--accel cpu` 下 silently 失效。
+
+**代价**：多一份 fp32 master（1b 档 866.7 MiB）；前向有最多 N 步 staleness
+（影子比 master 旧）；torch.compile 融合核被禁用、NPU Graph 的重量化移出图外。
+故**默认 off**（不知情的人不该被动多付一倍内存），显式 `--readout-master-weight` 开启。
+
+**检查点**：master 的 fp32 精确值**逐位**往返（`ro_W` 跳过 `ckpt_dtype` 压缩，
+否则 §6.1 的精度收益归零）；非 master 模式按影子粒度恢复（与训练期同一把尺子）。
 
 ⚠ **两条方法论教训**（`[台账]` B13）：
 

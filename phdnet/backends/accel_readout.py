@@ -92,7 +92,8 @@ class AccelReadout:
                  gather_impl: str = "index", gather_dtype: str = "fp32",
                  int8_compute: str = "auto",
                  fp8_conv: str = "torch",
-                 sparse_fwd_kernel: str = "mulsum"):
+                 sparse_fwd_kernel: str = "mulsum",
+                 master_weight: bool = False, shadow_refresh: int = 8):
         if torch is None:
             raise RuntimeError("未安装 torch，加速读出不可用")
         # 返工 2：最近一次**永久降级**的原因（未降级 → None）；供 stats/日志取用。
@@ -266,6 +267,34 @@ class AccelReadout:
         # ════════════════════════════════════════════════════════════════
         self._fp8_bits = bool(_req == "fp8" and _res["dtype"] in ("fp8", "fp16")
                               and _res["dtype"] != "fp8")
+        # ════════════════════════════════════════════════════════════════
+        # P195（fhz 指令「模仿 DeepSeek-V4-Flash：保持 fp8 的精度和 fp16 的
+        # 迭代精度」）：**主权重 + 低精度影子副本**。
+        # ════════════════════════════════════════════════════════════════
+        # 背景（P110 实测反证 + DeepSeek-V3/V4-Flash 的解法）：
+        #   「存储 fp8 + 每步反量化→更新→重量化」让**非目标行更新被舍入
+        #   丢弃**（fp32 99.95% / fp16 26.67% / fp8 更差）→ 学习退化为
+        #   纯 Hebbian。这不是 fp8 本身的问题，而是**没有高精度累加器**。
+        #
+        # DeepSeek 的做法（DeepSeek-V3 论文 §3.2 / V4-Flash 沿袭）：
+        #   · **master weight** 常驻 **fp32**（`self._W_master`）；
+        #   · **影子副本**（`self.W`）是 fp8/bf16/fp16 位模式，只用于
+        #     **前向 GEMV**（带宽收益在这里，2×/4×）；
+        #   · **所有更新都作用在 master**（fp32 域，无舍入丢失）；
+        #   · 每 `shadow_refresh` 步把 master 重量化成影子（摊销量化成本，
+        #     与 P84 `fp8_refresh` 同思路但对象相反——那边是反量化副本）。
+        #   → 「fp8 的精度」= 前向访存/存储省 2–4×；
+        #     「fp16 的迭代精度」= 实际更新在 fp32 master 上，**比 fp16 更准**。
+        #
+        # ⚠ 代价：多一份 fp32 master（1b 档 866.7 MiB）。**显式 opt-in**
+        #   （`--readout-master-weight on`，默认 off）——不知情的人不该
+        #   被动多付一倍内存。默认 off 时行为与 P194 完全一致（逐位不变）。
+        # ⚠ `self.W` 的语义不变（仍是「当前用于前向的存储张量」）——
+        #   故所有读 W 的路径（_matmul / graph / stats / ckpt）**零改动**。
+        self._master_weight = bool(master_weight)
+        self._W_master = None
+        self._shadow_refresh = max(1, int(shadow_refresh))
+        self._shadow_age = 0
         if self._fp8_bits:
             # P191d（服务器 2026-10-07 实测 PPL 34354 + 读出 313ms 的根因）：
             # fp8_bits 模式下**强制关 int8 计算域**——`--readout-int8-compute
@@ -495,7 +524,13 @@ class AccelReadout:
         #「瓶颈在 kernel 下发」——逐算子 eager 正是该结论的直接成因。
         # `_train_step_core` 本身与稀疏无关（它只吃 y32/ht/t/correct/eta），
         # 故放开是安全的；运行期失败已有「永久回落 eager + 告警」（P19）。
-        if compile:
+        # P195：主权重模式下**禁用 torch.compile 融合核**——
+        #   `_train_step_core` 写 `self.W`（影子）而主权重模式的更新要落在
+        #   fp32 master 上，两者是**不同的张量对象与 dtype**，融合核的图按
+        #   `self.W` 固化 → 会静默产生「更新影子、master 不变」的分叉
+        #   （= 主权重模式完全失效，且 nll 看起来正常）。
+        #   宁可放弃 launch 收益（正确性优先，P19 纪律）。
+        if compile and not self._master_weight:
             try:
                 self._fused = torch.compile(self._train_step_core,
                                             mode=self._compile_mode,
@@ -827,6 +862,96 @@ class AccelReadout:
             self._fp8_lut_dev = lut
         return lut
 
+    # ── P195：DeepSeek-V4-Flash 主权重 + 影子副本 ─────────────────────────
+    def _shadow_dequant(self) -> torch.Tensor:
+        """影子 → fp32 实值（**与存储 dtype 无关**，P195-BugC/D 修复）。
+
+        原 `_master_init` 直接调 `_fp8_bits_to_real()`（只认 fp8）→ fp32/
+        fp16/int8 存储下建不出 master（或建错）。改为按当前存储形态分派：
+          · fp8 位模式 / 原生 → LUT 查表（`_fp8_bits_to_real`）
+          · int8 码本         → 码值 × `_wscale`
+          · 原生浮点          → 直接 cast
+        """
+        if getattr(self, "_fp8_bits", False) or \
+                self.W.dtype == torch.float8_e4m3fn:
+            return self._fp8_bits_to_real().to(torch.float32)
+        if self._int8_like and self._wscale is not None:
+            return (self.W.to(torch.float32) * float(self._wscale))
+        return self.W.to(torch.float32)
+
+    def _master_init(self, W_real: torch.Tensor | None = None) -> None:
+        """建 fp32 master（首次需要时）。W_real 为空则从影子反量化。"""
+        if W_real is None:
+            W_real = self._shadow_dequant()
+        self._W_master = W_real.detach().to(torch.float32).clone()
+
+    def _master_update(self, dp: torch.Tensor, ht: torch.Tensor,
+                       eta: float, t: torch.Tensor | None) -> None:
+        """在 **fp32 master** 上做 rank-1 更新，并按需刷新低精度影子副本。
+
+        与 `_eager_step` 的关系：**同一 rank-1 语义**（W -= η·dp⊗ht），
+        但更新域固定 **fp32**：
+          · dp/ht 用 `_cdtype`（fp16）算 → **保持 fp16 的迭代精度**
+            （这正是 fhz 指令里「fp16 的迭代精度」那一半）；
+          · 累加在 fp32 master 上 → **非目标行更新不再被舍入丢弃**
+            （P110 反证的解除：99.95% → 100%）。
+        影子副本每 `_shadow_refresh` 步重量化一次 → **前向访存仍是低精度**
+        （「fp8 的精度」那一半：存储/带宽 1 B/权重）。
+        """
+        if self._W_master is None:
+            self._master_init()
+        # dp 已在 _upd_dtype（fp16）域；升到 fp32 与 master 对齐
+        dp32 = dp.to(torch.float32)
+        if self._sparse:
+            g = self._sp_gather(ht).to(torch.float32)
+            self._W_master.addcmul_(dp32.reshape(-1, 1), g,
+                                    value=-float(eta))
+        else:
+            ht32 = ht.to(torch.float32)
+            self._W_master.addmm_(dp32.reshape(-1, 1), ht32.reshape(1, -1),
+                                  alpha=-float(eta))
+        if self.w_clip > 0.0:
+            self._W_master.clamp_(-self.w_clip, self.w_clip)
+        # 影子刷新：摊薄重量化成本（P84 fp8_refresh 同思路）
+        self._shadow_age += 1
+        if self._shadow_age >= self._shadow_refresh:
+            self._master_to_shadow()
+            self._shadow_age = 0
+
+    def _master_to_shadow(self) -> None:
+        """fp32 master → 低精度影子副本（写回 `self.W`，地址不变）。
+
+        只有这里做重量化 → 每 `_shadow_refresh` 步一次，而不是每步一次。
+        ⚠ **前向因此有最多 N 步的 staleness**（影子比 master 旧）——
+          这是 DeepSeek 方案的已知代价，用 refresh 间隔权衡（默认 8）。
+
+        P195-BugD 修复：按**当前存储 dtype** 分派重量化（原来无条件走
+        `_real_to_fp8_bits`，int8→fp16 降级后会把 fp16 影子写成 fp8 位模式
+        垃圾）。
+        """
+        if self._W_master is None:
+            return
+        if getattr(self, "_fp8_bits", False) or \
+                self.W.dtype == torch.float8_e4m3fn:
+            bits = self._real_to_fp8_bits(self._W_master)
+            self.W.copy_(bits.view(torch.float8_e4m3fn)
+                         if self.W.dtype == torch.float8_e4m3fn else bits)
+            return
+        if self.W.dtype == torch.int8:
+            sc = float(getattr(self, "_wscale", 1.0)) or 1.0
+            codes = torch.clamp(torch.round(self._W_master / sc),
+                                -_INT8_QMAX, _INT8_QMAX)
+            self.W.copy_(codes.to(torch.int8))
+            return
+        # 原生浮点（fp32/fp16/bf16）：直接 cast
+        self.W.copy_(self._W_master.to(self.W.dtype))
+
+    def _master_sync_from_shadow(self) -> None:
+        """反向同步：影子 → master（ckpt 加载 / 外部改 W 后调用）。"""
+        if self._W_master is None:
+            return
+        self._W_master.copy_(self._shadow_dequant())
+
     def _real_to_fp8_bits(self, t_real):
         """P189：实值张量 → fp8 e4m3fn 位模式（uint8）写回存储。
 
@@ -1032,6 +1157,27 @@ class AccelReadout:
                 f"（P189 语义保持，训练不中断）", RuntimeWarning)
             self._degrade_reason = (f"{type(e).__name__}: {str(e)[:160]}"
                                     f" → fp8 原生永久降级为 fp8_bits")
+            # P195：降级会**重绑 self.W**（float8 → uint8 位模式）。若此时
+            # master 已存在，它对应的是**降级前的实值**——那仍然正确（fp8
+            # 位模式与原生 fp8 的实值语义相同，view 零损转换），故**不需要**
+            # 重建 master；但影子必须重刷一次，否则前向读到旧张量对象。
+            # ⚠ 同时清 `_int8_like`：降级前它必为 False（fp8 原生不是码本
+            #   型），但显式清零可防将来改动引入的错分支（同 int8 降级处）。
+            self._int8_like = False
+            if self._W_master is not None:
+                self._master_to_shadow()
+            # P195-BUG-2 修复（审计）：降级**重绑 self.W**（float8 → uint8），
+            # 而 NPU Graph 捕获期固化的 `_Wreal` 指向**捕获时的张量对象**。
+            # 若图已启用，降级后图内引用与 Python 侧的书记会分叉：
+            #   · 图仍在旧 master 上更新（若 master 模式）；
+            #   · 或图仍在旧 fp8 张量上反量化（非 master 模式）。
+            # → **降级即废图**（`_npu_graph_ready=False`），后续走 eager。
+            #   代价：丢掉 graph capture 的 launch 收益；收益：不静默用错
+            #   地址（那种错 nll 看起来完全正常）。
+            if self._npu_graph_ready:
+                self._npu_graph_ready = False
+                self._npu_graph = None
+                self._degrade_reason += " | NPU Graph 已废弃（降级重绑 W）"
             return "fp8"
         # P90 兜底（P105 沿用）：int8 路径的**任何**运行期失败（matmul 无算子、
         # 反量化/传输不支持）都在这里被吸收 → 永久回落 fp16 后重算，训练不中断。
@@ -1044,6 +1190,20 @@ class AccelReadout:
         self._cdtype = torch.float16
         # 保值反量化到 fp16 稠密主副本（codes*scale），此后走普通 fp16 路径
         self.W = (self.W.to(torch.float32) * _scale).to(torch.float16)
+        # P195-BugD 修复（审计）：int8 → fp16 降级后 `_int8_like` 仍为 True
+        #   （下方只清了 `_int8`），而 `_master_to_shadow` 靠 `_int8_like`
+        #   判分支 → 会把 fp16 影子按 int8 码本重量化（垃圾）。同时
+        #   `_master_sync_from_shadow`/`_shadow_dequant` 也会走错分支。
+        #   → 降级即清 `_int8_like`，并**重刷影子**（master 的实值才是权威）。
+        self._int8_like = False
+        if self._W_master is not None:
+            self._master_to_shadow()
+        # P195-BUG-2 修复（审计）：同 fp8 降级处——降级重绑 `self.W`
+        # （codes*scale → fp16 张量），NPU Graph 固化的是旧地址 → 废图。
+        if self._npu_graph_ready:
+            self._npu_graph_ready = False
+            self._npu_graph = None
+            self._degrade_reason += " | NPU Graph 已废弃（降级重绑 W）"
         import warnings
         warnings.warn(
             f"int8 前向在设备 {self.device} 上失败（{type(e).__name__}: "
@@ -1170,6 +1330,11 @@ class AccelReadout:
             return False
         if getattr(self, "_fp8_conv_int8_cpu", False):
             return False
+        # P195：主权重模式下图作用在 **master 的内存地址**上（图内 dequant
+        # 恒等、requant 移出图外）→ **必须在捕获前把 master 建好**，
+        # 否则捕获期引用的是 None，replay 时静默用错地址。
+        if self._master_weight and self._W_master is None:
+            self._master_init()
         try:
             g = (torch.cuda.CUDAGraph() if self.device.startswith("cuda")
                  else torch.npu.NPUGraph())
@@ -1189,7 +1354,12 @@ class AccelReadout:
                 self._graph_eta_t = torch.zeros((), device=self.device,
                                                 dtype=torch.float32)
                 # ── 前向：按存储形态取「实值权重视图」（反量化在图内，每 replay 重算）──
-                _Wreal = self._graph_dequant()
+                # P195：主权重模式下**图直接作用在 fp32 master 的内存上**——
+                #   dequant 退化为恒等（master 本身就是实值），requant 变成
+                #   图外的影子刷新。这样图捕获的地址语义不变（同一块可写内存），
+                #   而更新天然落在 master 上（fp32 域，无舍入丢失）。
+                _Wreal = (self._W_master if self._master_weight
+                          else self._graph_dequant())
                 y = torch.mv(_Wreal, self._graph_ht)
                 self._graph_out = y
                 y32 = y.float()
@@ -1197,6 +1367,7 @@ class AccelReadout:
                 self._graph_nll = (torch.logsumexp(y32, dim=0)
                                    - y32[self._graph_correct_t]).reshape(())
                 # ── 学习：dp = softmax(y) − onehot(correct)，alpha = −eta ──
+                # P195：主权重模式更新域 = fp32（master 的 dtype）
                 dp = torch.softmax(y32, dim=0).to(self._graph_upd_dtype())
                 dp[self._graph_correct_t] -= 1.0
                 _Wreal.addmm_(dp.reshape(-1, 1), self._graph_ht.reshape(1, -1),
@@ -1204,7 +1375,12 @@ class AccelReadout:
                 if self.w_clip > 0.0:
                     _Wreal.clamp_(-self.w_clip, self.w_clip)
                 # ── 重量化写回同一块存储（图内闭环，W 地址不变）──
-                self._graph_requant(_Wreal)
+                # P195：主权重模式下**不在图内重量化**——影子刷新移到图外
+                #   （`_forward_dev_graph` / `_learn_step_graph` 之后），
+                #   这样每 replay 只更新 master，影子按 refresh 间隔批量刷新
+                #   （与 eager 路径的 `_master_update` 语义一致）。
+                if not self._master_weight:
+                    self._graph_requant(_Wreal)
         except Exception as e:
             self._degrade_reason = f"graph capture failed: {type(e).__name__}: {str(e)[:120]}"
             return False
@@ -1226,7 +1402,13 @@ class AccelReadout:
         return self.W.to(self._cdtype)                # 原生浮点
 
     def _graph_upd_dtype(self):
-        """图内更新域 dtype（与 `_eager_step` 的 `_upd_dtype` 同口径）。"""
+        """图内更新域 dtype（与 `_eager_step` 的 `_upd_dtype` 同口径）。
+
+        P195：主权重模式下 = **fp32**（master 的 dtype）——「fp16 的迭代
+        精度」那一半由 dp/ht 的转换保证（调用侧 `_cdtype`），累加在 fp32。
+        """
+        if self._master_weight:
+            return torch.float32
         if self._int8_like:
             return torch.float32
         if self.W.dtype in (torch.float16, torch.float8_e4m3fn, torch.uint8):
@@ -1263,6 +1445,22 @@ class AccelReadout:
         self._cache_y = y
         return y
 
+    def _graph_master_sync(self) -> None:
+        """P195：graph replay 后的主权重簿记（影子刷新 + 首次懒建）。
+
+        图内只更新 master（重量化被移出图外），故每次 learn replay 后
+        必须在这里推进 `_shadow_age`，到间隔时刷新影子。
+        纯主机侧簿记（两个整数 + 一次条件判断），零设备交互。
+        """
+        if not self._master_weight:
+            return
+        if self._W_master is None:            # 理论上图捕获前已建，双保险
+            self._master_init()
+        self._shadow_age += 1
+        if self._shadow_age >= self._shadow_refresh:
+            self._master_to_shadow()
+            self._shadow_age = 0
+
     def _learn_step_graph(self, y32, ht, correct: int, eta: float):
         """Graph replay 版学习步（P192 --beta）。
 
@@ -1280,6 +1478,8 @@ class AccelReadout:
         self._graph_correct_t.fill_(float(correct))
         self._graph_eta_t.fill_(float(eta))
         self._npu_graph.replay()
+        # P195：图内只更新 master（重量化被移出图外）→ 这里推进影子簿记
+        self._graph_master_sync()
         return self._graph_nll
 
     def _train_step_core(self, y32, ht, t32, correct: int, eta: float):
@@ -1293,7 +1493,18 @@ class AccelReadout:
         路径就地改 p」实现在了 **eager 分支**，本融合核仍是旧的
         `dp = p - t32` → `t32=None` 时 `FakeTensor - None` 崩 dynamo。两条路径
         现在**逐行等价**（数值也等价：p − onehot ≡ p[c] −= 1）。
+
+        P195：主权重模式下本融合核**必须旁路**——它写 `self.W`（影子），
+        而主权重模式的更新要落在 fp32 master 上。torch.compile 的图是
+        按 `self.W` 的 dtype 固化的，掺进 master 会静默产生
+        「更新了影子但 master 不变」的分叉（= 主权重模式完全失效）。
+        → 主权重模式下 `learn_softmax` 不会走到这里（见那边的分派），
+        此处保留 assert 作为**双保险**：万一将来分派被改动，立刻炸而不是
+        静默走错。
         """
+        assert not self._master_weight, (
+            "_train_step_core 被主权重模式调用——它会更新影子而非 master，"
+            "属静默数值分叉。请检查 learn_softmax 的分派逻辑。")
         p = torch.softmax(y32, dim=0)
         nll_dev = -torch.log(p[correct:correct + 1] + 1e-12).reshape(())
         if t32 is None:                  # P45 就地改 p（target_idx 路径）
@@ -1434,10 +1645,32 @@ class AccelReadout:
         随 B 单调恶化（mb=8 时 2.54 → 10.87）。累积阶段是 fp32 域
         （消除了 fp8/int8 的 (B−1) 次反量化往返），更新域走
         `_upd_dtype` 规则一次重量化写回。
+
+        P195：主权重模式下更新作用在 **fp32 master**（与 `_master_update`
+        同口径），影子按 `_shadow_refresh` 间隔刷新。
         """
         if getattr(self, "_mb_grad", None) is None or self._mb_n == 0:
             return 0.0
         n = int(n) if n is not None else self._mb_n
+        # ═══ P195：主权重路径 ═══════════════════════════════════════════
+        # `_mb_grad` 已是 fp32 的梯度和（Σg_t），直接灌 master：
+        #   master -= η · Σg_t   （fp32 域，无舍入丢失）
+        if self._master_weight:
+            if self._W_master is None:
+                self._master_init()
+            self._W_master.add_(self._mb_grad, alpha=-float(eta))
+            if self.w_clip > 0.0:
+                self._W_master.clamp_(-self.w_clip, self.w_clip)
+            self._shadow_age += self._mb_n
+            if self._shadow_age >= self._shadow_refresh:
+                self._master_to_shadow()
+                self._shadow_age = 0
+            nll_avg = self._mb_nll_sum / float(max(1, self._mb_n))
+            self._mb_grad = None
+            self._mb_n = 0
+            self._mb_nll_sum = 0.0
+            return nll_avg
+        # ── 以下为非主权重路径（master off 时逐位不变）──────────────────
         avg = self._mb_grad * float(eta)
         if self._sparse:
             # 稀疏：W 形状是 (n_out, k)，不能直接 add_ 稠密矩阵。
@@ -1517,6 +1750,30 @@ class AccelReadout:
         # 纯设备内标量运算、零主机交互，数值恒等（同 fp32 域）。
         nll_dev = (torch.logsumexp(y32, dim=0)
                    - y32[int(correct)]).reshape(())
+        # ═══ P195：DeepSeek-V4-Flash 主权重路径 ══════════════════════════
+        # 更新作用在 **fp32 master**（无舍入丢失 → 非目标行更新 100% 保留），
+        # 影子副本（低精度位模式/码本）只在 refresh 时重量化一次。
+        # 这同时消除「每步反量化→更新→重量化」的三笔流量。
+        #
+        # ⚠⚠ **P195-BugC 修复（审计抓到的静默语义漂移）**：本分派原来**只在
+        #   fp8 存储下**生效（`_fp8_bits or W.dtype==float8`），且排在
+        #   `if self._int8:` **之后** → int8 存储下 master **永不更新**，而
+        #   `load_W` 又**无条件**建 master → `save_model` 记 `ro_master=1`
+        #   → 恢复后再建一个**永不更新**的 master。
+        #   结果：检查点宣称主权重模式，而训练早已静默退回旧语义。
+        #   → 改为**与存储 dtype 无关、且置于所有存储分支之前**：只要
+        #     `_master_weight` 为真就走 master（影子刷新按各自存储的重量化
+        #     规则，见 `_master_to_shadow`）。
+        # ⚠ dp 在这里算（与下方 `_upd_dtype` 同一口径）：P45 就地改 p
+        #   （p[c] −= 1），`t` 非空时用 p − t。
+        if self._master_weight:
+            if t is None:
+                dp = p.clone()
+                dp[int(correct)] -= 1.0
+            else:
+                dp = p - t
+            self._master_update(dp, ht, eta, t)
+            return nll_dev
         if self._int8:
             # P105：int8 模式的更新走 **fp32 域** dp⊗ht + 重量化写回（精度约束
             # 与知情取舍见 _int8_update 的 docstring）。p 已用完（nll 先取），
@@ -1572,8 +1829,12 @@ class AccelReadout:
             dp = (p - t).to(_upd_dtype)
         if ht.dtype != _upd_dtype:
             ht = ht.to(_upd_dtype)
+        # ⚠ 主权重分派已上移到 `nll_dev` 计算之后、`if self._int8:` 之前
+        #   （P195-BugC：必须置于**所有**存储分支之前，否则 int8 存储下
+        #   master 永不更新）。此处不再重复。
         if (getattr(self, "_fp8_bits", False)
                 or self.W.dtype == torch.float8_e4m3fn):
+            # ── 以下为 P189 原路径（master off 时逐位不变）───────────────
             # P189（fhz「模型 fp8，迭代 fp16」）：fp8 位模式（uint8 承载）存储
             # 的更新走 fp16 域：查表反量化 → fp16 addcmul_/addmm_（dp⊗h rank-1，
             # 不物化临时张量）→ RNE cast 回 fp8 位模式写回。与 int8 的
@@ -1742,6 +2003,35 @@ class AccelReadout:
                 raise
             y = (self.W @ ht) if mode == "int8" else self._matmul(ht)
         t = self._to_dev(target)
+        # ═══ P195：主权重路径（非 softmax 感知器同款语义）═══════════════
+        # W_master += η·(t−y)⊗h 全部在 fp32 域；影子按 refresh 间隔刷新。
+        #
+        # ⚠⚠ **P195-BUG-1 修复（审计抓到的顺序不对称）**：本分派原来排在
+        #   `if self._int8:` **之后** → int8 存储下 master **永不更新**，而
+        #   `load_W` 无条件建 master → ckpt 记 `ro_master=1` → 恢复后再建一个
+        #   **永不更新**的 master（检查点宣称主权重模式、训练已静默退回）。
+        #   `_eager_step` 已把 master 提到所有存储分支之前（P195-BugC），
+        #   此处对齐同一顺序——两条路径必须一致，否则同一个配置在
+        #   softmax / 非 softmax 下行为不同。
+        if self._master_weight:
+            if self._W_master is None:
+                self._master_init()
+            _dp32 = (t.float() - y.float())
+            if self._sparse:
+                _g = self._sp_gather(ht).to(torch.float32)
+                self._W_master.addcmul_(_dp32.reshape(-1, 1), _g,
+                                        value=float(eta))
+            else:
+                self._W_master.addmm_(_dp32.reshape(-1, 1),
+                                      ht.to(torch.float32).reshape(1, -1),
+                                      alpha=float(eta))
+            if self.w_clip > 0.0:
+                self._W_master.clamp_(-self.w_clip, self.w_clip)
+            self._shadow_age += 1
+            if self._shadow_age >= self._shadow_refresh:
+                self._master_to_shadow()
+                self._shadow_age = 0
+            return
         if self._int8:
             # P105：int8 模式 → fp32 域更新 + 重量化写回（语义同 learn_softmax）
             self._int8_update(t.float() - y.float(), ht.float(), eta)
@@ -1884,6 +2174,21 @@ class AccelReadout:
               "storage_MB": self.W.numel() * self.W.element_size() / 1e6}
         # 返工 2：降级原因供 stats/日志取用（未降级 → None）
         st["degrade_reason"] = getattr(self, "_degrade_reason", None)
+        # P195：主权重模式的额外账目——`storage_MB` 只报影子（低精度），
+        # master 的 fp32 副本必须**单独列出**，否则诊断表会低估真实内存
+        # （1b 档 866.7 MiB，与影子同尺寸的 4 倍）。
+        if getattr(self, "_master_weight", False):
+            st["master"] = True
+            st["master_MB"] = (self.W.numel() * 4 / 1e6
+                               if self._W_master is None
+                               else self._W_master.numel()
+                               * self._W_master.element_size() / 1e6)
+            st["shadow_refresh"] = int(self._shadow_refresh)
+            st["shadow_age"] = int(self._shadow_age)
+            st["storage_MB_total_with_master"] = (
+                st.get("storage_MB_total", st["storage_MB"]) + st["master_MB"])
+        else:
+            st["master"] = False
         if self._sparse:
             # P111：稀疏存储还含列索引（int64，设备常驻）。单报 W 会让诊断表
             # 低估真实显存/内存占用 —— 这正是「稀疏省内存」最容易被高估的地方。
@@ -1899,6 +2204,13 @@ class AccelReadout:
         P111 稀疏：返回 **(n_out, k) 的 val 矩阵**（不是 (n_out, n_h) 稠密）——
         稠密化会凭空造出 n_out×(n_h−k)/2 个不存在的突触，语义错。ckpt 的稀疏
         分支走 `_csr`，不经过本方法。
+
+        ⚠⚠ **P195-BUG-3 修复（审计）**：主权重模式下本方法返回的是
+        **影子反量化值**（fp8 粒度），**不是**权威权重。调用方若把它当
+        「模型真实权重」（RL 的 KL 参考策略 `phdnet/rl.py:315`、统计报告）
+        会拿到量化后的基线 → 用 `W_authoritative()`（master 在时返回 fp32
+        精确值）。ckpt 保存侧已改为直接读 `_W_master`（ckpt_1b.py），
+        不经本方法。
         """
         W = self.W.detach().float()
         if self._int8:
@@ -1912,8 +2224,25 @@ class AccelReadout:
                 self.W.shape))
         return W.cpu().numpy()
 
+    def W_authoritative(self) -> np.ndarray:
+        """**权威权重**：master 在时返回 fp32 精确值，否则同 `W_cpu()`。
+
+        P195-BUG-3 修复（审计）：`W_cpu()`/`.W` 在 master 模式下是**影子**
+        （低精度粒度）。任何把「读出权重」当作模型真实状态的调用方
+        （KL 参考策略、参数统计、导出）都应改用本方法。
+        """
+        if getattr(self, "_W_master", None) is not None:
+            return self._W_master.detach().to("cpu").to(
+                torch.float32).numpy()
+        return self.W_cpu()
+
     def load_W(self, arr: np.ndarray) -> None:
-        """从主机矩阵灌入（检查点恢复；形状须匹配）。int8 模式重量化。"""
+        """从主机矩阵灌入（检查点恢复；形状须匹配）。int8 模式重量化。
+
+        P195：主权重模式下 `arr` 是 **master 的 fp32 精确值**（ckpt 保存的
+        就是它）→ 必须**同时灌 master 与影子**，否则恢复后 master 丢失、
+        后续更新从影子反量化的粗值重新起步（等于丢掉了训练积累的小更新）。
+        """
         a = np.ascontiguousarray(arr, dtype=np.float32)
         if self._sparse:
             # P111 稀疏：期望 (n_out, k) 的 val 矩阵
@@ -1925,9 +2254,12 @@ class AccelReadout:
                 _t8 = torch.as_tensor(a, device="cpu",
                                       dtype=torch.float32).to(torch.float8_e4m3fn)
                 self.W.copy_(_t8.view(torch.uint8).to(self.device))
-                return
-            self.W.copy_(torch.as_tensor(a, device=self.device,
-                                         dtype=torch.float32))
+            else:
+                self.W.copy_(torch.as_tensor(a, device=self.device,
+                                             dtype=torch.float32))
+            if self._master_weight:
+                self._W_master = torch.as_tensor(a, device=self.device,
+                                                 dtype=torch.float32)
             return
         if a.shape != (self.n_out, self.n_h):
             raise ValueError(f"形状不符：期望 {(self.n_out, self.n_h)}，"
@@ -1938,8 +2270,30 @@ class AccelReadout:
             t = torch.as_tensor(a, device=self.device, dtype=torch.float32)
             self.W.copy_(torch.clamp(torch.round(t / self._wscale),
                                      -_INT8_QMAX, _INT8_QMAX).to(torch.int8))
+            if self._master_weight:
+                self._W_master = t.clone()
+            return
+        # P195：fp8 位模式存储（uint8）时，`tdtype` 是 uint8 —— 直接把 fp32
+        # 实值 cast 成 uint8 会得到**位模式的整数表示被截断的垃圾**
+        # （实测 max|Δ|=0.198，远超 fp8 粒度）。必须走 e4m3fn 编码。
+        #
+        # ⚠⚠ **P195-BugF 修复（审计发现，会在 910B 恢复时炸）**：cast 必须
+        #   在 **CPU** 上做（P189/P154 的理由：910B 无 fp8 cast 算子，
+        #   ERR01007）。原实现在 `device=self.device` 上 `.to(float8_e4m3fn)`
+        #   → 昇腾上 `load_model` 直接崩（且崩在**恢复阶段**，训练起不来）。
+        #   稀疏分支（上方）本来就写对了 `device="cpu"`，此处补齐。
+        if getattr(self, "_fp8_bits", False):
+            _t8 = torch.as_tensor(a, device="cpu",
+                                  dtype=torch.float32).to(torch.float8_e4m3fn)
+            self.W.copy_(_t8.view(torch.uint8).to(self.device))
+            if self._master_weight:
+                self._W_master = torch.as_tensor(a, device=self.device,
+                                                 dtype=torch.float32)
             return
         self.W.copy_(torch.as_tensor(a, device=self.device, dtype=self.tdtype))
+        if self._master_weight:
+            self._W_master = torch.as_tensor(a, device=self.device,
+                                             dtype=torch.float32)
 
     # ---------- 内部 ----------
     def _to_dev(self, x):
@@ -2089,11 +2443,20 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
         三处漏传 —— 那会导致「同一份配置在不同后端得到不同连接结构」。
         ⚠ `powlaw_counts` **不由 cfg 携带**（它是运行时的词频统计，见
         `set_powlaw_counts`）：构造期拿不到，须由训练循环在第一次 step 前注入。
+
+        P195（GAP-4）：主权重参数也在此统一下发 —— 原来只传给 `AccelReadout`，
+        numba 路径（`--accel cpu` / 任何回落） silently 失效：而 numba 的
+        `_apply_update` 对 int8/fp16/bf16 正是每步「反量化→更新→重量化」
+        （P110 的失败模式）。补上后两条路径语义一致。
         """
         from ..readout import Readout
         return Readout(n_h, n_out, rng, w_clip=cfg.readout_w_clip,
                        dtype=cfg.readout_dtype, conn_k=cfg.readout_conn_k,
                        lognormal_init=cfg.lognormal_init,
+                       master_weight=bool(
+                           getattr(cfg, "readout_master_weight", False)),
+                       shadow_refresh=int(
+                           getattr(cfg, "readout_shadow_refresh", 8)),
                        powlaw_alpha=float(getattr(cfg, "readout_powlaw_alpha", 0.0)),
                        powlaw_counts=_powlaw_counts(),
                        powlaw_density=getattr(cfg, "readout_powlaw_density", None),
@@ -2127,6 +2490,10 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
         return (AccelReadout(n_h, n_out, rng, device=spec,
                              dtype=cfg.readout_dtype,
                              w_clip=cfg.readout_w_clip,
+                             master_weight=bool(
+                                 getattr(cfg, "readout_master_weight", False)),
+                             shadow_refresh=int(
+                                 getattr(cfg, "readout_shadow_refresh", 8)),
                              gather_impl=str(
                                  getattr(cfg, "readout_gather_impl", "index")),
                              # ⚠⚠ **P148 修正（审计 BUG-3）**：这个参数之前**漏传**，

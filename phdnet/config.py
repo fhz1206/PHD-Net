@@ -171,7 +171,14 @@ class PHDNetConfig:
     #      fp16/bf16/fp8/int8 仍可显式指定（带宽敏感且接受 Hebbian 近似时）。
     #      P110 实测反证必须留在案：fp16 下非目标行更新保留率仅 26.67%，
     #      即只保留目标行提升退化为纯 Hebbian；fp8 步长粗 4 倍，风险更高。
+    # P195（fhz「模仿 DeepSeek-V4-Flash：保持 fp8 的精度和 fp16 的迭代精度」）：
+    #      `readout_master_weight=on` 时上面的低精度**只是影子副本**——
+    #      fp32 master 常驻、所有更新作用在 master 上 → P110 的舍入丢失被解除，
+    #      同时前向访存保留 fp8/bf16 的带宽收益。代价：多一份 fp32 master
+    #      （1b 档 866.7 MiB），故默认 off（不知情的人不该被动多付一倍内存）。
     readout_dtype: str = "fp32"
+    readout_master_weight: bool = False   # True = fp32 主权重 + 低精度影子（P195）
+    readout_shadow_refresh: int = 8       # 影子重量化间隔（步；DeepSeek refresh）
 
     # ───────────────────────────────────────────────────────────────────────
     # 路线图第二轮全量优化（2026-09-19，M9）：补齐剩余轨道
@@ -358,8 +365,10 @@ class PHDNetConfig:
     #   · fp64 的 `s0` 进 Rust M2 核必须在边界 cast 到 f32 —— 处理见
     #     `SparsePCStack._mv / _add_outer / _oja`（`_mv` 于 2026-10-07 补齐，
     #     此前它是唯一漏掉的分派点，非融合路径一进 Rust 就 ValueError）。
-    #   · 读出侧精度由 `readout_dtype`（**默认 fp8**，P189「精度改 fp8、迭代 fp16」）
-    #     决定，与本字段无关；`bf16`/`fp16` 可显式指定。
+    #   · 读出侧精度由 `readout_dtype`（**默认 fp32**，P194 Q4）决定，
+    #     与本字段无关；`bf16`/`fp16`/`fp8` 可显式指定。
+    #     P195：要 fp8 的访存收益请配 `readout_master_weight=True`
+    #     （DeepSeek-V4-Flash：fp8 影子只做前向，更新落 fp32 master）。
     encoder_dtype: str = "fp64"
     # P19 读出加速器：auto=有加速器就用（昇腾→ROCm→CUDA→DirectML），否则回落
     # numba CPU 原路径（逐位不变）；cpu/off/numba = 强制原路径；

@@ -25,6 +25,13 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    import torch as _torch_mod
+    _TORCH_OK = True
+except Exception:                                          # pragma: no cover
+    _torch_mod = None
+    _TORCH_OK = False
+
 CKPT_VERSION = 1
 
 
@@ -230,7 +237,42 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None,
     # 读出：稠密 W / 稀疏 CSR（两级群体读出暂不支持检查点——fail-fast）
     if getattr(net.readout, "hidden", 0) > 0:
         raise NotImplementedError("两级群体读出（readout_hidden>0）暂不支持检查点保存")
-    if net.readout.conn_k > 0:
+    # P195：主权重模式下**必须存 master 的 fp32 精确值**——`self.W` 只是
+    # fp8 影子（且 `to_numpy` 会把 fp8 张量存成 uint8 位模式）。若照旧存
+    # 影子，恢复后 master 要从影子反量化的粗值重建 → 训练积累的
+    # 「非目标行小更新」全部丢失（那正是主权重模式要保住的东西）。
+    # 无 master 时（默认 off）行为与旧版逐位一致。
+    # ⚠⚠ **P195-BugA 修复（审计发现，原生 fp8 的 ckpt 恢复是坏的）**：
+    #   旧实现 `arrs["ro_W"] = to_numpy(net.readout.W)`：
+    #     · 保存侧：fp8 张量 → **uint8 位模式**（`to_numpy` 的 view 分支），
+    #       与 ckpt_dtype 压缩的位模式**无法区分**；
+    #     · 恢复侧（下方 legacy 分支）：`np.asarray(net.readout.W)` 在
+    #       **原生 fp8** 上直接抛
+    #       `TypeError: Got unsupported ScalarType Float8_e4m3fn`
+    #       → **任何 fp8 检查点都恢复不了**；而即便绕过去，
+    #       `net.readout.W = <uint8 numpy>` 会把 torch 张量换成 numpy 数组
+    #       → 前向 `AttributeError: 'numpy.ndarray' object has no attribute 'to'`。
+    #   修法：**加速后端一律走 `W_cpu()`**（返回**实值**，不是位模式），
+    #   numba 后端仍走 `to_numpy`（它的 W 就是 numpy 实值，逐位不变）。
+    #   恢复侧见下方 `load_W` 分派（`ro_master` 时）与 legacy 分支的加固。
+    _ro_master_flag = False
+    if hasattr(net.readout, "W_cpu") and hasattr(net.readout, "load_W"):
+        # P195：master 在时存 **master 的 fp32 精确值**（那才是权威状态）；
+        # 无 master 时存影子反量化的实值（恢复后重量化回影子，与训练期同尺子）。
+        # ⚠ 不能无条件用 `W_cpu()`——它返回的是**影子**反量化值（fp8 粒度），
+        #   会把 master 积累的「非目标行小更新」抹掉（实测 abs sum 82.25 vs
+        #   master 82.41，max|Δ|=0.0235 = fp8 粒度）。
+        _ro_m = getattr(net.readout, "_W_master", None)
+        if _ro_m is not None:
+            _ro_master_flag = True
+            _m = (_ro_m.detach().to("cpu").to(_torch_mod.float32).numpy()
+                  if (hasattr(_ro_m, "detach") and _TORCH_OK)
+                  else np.asarray(_ro_m))
+            arrs["ro_W"] = np.ascontiguousarray(_m, dtype=np.float32)
+        else:
+            arrs["ro_W"] = np.ascontiguousarray(net.readout.W_cpu(),
+                                                dtype=np.float32)
+    elif net.readout.conn_k > 0:
         ip, idx, val = net.readout._csr
         arrs["ro_ip"], arrs["ro_idx"], arrs["ro_val"] = ip, idx, val
     else:
@@ -299,6 +341,15 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None,
     # --ckpt-dtype 从不压缩读出 W（实测 ro_W 恒 float32）。现在全部数组组装完
     # 再统一压缩，并把被压的键记进 meta["ckpt_dtype_keys"] 供加载侧解码。
     _down_keys: list = []
+    # P195：**加速后端的 ro_W 一律跳过压缩** —— 它现在是 `W_cpu()` 返回的
+    # **实值**（不再有位模式歧义，见上方 BugA 修复）。压成 fp8/bf16 会把
+    # 「非目标行小更新」抹掉；master 模式下更是把主权重模式的精度收益归零。
+    # ⚠ 判据用 `hasattr(net.readout, "W_cpu")`（与保存侧同源），**不依赖
+    #   `ro_master` 这个字符串键**（审计 BugB：将来若改键名，静默恢复压缩
+    #   → 精度悄悄丢失）。体积代价：1b 档 ro_W ≈ 0.9 GB 不压缩。
+    _skip_compress = ({"ro_W"}
+                      if hasattr(net.readout, "W_cpu") and "ro_W" in arrs
+                      else set())
     if ckpt_dtype in ("fp8", "bf16", "fp16"):
         def _down(a):
             if (not isinstance(a, np.ndarray) or a.dtype.kind != "f"
@@ -313,6 +364,8 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None,
             return src.to(_t.float8_e4m3fn).view(_t.uint8).numpy()
 
         for _k in list(arrs):
+            if _k in _skip_compress:
+                continue
             _d = _down(arrs[_k])
             if _d is not arrs[_k]:
                 _down_keys.append(_k)
@@ -329,6 +382,10 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None,
         # 2026-10-07 修复（审计 3）：实际被压缩的数组键——加载侧**逐键**解码，
         # 不再靠 dtype 猜（避免误解 int 索引数组），也覆盖后加入的 ro_W/pc_*。
         "ckpt_dtype_keys": sorted(_down_keys),
+        # P195：ro_W 存的是 master 的 fp32 精确值（主权重模式）而非影子位模式。
+        # 加载侧据此走 `load_W`（同时灌 master + 重量化影子）。
+        # ⚠ 只写 meta（BugE：不再同时写 npz 数组，避免两个同名对象分叉）。
+        "ro_master": bool(_ro_master_flag),
     }
     if extra:
         meta.update(extra)
@@ -418,6 +475,14 @@ def _legacy_down_keys(z, cd: str) -> set:
       · **没过阈值**的键（1 维 encoder_b / wm_strength 等）存盘仍是 float
         → 不解码、直接放行（赋值时 numpy 自动 cast）——旧实现硬编码 5 个键，
         把这些 float 数组拿位模式去解码 → raise，**旧检查点载不回**。
+
+    ⚠⚠ **P195-BugB 修复（审计）**：`ro_W` 在**新代码**下一定是 **fp32 实值**
+    （见保存侧的 BugA 修复 + `_skip_compress`）——若某个新 ckpt 因缺
+    `ckpt_dtype_keys` 而走到本回退，按 dtype 猜会把 fp32 的 ro_W 误判为
+    「未被压缩」而放行（正确），但若它真是 uint8 位模式（旧 ckpt）则会被
+    解码（也正确）。唯一危险的是**新代码 + 缺 keys + uint8 ro_W** 这个组合
+    —— 它不可能出现（新代码必写 keys），但仍显式排除 ro_W 以防将来 keys
+    写入被改动：宁可少解一个（加载时形状/dtype 校验会抓到），不可错解。
     """
     want = {"fp8": np.uint8, "bf16": np.uint16,
             "fp16": np.float16}.get(str(cd))
@@ -426,6 +491,8 @@ def _legacy_down_keys(z, cd: str) -> set:
     want = np.dtype(want)
     out = set()
     for k in z.files:
+        if k == "ro_W":
+            continue                     # P195：ro_W 恒为 fp32 实值，不猜
         a = z[k]
         if (isinstance(a, np.ndarray) and a.dtype == want
                 and a.ndim >= 2 and a.size >= 4096):
@@ -488,7 +555,36 @@ def load_model(path: Path, lm) -> dict:
             for nm in ("W_up0", "W_up1", "W_dn0", "W_dn1"):
                 getattr(net.pc, nm)[:] = z[f"pc_{nm}"]
 
-        if meta["readout_conn_k"] > 0:
+        # P195：主权重恢复——`ro_W` 存的是 **master 的 fp32 精确值**，
+        # 必须走 `load_W`（它会同时灌 master + 重量化影子）。
+        # 旧路径 `net.readout.W = _rw` 在 AccelReadout 上会**绕过 load_W**
+        # （.W 是普通属性，直接换绑张量对象）→ master 丢失、且 dtype 不匹配
+        # 时把 fp32 实值 cast 成 uint8 位模式（垃圾）。
+        _ro_has_master = bool(meta.get("ro_master", False)) and ("ro_W" in z)
+        _ro_load_w = getattr(net.readout, "load_W", None)
+        # P195-BugA 修复：**加速后端一律走 `load_W`**（不再有
+        # `np.asarray(W)` 崩在原生 fp8、也不再有用 numpy 换绑 torch 张量
+        # 的问题）。`ro_master` 标记只是「arr 是 master 精确值」的提示，
+        # 两条分支都把实值灌进 load_W（它内部决定 master/影子怎么分）。
+        _use_load_w = callable(_ro_load_w) and hasattr(net.readout, "W_cpu")
+        if _use_load_w:
+            _rw = np.asarray(z["ro_W"])
+            if net.readout.conn_k > 0:
+                if _rw.shape != (net.readout.n_out, net.readout.conn_k):
+                    raise ValueError(
+                        f"稀疏读出形状不一致：期望 "
+                        f"{(net.readout.n_out, net.readout.conn_k)}，收到 {_rw.shape}")
+            elif _rw.shape != tuple(np.asarray(net.readout.W_cpu()).shape):
+                raise ValueError(f"稠密读出形状不一致：收到 {_rw.shape}")
+            _ro_load_w(np.ascontiguousarray(_rw, dtype=np.float32))
+            if _ro_has_master:
+                # 恢复的 arr 就是 master 的 fp32 精确值 → load_W 已同步灌入
+                # master；此处只需把影子刷成与 master 一致（避免 staleness）。
+                _ms = getattr(net.readout, "_master_to_shadow", None)
+                if callable(_ms) and getattr(net.readout, "_W_master",
+                                             None) is not None:
+                    _ms()
+        elif meta["readout_conn_k"] > 0:
             if net.readout.conn_k != meta["readout_conn_k"]:
                 raise ValueError("读出 conn_k 配置与检查点不一致")
             ip, idx, val = net.readout._csr
@@ -502,6 +598,7 @@ def load_model(path: Path, lm) -> dict:
             if callable(_sync):
                 _sync()
         else:
+            # numba 原路径（W 是 numpy 实值数组，逐位不变）
             _rw = np.asarray(z["ro_W"])
             # 2026-10-07 修复（审计 1/3）：位模式解码已由 _DecodedNpz 统一完成
             # （失败即抛，替代原 except-pass 的 fail-open）；这里只对齐 dtype。

@@ -1,0 +1,43 @@
+P195: DeepSeek-V4-Flash 主权重 + 低精度影子副本
+
+fhz 指令「模仿 DeepSeek-V4-Flash：保持 fp8 的精度和 fp16 的迭代精度」。
+
+## 机制
+- fp32 master 常驻，所有更新作用于此（非目标行更新 100% 保留，解除
+  P110 的舍入丢失：fp16 26.67% / fp8 更差）
+- 影子副本（fp8/bf16/fp16 位模式）只用于前向 GEMV，保留低精度访存收益
+- 每 shadow_refresh 步重量化一次（默认 8 = DeepSeek 同款折中）
+- 默认 off；显式 --readout-master-weight 开启（代价：1b 档 +866.7 MiB）
+
+## 覆盖范围（两条臂行为一致）
+- AccelReadout：_eager_step / learn() / commit_grad / NPU Graph /
+  降级路径全部走 master；torch.compile 在 master 模式禁用
+- numba Readout（--accel cpu）：同机制补齐（GAP-4，原来 silent 失效）
+
+## 检查点
+- master 的 fp32 精确值逐位往返（ro_W 跳过 ckpt_dtype 压缩）
+- 非 master 模式按影子粒度恢复（与训练期同一把尺子）
+- 修掉原生 fp8 检查点恢复即崩的预存 bug（BugA）
+
+## 本机 A/B（tests/checks_p195.py --ab，固定探针集）
+- accel fp8 无 master PPL 2.84 → 有 master 2.15（-24.2%，fp32 基线 2.14）
+- numba int8 无 master 2.83 → 有 master 2.15（-24.1%）
+- master 与 fp32 基线差 +1.1%（无 master 时 +33.5%）
+
+## 验证
+- run_tests.py 9/9
+- run_gates.py 44/44（新增 gate_readout_master_weight.py 23 项）
+- tests/checks_p195.py 6/6
+
+## 同时修掉（两个子代理审计发现）
+- BugC：更新分派原来只在 fp8 存储下走 master → fp32/fp16 下 master
+  永不更新但 ckpt 仍记 ro_master=1（静默语义漂移）
+- BUG-1：learn()（非 softmax）的 master 门排在 int8 之后（同族顺序错）
+- BugA：原生 fp8 的 ckpt 保存存位模式、恢复 TypeError（预存）
+- BugB：ckpt_dtype 压缩会抹掉 master 精度 → ro_W 跳过压缩
+- BugD：int8→fp16 降级后 _int8_like 未清 → 影子被按 int8 码本重量化
+- BUG-2：降级重绑 self.W 后 NPU Graph 指向旧地址 → 降级即废图
+- BugE：ro_master 同时写 npz 数组与 meta 键（两个同名对象）→ 只留 meta
+- BugF：load_W 的 fp8 cast 在设备上做 → 910B 无 fp8 cast 算子，改 CPU
+- BUG-3：W_cpu() 在 master 模式返回影子 → 新增 W_authoritative()，
+  RL 的 KL 参考策略改用它；stats() 增加 master/master_MB/shadow_*

@@ -523,7 +523,8 @@ class Readout:
                  hidden: int = 0, hid_k: int = 0, eta_hid: float = 0.002,
                  powlaw_alpha: float = 0.0, powlaw_counts=None,
                  powlaw_density: float | None = None,
-                 powlaw_kmin: int = 1, powlaw_kmax: int = 0):
+                 powlaw_kmin: int = 1, powlaw_kmax: int = 0,
+                 master_weight: bool = False, shadow_refresh: int = 8):
         self._n_in, self._n_out = int(n_in), int(n_out)
         self.conn_k = int(conn_k) if conn_k and conn_k > 0 else 0
         # A4（2026-09-23）：**两级群体读出**（`hidden > 0`，默认 0 = 单层线性）。
@@ -561,6 +562,18 @@ class Readout:
         # B7（2026-09-22）：minibatch 梯度累积缓冲（accumulate=1 时永不启用）
         self._grad_acc: np.ndarray | None = None
         self._acc_n = 0
+        # ── P195（GAP-4）：numba 侧的主权重支持 ─────────────────────────
+        # `--readout-master-weight on` 原来**只接线到 AccelReadout**，numba
+        # 路径（`--accel cpu` / 任何回落） silently 失效：而 numba 的
+        # `_apply_update` 对 qfmt=int8/fp16/bf16 正是
+        # 「反量化 → 更新 → 重量化**每步**」——那恰是 P110 实测的失败模式
+        # （非目标行更新 26.67% 保留率，学习退化为纯 Hebbian）。
+        # 故此处补同一机制：**fp32 master（numpy）+ 影子码本**，每
+        # `shadow_refresh` 步重量化一次。默认 off → 行为逐位不变。
+        self._master_weight = bool(master_weight)
+        self._shadow_refresh = max(1, int(shadow_refresh))
+        self._shadow_age = 0
+        self._W_master: np.ndarray | None = None
 
         if self.hidden > 0:                     # A4：两级群体读出
             k1 = self.hid_k if self.hid_k > 0 else max(1, n_in // 8)
@@ -675,6 +688,12 @@ class Readout:
         self.dtype = np.float32
         self.w_clip = float(w_clip)
         self._grad_acc, self._acc_n = None, 0
+        # P195（GAP-4）：`from_dense` 绕过 `__init__` → 主权重字段也要补齐
+        # （否则 `learn_softmax` 读 `self._master_weight` 会 AttributeError）
+        self._master_weight = False
+        self._shadow_refresh = 8
+        self._shadow_age = 0
+        self._W_master = None
         self._csr = _from_dense_csr(W, self.conn_k)
         self._codes = None
         self._wscale = 1.0
@@ -711,6 +730,12 @@ class Readout:
             self._W = np.ascontiguousarray(v, dtype=np.float32)
         else:
             self._set_dense(v)
+        # P195（GAP-4）：外部换绑 W（ckpt 恢复 / 工具改权重）时**同步 master**
+        # ——否则 master 停在旧值，下一次 `_master_to_shadow()` 会把训练
+        # 进度整体回滚（静默数据丢失）。语义：外部赋值 = 新的权威状态。
+        if getattr(self, "_master_weight", False) and self._W_master is not None:
+            self._W_master = np.ascontiguousarray(
+                np.asarray(self.W, dtype=np.float32))
 
     def n_synapses(self) -> int:
         """实际存在的连接数（两级/稀疏模式 = CSR 条目；稠密模式 = 矩阵元素数）。"""
@@ -927,6 +952,31 @@ class Readout:
                 _csr_oja_up(*self._W1, a, h, self.eta_hid)
         elif self.conn_k > 0:                           # 稀疏梯度下降（存在的边）
             _csr_add_outer(*self._csr, p - target, h, -eta)
+        elif self._master_weight:
+            # ── P195（GAP-4）：numba 侧主权重路径 ──────────────────────
+            # 与 AccelReadout 同语义：更新落在 **fp32 master**（numpy），
+            # 影子（码本）每 `shadow_refresh` 步重量化一次。
+            # 解除 P110 的失败模式：numba 的 `_apply_update` 对
+            # int8/fp16/bf16 每步「反量化→更新→重量化」→ 非目标行更新
+            # 保留率仅 26.67% → 学习退化为纯 Hebbian。
+            # ⚠ 仅对**稠密 + 有量化格式**（qfmt 非 None）有意义；fp32 时
+            #   master 就是 W 本身，跳过以免白拷一份。
+            if self.qfmt is not None:
+                if self._W_master is None:
+                    self._W_master = np.ascontiguousarray(
+                        self.W, dtype=np.float32)
+                self._W_master -= float(eta) * np.outer(p - target, h)
+                if self.w_clip > 0.0:
+                    np.clip(self._W_master, -self.w_clip, self.w_clip,
+                            out=self._W_master)
+                self._shadow_age += 1
+                if self._shadow_age >= self._shadow_refresh:
+                    self._master_to_shadow()
+                    self._shadow_age = 0
+            else:
+                self.W = self.W - eta * np.outer(p - target, h)
+                if self.w_clip > 0.0:
+                    np.clip(self.W, -self.w_clip, self.w_clip, out=self.W)
         else:
             # P7/P9：融合核（fp32 原生；fp16/bf16/fp8 = 码本内联查表 + 重新量化）
             if not self._apply_update(p - target, h, eta):
@@ -983,6 +1033,18 @@ class Readout:
             for i in range(self._n_out):
                 s = slice(ip[i], ip[i + 1])
                 val[s] -= c * self._grad_acc[i, idx[s]]
+        elif self._master_weight and self.qfmt is not None:
+            # P195（GAP-4）：微批量也走 master（与 learn_softmax 同口径）
+            if self._W_master is None:
+                self._W_master = np.ascontiguousarray(self.W, dtype=np.float32)
+            self._W_master -= c * self._grad_acc
+            if self.w_clip > 0.0:
+                np.clip(self._W_master, -self.w_clip, self.w_clip,
+                        out=self._W_master)
+            self._shadow_age += self._acc_n
+            if self._shadow_age >= self._shadow_refresh:
+                self._master_to_shadow()
+                self._shadow_age = 0
         else:
             self.W = self.W - c * self._grad_acc     # 兼容量化模式（setter 重量化）
         self._clip()
@@ -993,3 +1055,32 @@ class Readout:
     def pending_grad_n(self) -> int:
         """当前未提交的累积步数（0 = 无挂起梯度）。供调用方 flush/诊断。"""
         return self._acc_n
+
+    # ---------- P195（GAP-4）：numba 侧主权重 ----------
+    def _master_to_shadow(self) -> None:
+        """fp32 master → 码本影子（重量化写回存储）。
+
+        与 `_set_dense` 同一套量化规则（`quantize_to` + `_wscale` 语义），
+        只是**每 N 步一次**而非每步一次。
+        """
+        if self._W_master is None:
+            return
+        self._set_dense(self._W_master)
+
+    def _master_sync_from_shadow(self) -> None:
+        """反向同步：影子（反量化）→ master。ckpt 恢复后调用。"""
+        if self._W_master is None:
+            return
+        self._W_master = np.ascontiguousarray(self.W, dtype=np.float32)
+
+    def W_authoritative(self) -> np.ndarray:
+        """**权威权重**（master 在时返回 master 的 fp32 精确值）。
+
+        P195-BUG-3 修复（审计）：`W_cpu` / `.W` 在 master 模式下返回的是
+        **影子反量化值**（fp8 粒度）。调用方若把它当「模型真实权重」
+        （如 RL 的 KL 参考策略、统计报告）会拿到量化后的基线。
+        本方法给出无歧义的权威视图。
+        """
+        if self._W_master is not None:
+            return self._W_master
+        return self.W

@@ -321,15 +321,36 @@ def main() -> None:
     ap.add_argument("--readout-powlaw-kmax", type=int, default=0,
                     help="P124：幂律分配的每行最多入边（0 = 不设上限 = n_h）")
     ap.add_argument("--width", type=int, default=0, help="覆盖主干宽度（0=用预设）")
-    ap.add_argument("--readout-dtype", default="fp8",
-                    choices=["fp32", "fp16", "bf16", "fp8"],
-                    help="读出计算精度。**默认 fp8**（P189，fhz 2026-10-07："
-                         "「模型 fp8，迭代 fp16」）。设备有原生 fp8 算子时直接用；"
-                         "910B4 无 fp8 算子但有 int8 算子 → 自动走"
-                         "「fp8 位模式存储（uint8）+ 每步 CPU 转换 int8 计算」"
-                         "（P154/P155 路径，转换核可用 --fp8-conv 在 torch/nogil 间切换）。"
-                         "int 族显式请求仍禁用（P163）；fp4/int4 维持禁用（P152）。"
-                         "保留率代价见 tools/probe/probe_readout_precision.py（P110）")
+    ap.add_argument("--readout-dtype", default="fp32",
+                     choices=["fp32", "fp16", "bf16", "fp8"],
+                     help="P194 Q4：默认 fp32（P110 实测低精度把感知器 p−t 的"
+                          "非目标行更新舍入丢弃 → 学习退化为纯 Hebbian）。"
+                          "要 fp8 的访存收益请配 --readout-master-weight"
+                          "（DeepSeek-V4-Flash 模式：fp8 影子只做前向，更新落在"
+                          "fp32 master 上 → 本机实测 PPL 与 fp32 基线差 1.3%%，"
+                          "而无 master 的 fp8 差 33%%）。设备有原生 fp8 算子时直接用；"
+                          "910B4 无 fp8 算子但有 int8 算子 → 自动走"
+                          "「fp8 位模式存储（uint8）+ CPU 转换 int8 计算」"
+                          "（P154/P155 路径，转换核可用 --fp8-conv 在 torch/nogil 间切换）。"
+                          "int 族显式请求仍禁用（P163）；fp4/int4 维持禁用（P152）。")
+    ap.add_argument("--readout-master-weight", dest="readout_master_weight",
+                     action="store_true", default=False,
+                     help="P195（fhz「模仿 DeepSeek-V4-Flash：保持 fp8 的精度和 "
+                          "fp16 的迭代精度」）：**fp32 主权重 + 低精度影子副本**。"
+                          "所有更新作用在 fp32 master（非目标行更新 100%% 保留，"
+                          "解除 P110 的舍入丢失），影子（fp8/bf16/fp16 位模式）只用于"
+                          "前向 GEMV（保留带宽收益），每 N 步重量化一次。"
+                          "本机 A/B：fp8 无 master PPL 2.84 → 有 master 2.17"
+                          "（fp32 精确基线 2.14，差 1.3%%）。"
+                          "⚠ 代价：多一份 fp32 master（1b 档 866.7 MiB），且"
+                          "torch.compile 融合核被禁用、NPU Graph 的重量化移出图外。"
+                          "⚠ 前向有最多 N 步 staleness（影子比 master 旧），"
+                          "N 由 --readout-shadow-refresh 控制")
+    ap.add_argument("--readout-shadow-refresh", type=int, default=8,
+                     help="P195：主权重模式下影子（fp8）重量化间隔（步）。"
+                          "越小前向越新但重量化越频；越大越省但 staleness 越久。"
+                          "本机 A/B：r=4 → PPL 2.15，r=8 → 2.17，r=16 → 2.20"
+                          "（默认 8 = DeepSeek 同款折中）")
     ap.add_argument("--torch-compile", dest="torch_compile",
                     action="store_true", default=False,
                     help="P58（fhz 2026-09-29「图优化关了吧」）：默认 OFF——"
@@ -725,6 +746,15 @@ def main() -> None:
     cfg = build_cfg(args.preset, args.width, args.big_n,
                     args.csr_online, args.readout_conn_k, args.seed)
     cfg.readout_dtype = args.readout_dtype            # P9 精度（默认 fp32）
+    # P195：DeepSeek-V4-Flash 主权重 + 低精度影子（fp8 访存 + fp32 迭代）
+    cfg.readout_master_weight = bool(args.readout_master_weight)
+    cfg.readout_shadow_refresh = max(1, int(args.readout_shadow_refresh))
+    if cfg.readout_master_weight and cfg.readout_dtype == "fp32":
+        # 主权重模式只在低精度存储下有意义（fp32 时影子就是 master，纯浪费内存）
+        print("[p195] readout_master_weight=on 但 readout_dtype=fp32 —— "
+              "影子与 master 同为 fp32，主权重模式无收益（建议 --readout-dtype "
+              "fp8/bf16/fp16）；仍按请求开启（行为与 off 等价，仅多一份副本）",
+              flush=True)
     cfg.micro_batch = int(args.micro_batch)           # P194 (Q1)：读出微批量（1=逐步）
     # P116：稀疏读出前向算子
     cfg.sparse_fwd_kernel = args.sparse_fwd_kernel

@@ -1,5 +1,5 @@
 [A] 静态检查：探测用的设备必须是 self.device（已解析），不是原始入参
-[PASS] A1 `_dev` 有赋值  —— line 173: _dev = str(self.device)
+[PASS] A1 `_dev` 有赋值  —— line 174: _dev = str(self.device)
 [PASS] A2 `_dev` 取自 self.device（P161 修复）  —— 若为 str(device) 则会用未解析的 'auto' → 全线 fail
 [PASS] A3 `_dev` **不是** `str(device)`  —— 当前: _dev = str(self.device)
 

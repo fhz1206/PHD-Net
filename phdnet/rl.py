@@ -309,10 +309,19 @@ class REINFORCETrainer:
 
     # ---------- 参考策略（KL）----------
     def pin_reference(self) -> None:
-        """冻结当前读出作为参考策略 π_ref（KL 正则用；1B 档额外占一份 W）。"""
+        """冻结当前读出作为参考策略 π_ref（KL 正则用；1B 档额外占一份 W）。
+
+        P195-BUG-3 修复（审计）：优先取**权威权重**（master 在时是 fp32
+        精确值）而非 `W_cpu()`（= 影子反量化，fp8 粒度）。否则 KL 的基线
+        本身是量化噪声 → 正则项量级失真（master 模式下 `W_cpu()` 与
+        master 可差 ~6%，足以让 KL 惩罚偏离真实策略漂移）。
+        """
         ro = self.lm.net.readout
-        if hasattr(ro, "W_cpu"):
-            self._ref_W = ro.W_cpu()            # 加速后端：取回主机副本
+        _auth = getattr(ro, "W_authoritative", None)
+        if callable(_auth):
+            self._ref_W = np.array(_auth(), copy=True)
+        elif hasattr(ro, "W_cpu"):
+            self._ref_W = np.array(ro.W_cpu(), copy=True)   # 加速后端：主机副本
         else:
             self._ref_W = np.array(ro.W, copy=True)
 
@@ -413,6 +422,17 @@ class REINFORCETrainer:
 
         参考权重常驻主机（`_ref_W`），每步一次 numpy 前向——仅在 kl_coef>0
         时承担；生产若嫌慢可改为每 N 步一次（此处给出诚实口径，不假装免费）。
+
+        ⚠⚠ **P195 主权重模式下的口径说明（审计 BUG-3）**：
+          · `_ref_W` 取的是**权威权重**（master 在时 = fp32 精确值）；
+          · `y_now = ro.forward(x)` 走的是**影子**（低精度前向）。
+          两者相差最多 `shadow_refresh` 步的更新 + fp8 舍入 → KL 里混入了
+          「量化噪声」而非纯策略漂移。这是**已知且有界**的（影子 staleness
+          就是 DeepSeek 方案的既定代价），但**必须记录**：若要把 KL 收紧到
+          纯策略漂移，需要让 forward 也走 master（= 放弃低精度前向收益）。
+          当前选择：保留低精度前向（那是 master 模式的目的），KL 容忍量化
+          噪声（实践中远小于策略漂移量级——实测影子 vs master 前向差 ~6%，
+          而 RL 一步的策略漂移通常 >20%）。
         """
         ro = self.lm.net.readout
         W_ref = self._ref_W

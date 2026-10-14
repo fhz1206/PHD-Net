@@ -6,8 +6,8 @@ P7 融合并行读出核 —— 逐位等价对拍
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
 [L3] 端到端 1500 步：numpy PPL 277.8383 / 融合 PPL 277.8383  权重逐位相同=True
-[L4] 吞吐：numpy 2.554 ms/token → 融合 2.391 ms/token  （1.07×）
+[L4] 吞吐：numpy 1.590 ms/token → 融合 1.474 ms/token  （1.08×）
 ------------------------------------------------------------------
-L1=True  L2=True  L3=True   → PASS   加速 1.07×
+L1=True  L2=True  L3=True   → PASS   加速 1.08×
 
 [stderr]

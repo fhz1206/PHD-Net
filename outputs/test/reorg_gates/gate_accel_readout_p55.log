@@ -12,22 +12,22 @@ P55：learn_softmax target_idx × compiled 2×2 矩阵
 通过 9/9
 
 [stderr]
-D:\AiModel\train\phdnet\backends\accel_readout.py:1378: RuntimeWarning: torch.compile 融合核执行失败，永久回落 eager（原因：InductorError: InvalidCxxCompiler: Compiler: cl is not found.
+D:\AiModel\train\phdnet\backends\accel_readout.py:1589: RuntimeWarning: torch.compile 融合核执行失败，永久回落 eager（原因：InductorError: InvalidCxxCompiler: Compiler: cl is not found.
 
 Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
 ）
   warnings.warn(f"torch.compile 融合核执行失败，永久回落 eager"
-D:\AiModel\train\phdnet\backends\accel_readout.py:1378: RuntimeWarning: torch.compile 融合核执行失败，永久回落 eager（原因：InductorError: InvalidCxxCompiler: Compiler: cl is not found.
+D:\AiModel\train\phdnet\backends\accel_readout.py:1589: RuntimeWarning: torch.compile 融合核执行失败，永久回落 eager（原因：InductorError: InvalidCxxCompiler: Compiler: cl is not found.
 
 Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
 ）
   warnings.warn(f"torch.compile 融合核执行失败，永久回落 eager"
-D:\AiModel\train\phdnet\backends\accel_readout.py:1378: RuntimeWarning: torch.compile 融合核执行失败，永久回落 eager（原因：InductorError: InvalidCxxCompiler: Compiler: cl is not found.
+D:\AiModel\train\phdnet\backends\accel_readout.py:1589: RuntimeWarning: torch.compile 融合核执行失败，永久回落 eager（原因：InductorError: InvalidCxxCompiler: Compiler: cl is not found.
 
 Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
 ）
   warnings.warn(f"torch.compile 融合核执行失败，永久回落 eager"
-D:\AiModel\train\phdnet\backends\accel_readout.py:1378: RuntimeWarning: torch.compile 融合核执行失败，永久回落 eager（原因：InductorError: InvalidCxxCompiler: Compiler: cl is not found.
+D:\AiModel\train\phdnet\backends\accel_readout.py:1589: RuntimeWarning: torch.compile 融合核执行失败，永久回落 eager（原因：InductorError: InvalidCxxCompiler: Compiler: cl is not found.
 
 Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace (please do this especially if you're reporting a bug to PyTorch). For even more developer context, set TORCH_LOGS="+dynamo"
 ）

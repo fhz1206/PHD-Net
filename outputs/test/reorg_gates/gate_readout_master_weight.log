@@ -1,0 +1,59 @@
+==========================================================================
+P195 主权重 + 低精度影子（DeepSeek-V4-Flash 模式）不变量
+==========================================================================
+
+[A] 结构：master fp32 + 低精度影子
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+  PASS A0 加速后端（含 master 属性）  [AccelReadout]
+  PASS A1a master_weight 标志为真
+  PASS A1b master 是 fp32  [dtype=torch.float32]
+  PASS A1c 影子是 fp8 存储  [torch.uint8]
+  PASS A2 更新落在 master 上  [max|Δ|=5.650e-02]
+  PASS A3a 影子在 refresh 间隔内不变（不每步重量化）
+  PASS A3b 影子到间隔后刷新
+  PASS A4 master 保有亚 fp8 粒度的值（非目标行更新未被舍入）  [231/1088 个 |w|<2^-6]
+
+[B] 更新分派与存储 dtype 无关（BugC 回归）
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+  PASS B1 fp8: master 被更新  [max|Δ|=5.583e-02]
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+  PASS B1 fp32: master 被更新  [max|Δ|=5.583e-02]
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+  PASS B1 fp16: master 被更新  [max|Δ|=5.583e-02]
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+  PASS B1 bf16: master 被更新  [max|Δ|=5.583e-02]
+
+[C] 检查点往返（master fp32 逐位恢复）
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+[ckpt] 按新格式载入（ckpt_dtype=fp8，解码 1 个键）
+  PASS C1 master 往返逐位一致（不被 ckpt_dtype 压缩）  [max|Δ|=0.000e+00]
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+[ckpt] 按新格式载入（ckpt_dtype=fp8，解码 1 个键）
+  PASS C2 非 master 往返按影子粒度（与训练期同尺子）  [max|Δ|=0.000e+00]
+  PASS C3 fp8 检查点恢复后前向正常（BugA 回归）  [n_h=64]
+  PASS C4a meta.ro_master=True
+  PASS C4b npz 里无同名 ro_master 数组（BugE：单一来源）
+  PASS C4c ro_W 存为 fp32（未被压缩）  [float32]
+
+[D] 与 torch.compile / NPU Graph / micro_batch 的交互
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+  PASS D1 torch.compile 在主权重模式下禁用（否则静默更新影子）
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+  PASS D2 NPU Graph 捕获前 master 已建（或图未启用）  [graph_ready=False]
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+  PASS D3 micro_batch 的 commit_grad 走 master  [Σ|W|=43.747]
+
+[E] 默认（master off）零参与
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+  PASS E1 master off 时不建 master
+  PASS E2 master off 时训练后仍无 master（默认路径不受影响）
+
+PASS: 23/23 项通过
+
+[stderr]
+D:\AiModel\train\phdnet\backends\accel_readout.py:1154: RuntimeWarning: fp8 原生前向在设备 cpu:0 上失败（RuntimeError: addmv input tensors must have the same dtype, but got Half, Float8_e4m3fn, and H）→ 永久转 fp8 位模式存储 + fp16 计算（P189 语义保持，训练不中断）
+  warnings.warn(
+D:\AiModel\train\phdnet\backends\accel_readout.py:640: RuntimeWarning: [precision] 读出权重 fp16/bf16 请求 → 运行时提升为 fp32（迭代全 fp32，fhz 2026-10-06 决策；P110：fp16 写回丢失 73% 非目标行更新。检查点存储仍为 fp16）
+  _w187.warn(
