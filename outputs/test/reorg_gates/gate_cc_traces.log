@@ -1,0 +1,40 @@
+==========================================================================
+P196 Claude Code traces 数据链路
+==========================================================================
+
+[A] event-stream → 对话文本
+  PASS A1 user 消息被抽取
+  PASS A2 assistant 文本被抽取
+  PASS A3a thinking 块被抽取（reasoning trace）
+  PASS A3b tool_use 被抽取
+  PASS A3c tool_result 被抽取
+  PASS A4 元数据行被跳过（mode/last-prompt）
+  PASS A5 trace 内多轮以空行分隔
+  PASS A6a 空输入 → 空输出
+  PASS A6b 全坏行 → 空输出（不崩）
+  PASS A7 thinking=False 丢弃推理块但保留正文
+
+[B] 远程 ms://（需网络）
+  PASS B1 列目录（debugging 类应有 162 个）  [162 files]
+  PASS B2 远程读一条 trace 并转换  [len=3000]
+
+[C] 流式接口
+  PASS C1 iter_cc_traces 逐文件产出  [2 traces]
+  PASS C2 limit_chars 精确生效  [len=200]
+  PASS C3 单文件 load == iter 首条
+
+[D] corpus 层幂等性 / 远程 jsonl
+  PASS D1 expand_paths 对列表幂等（P196）
+  PASS D2 远程 .jsonl 不再 raise NotImplementedError
+
+[E] train.py 接线
+  PASS E1 DATA_FILES 含 cc_traces
+  PASS E2 MS_CC_REPO 指向指定数据集
+  PASS E3 CC_CATEGORIES 定义（10 类）
+  PASS E4 词表构建走 load_cc_traces
+  PASS E5 训练流走 iter_cc_traces
+  PASS E6 转换工具存在（tools/data/cc_traces_to_text.py）
+
+PASS: 23/23 项通过
+
+[stderr]

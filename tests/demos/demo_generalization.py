@@ -40,6 +40,10 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # 项目根
+# P196：eval_common 在 tests/evals/（不在本目录）→ 补一条路径。
+# 原来只插了 parents[2] 与 parents[0]（tests/demos/），`from eval_common`
+# 直接 ModuleNotFoundError（连 --help 都跑不起来，门禁 3 例既存失败之一）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "evals"))
 
 from eval_common import BASE, DOC, SEG
 

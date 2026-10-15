@@ -172,6 +172,19 @@ LOG_DIR = _ROOT / "outputs" / "models" / "train_logs"
 # ModelScope 数据集仓库（--remote-data 时经 HTTP Range 流式直读，零本地落盘）
 MS_DATA_REPO = "fhzfhz/Mixture-General-Mini"
 
+# P196：Claude Code traces（fhz 指定为测试训练集）。
+# 结构：session/<category>/*.jsonl（1,017 个 trace / 10 类 / 40.5 MB），
+# **不是 parquet** → 走 corpus.py 的远程 .jsonl 分支（P196 新增）。
+# 语言内容是英文（代码 + 推理 + 工具调用），故默认 --data-lang en。
+MS_CC_REPO = "choucisan/mimo-claude-code-traces-1k"
+# P196：cc_traces 的 10 个任务类别（与数据集 README 一致；远程模式按类别
+# 逐个展开，绕开 ms_stream 的「单层 glob」限制）。
+CC_CATEGORIES = [
+    "algorithms", "api_integration", "code_generation", "data_processing",
+    "debugging", "hf_trace", "math_problems", "refactoring", "shell_devops",
+    "supplement",
+]
+
 DATA_FILES = {
     # 训练数据一律用上传分片 parquet（sft/ pretrain/ 根）；raw/ 仅归档不触碰
     # （fhz 2026-09-25 指令，与 tools/train_production.py 同步）。
@@ -182,6 +195,10 @@ DATA_FILES = {
     "pretrain": _ROOT / "datasets" / "pretrain" / "pretrain_*.parquet",
     "pretrain_zh": _ROOT / "datasets" / "pretrain" / "pretrain_*.parquet",
     "eval": _ROOT / "eval_corpus" / "internal_corpus.txt",
+    # P196：Claude Code traces。**本地模式**读转好的 parquet（见
+    # tools/data/cc_traces_to_text.py）；**远程模式**直接读 ms:// 上的
+    # session/*.jsonl（glob 展开成 1,017 个 MsFile）。
+    "cc_traces": _ROOT / "datasets" / "cc_traces" / "cc_*.parquet",
 }
 
 
@@ -848,18 +865,57 @@ def main() -> None:
         # 分片级抽样取前 remote_fraction 比例（前缀子集，顺序语义不变）。
         # 与本地同名分片模式 → 文件顺序与本地一致。
         _pat = DATA_FILES[args.data].name
-        data_path = f"ms://{MS_DATA_REPO}/{args.data if args.data != 'pretrain_zh' else 'pretrain'}/{_pat}"
+        if args.data == "cc_traces":
+            # P196：Claude Code traces 的**目录结构是两级**（session/<cat>/
+            # <uuid>.jsonl），而 ms_stream.expand_ms 只支持**单层 glob**
+            # （明确拒绝跨目录，审计 A4）。故这里按类别逐个展开再合并，
+            #   而不是拼一个 `session/*/*.jsonl`（会被拒）。
+            from phdnet.ms_stream import expand_ms as _expand_ms
+            data_files = []
+            for _cat in CC_CATEGORIES:
+                try:
+                    data_files.extend(_expand_ms(
+                        f"ms://{MS_CC_REPO}/session/{_cat}/*.jsonl"))
+                except FileNotFoundError:
+                    print(f"[data] WARN: 类别无匹配 session/{_cat}/*.jsonl")
+            if not data_files:
+                print(f"[data] remote cc_traces 无匹配（repo={MS_CC_REPO}）")
+                sys.exit(1)
+            data_files = sorted(data_files)
+            # 前缀抽样（与其它远程数据同口径：保序， fraction 语义不变）
+            _frac = float(os.environ.get("PHDNET_REMOTE_FRACTION", "1.0") or 1.0)
+            if 0 < _frac < 1:
+                import math as _math
+                _n = max(1, _math.ceil(len(data_files) * _frac))
+                data_files = data_files[:_n]
+            data_path = f"ms://{MS_CC_REPO}/session/*/*.jsonl"
+            print(f"[data] remote source: {data_path} "
+                  f"(fraction={_frac:g}, {len(data_files)} traces)")
+        else:
+            data_path = (f"ms://{MS_DATA_REPO}/"
+                         f"{args.data if args.data != 'pretrain_zh' else 'pretrain'}/{_pat}")
+            print(f"[data] remote source: {data_path} "
+                  f"(fraction={args.remote_fraction:g})")
         os.environ["PHDNET_REMOTE_FRACTION"] = str(args.remote_fraction)
         if args.vocab_scan == "full":
             print("[data] WARN: --vocab-scan full 会把远程分片整读两遍"
                   "（建词表 + 训练）；建议 --vocab-file 复用词表快照")
-        print(f"[data] remote source: {data_path} "
-              f"(fraction={args.remote_fraction:g})")
-    try:
-        data_files = expand_paths(data_path)
-    except FileNotFoundError as e:
-        print(f"data file not found: {e}")
-        sys.exit(1)
+        # P196：cc_traces 已在上面按类别展开（两级目录绕开单层 glob 限制），
+        # 不能再走 expand_paths（会重复列目录 + 把 session/*/*.jsonl 拒掉）。
+        if args.data == "cc_traces":
+            pass
+        else:
+            try:
+                data_files = expand_paths(data_path)
+            except FileNotFoundError as e:
+                print(f"data file not found: {e}")
+                sys.exit(1)
+    else:
+        try:
+            data_files = expand_paths(data_path)
+        except FileNotFoundError as e:
+            print(f"data file not found: {e}")
+            sys.exit(1)
     if not remote_active:
         total_mb = sum(p.stat().st_size for p in data_files) / 1e6
     else:                                   # 远程：MsFile 自带 API Size
@@ -867,6 +923,11 @@ def main() -> None:
         total_mb = ms_total_size(data_files) / 1e6
         print(f"[data] {len(data_files)} remote shards, ~{total_mb:.0f} MB "
               f"(ModelScope HTTP Range streaming, zero local copy)")
+    # P196：把**已展开的文件列表**交给下游（PrefetchChars / 词表扫描）——
+    #   cc_traces 的目录是两级（session/<cat>/*.jsonl），data_path 只是个
+    #   展示用字符串（含跨目录通配符，expand_ms 会拒）。expand_paths 对
+    #   列表幂等（P196），故这里统一传 data_files。
+    _data_arg = data_files if args.data == "cc_traces" else data_path
     # 数据口径随检查点落盘（审计 D2：--remote-fraction 变化 + --resume 会静默
     # 改变数据分布 → 恢复训练时须能看出这次续训用的是哪份数据）
     # 语言过滤（fhz 2026-09-29）：--lang zh/en 按 parquet 的 lang 列过滤训练流；
@@ -880,6 +941,17 @@ def main() -> None:
     elif args.data_lang != "all":
         _lang_filter = args.data_lang
         print(f"[data] lang filter: {_lang_filter} (parquet `lang` column)")
+    if args.data == "cc_traces":
+        # P196：cc_traces 的 lang 列固定为 en（转换脚本写死的），故
+        # `--data-lang zh` 在这份数据上会得到**空流**——提前拦下并说清。
+        if _lang_filter == "zh":
+            print("[data] WARN: --data cc_traces --data-lang zh → 空流"
+                  "（cc_traces 内容是英文代码/推理，lang 列恒为 en）。"
+                  "已自动改为不过滤。")
+            _lang_filter = None
+        else:
+            print("[data] cc_traces: 内容是英文（代码 + 推理 + 工具调用），"
+                  "lang 列恒为 en；无需语种过滤")
     _data_provenance = {
         "data": args.data,
         "remote": bool(remote_active),
@@ -900,8 +972,17 @@ def main() -> None:
                    and Path(args.vocab_file).exists())
     if _resume_vocab or _file_vocab:
         vocab_text, seg, tokens = "", None, None      # 下方按来源填充
+    elif args.data == "cc_traces":
+        # P196：Claude Code traces 是 event-stream JSONL（没有 text 字段），
+        # 通用 build_vocab_text 会得到空串 → 走专用转换层（corpus.iter_cc_traces）。
+        from phdnet.corpus import load_cc_traces
+        vocab_text = load_cc_traces(_data_arg,
+                                    limit_chars=args.vocab_sample_chars)
+        print(f"[vocab] cc_traces: 采样 {len(vocab_text):,} 字符"
+              f"（event-stream → 对话文本，{args.vocab_sample_chars:,} 上限）",
+              flush=True)
     else:
-        vocab_text = build_vocab_text(data_path, args.vocab_sample_chars, SEP)
+        vocab_text = build_vocab_text(_data_arg, args.vocab_sample_chars, SEP)
     if not (_resume_vocab or _file_vocab):
         t_v0 = time.perf_counter()
         seg = build_segmenter_parallel(vocab_text, SEG_KWARGS, args.vocab_workers)
@@ -957,15 +1038,14 @@ def main() -> None:
             # 解码默认**多生产者**（每核心一个进程，跨文件并行；显式 workers
             # 不受 PREFETCH_MAX_PROCS=1 钳制）。训练稳态预取仍默认 1 进程不变。
             # 内存：队列有界（depth 上限）→ 背压成立；每进程仅局部缓冲。
-            _scan_files = len(expand_paths(data_path)) if '*' in str(data_path) \
-                else 1
+            _scan_files = len(data_files) if len(data_files) > 1 else 1
             _scan_w = PREFETCH_W if PREFETCH_W > 0 else \
                 max(1, min(16, _scan_files, (os.cpu_count() or 1)))
             print(f"[vocab] scan decode processes: {_scan_w} (core-pinned: one dedicated core per process;"
                   f" training steady-state prefetch still {PREFETCH_W or 1})", flush=True)
             seen, n_seen = scan_vocab_parallel(seg.vocab, seg.max_len,
                                                PrefetchChars(
-                                                   data_path, SEP,
+                                                   _data_arg, SEP,
                                                    lang=("zh"
                                                         if args.data == "pretrain_zh"
                                                         else None),
@@ -977,10 +1057,18 @@ def main() -> None:
                                                    workers=_scan_w),
                                                vw, progress=_scan_prog)
         else:
-            for tk in StreamingTokenizer(seg, char_chunks(data_path, SEP)):
-                seen.add(tk)
-                n_seen += 1
-                if n_seen % 1_000_000 == 0:
+            # P196: cc_traces stream is one text per trace (not char chunks)
+            if args.data == "cc_traces":
+                from phdnet.corpus import iter_cc_traces
+                for t in iter_cc_traces(_data_arg):
+                    for tk in seg.tokenize(t):
+                        seen.add(tk)
+                        n_seen += 1
+            else:
+                for tk in StreamingTokenizer(seg, char_chunks(_data_arg, SEP)):
+                    seen.add(tk)
+                    n_seen += 1
+            if n_seen % 1_000_000 == 0:
                     print(f"  [vocab-scan] streamed {n_seen:>12,} tokens, "
                           f"current vocab {len(seen):,} ({time.perf_counter() - t_v:.0f}s)",
                           flush=True)
@@ -1217,13 +1305,37 @@ def main() -> None:
         if remote_active:
             from phdnet.ms_stream import REMOTE_MAX_PROCS
             _pw = min(PREFETCH_W or REMOTE_MAX_PROCS, REMOTE_MAX_PROCS)
-        with PrefetchChars(data_path, SEP,
-                            lang=_lang_filter,
-                            # 2026-10-07 修复（审计 4）：缺省 0 → 无界队列（与日志
-                            # depth=8192 不符）→ 与 batch_samples 的 or 64 同口径
-                            depth=(PREFETCH_DEPTH or 8192),
-                            batch_samples=PREFETCH_BATCH or 64,
-                            workers=_pw) as src:
+        # P196：cc_traces 的「样本」是**一条 trace 转换出的对话文本**（一个
+        # JSONL 文件 → 一段文本），而不是 parquet 的一行 / txt 的一个空行块。
+        # 这里用 iter_cc_traces 直接产流（远程零落盘），跳过 PrefetchChars
+        # 的 parquet/txt 语义；代价是失去多线程预取（trace 只 8–22 KB，
+        # 1,017 个文件共 40 MB，HTTP Range 直读足够快）。
+        if args.data == "cc_traces":
+            from phdnet.corpus import iter_cc_traces
+            _cc_it = iter_cc_traces(_data_arg)
+
+            class _CCSource:
+                """把 trace 文本流包装成 StreamingTokenizer 期望的迭代器协议。"""
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def __iter__(self):
+                    return _cc_it
+
+            src = _CCSource()
+        else:
+            src = PrefetchChars(_data_arg, SEP,
+                                lang=_lang_filter,
+                                # 2026-10-07 修复（审计 4）：缺省 0 → 无界队列（与日志
+                                # depth=8192 不符）→ 与 batch_samples 的 or 64 同口径
+                                depth=(PREFETCH_DEPTH or 8192),
+                                batch_samples=PREFETCH_BATCH or 64,
+                                workers=_pw)
+        with src:
             stream = StreamingTokenizer(lm.tok.seg, src,
                                        assistant_marker=(args.assistant_marker
                                                          or None))

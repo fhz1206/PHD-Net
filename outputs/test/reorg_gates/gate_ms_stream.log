@@ -27,8 +27,8 @@ ms:// 纯函数验证（零网络）
   ✓ Path(ms://…) 会丢语义 → 调用方须先判 is_remote
   ✓ corpus_stats 走远程分支（不 Path() 化 ms://）
   ✓ corpus_stats 远程体积来自 API Size（无 getsize）
-  ✓ _iter_one 对非 parquet 远程源显式 NotImplementedError
-  ✓ load_text 对非 parquet 远程源显式 NotImplementedError
+  ✓ _iter_one 支持远程 .jsonl（P196：不再 raise NotImplementedError）
+  ✓ load_text 对**非 parquet/jsonl** 远程源仍显式 NotImplementedError
   ✓ load_text 只展开一次路径（远程不再二次列目录）
   ✓ open_parquet_source 本地分支逐位等价（ParquetFile(str(p))）
   ✓ open_parquet_source 远程有重试
@@ -41,9 +41,9 @@ ms:// 纯函数验证（零网络）
   ✓ 编译通过: phdnet/readout.py
   ✓ 编译通过: tests/gates/gate_ms_stream.py
   ✓ train.py --help 可执行（导入 + argparse 正常）
-  · 静态提示（不参与判据）：疑似裸 % 于 train\train.py:249 —— 请以实际 --help 是否通过为准
-  ✓ 无重复定义的 CLI 选项（P134）— 已扫描 39 个入口
-  ✓ 所有 argparse 入口 --help 均可执行（39 个候选文件）
+  · 静态提示（不参与判据）：疑似裸 % 于 train\train.py:266 —— 请以实际 --help 是否通过为准
+  ✓ 无重复定义的 CLI 选项（P134）— 已扫描 40 个入口
+  ✓ 所有 argparse 入口 --help 均可执行（40 个候选文件）
 
 通过 44/44
 

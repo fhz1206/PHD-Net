@@ -70,7 +70,6 @@ python train/train.py --data pretrain --remote-data --remote-fraction 0.3
 
 本地读取统一走 `phdnet/corpus.py`（同认 `.txt` 与 `.parquet`；给 parquet 路径即走列式读取，
 支持只读部分 row group，大语料不必整文件载入内存）；或用 HuggingFace `datasets` 直读远端：
-
 ```python
 from phdnet.corpus import load_text, iter_texts
 text = load_text("datasets/pretrain/pretrain_000.000.parquet", limit_chars=4096)
@@ -81,6 +80,47 @@ from datasets import load_dataset
 ds = load_dataset('fhzfhz/Mixture-General-Mini', 'sft')
 ds = load_dataset('fhzfhz/Mixture-General-Mini', 'pretrain', streaming=True)
 ```
+
+
+## 三之二、P196：Claude Code traces（`--data cc_traces`）
+
+fhz 指定的**测试训练集**：ModelScope `choucisan/mimo-claude-code-traces-1k`
+（1,017 个 trace / 15,046 events / 11,995 messages / 5,271 tool calls /
+10 个任务类别 / 40.5 MB / MIT License）。
+
+⚠ **它不是 parquet，而是 event-stream JSONL**（每行一个 event：
+`user` / `assistant` / `tool_use` / `tool_result` / 元数据行）——
+通用 `iter_texts` 找不到 `text` 字段会得到**空流**，故有专用读取路径
+（`phdnet/corpus.py::iter_cc_traces`）：只抽语言内容、按 event 原顺序
+还原成对话文本，**保留 `thinking` 块**（reasoning trace 是这份数据的独特价值）。
+
+```bash
+# 远程直读（零本地落盘；两级目录 session/<category>/*.jsonl 由 train.py
+# 按 10 个类别逐个展开——ms_stream 只支持单层 glob）
+python train/train.py --preset smoke --data cc_traces --remote-data --tokens 3000
+
+# 本地副本模式：先转成 parquet（tools/data/cc_traces_to_text.py）
+py -3.14 tools/data/cc_traces_to_text.py --list
+py -3.14 tools/data/cc_traces_to_text.py --out datasets/cc_traces/cc_000.parquet
+python train/train.py --preset smoke --data cc_traces --tokens 3000
+```
+
+转换格式（一条 trace → 一段文本，`\n\n` 分隔多轮）：
+
+```
+user: The following Python code has a logic error bug. …
+assistant: [思考] The user has shared a Python function …
+assistant: The code doesn't actually have a logic error …
+assistant: [调用工具 Bash] {"command": "pytest -q"}
+user: [工具返回] 3 passed
+```
+
+**本机 smoke 实测**（`--preset smoke --tokens 3000`）：PPL **2474 → 1457**、
+LTM imprints=430（长出 30,720 突触）、OOV 0.0000%、3.04 ms/tok。
+对拍门禁：`tests/gates/gate_cc_traces.py`（23 项，含远程实读）。
+
+⚠ 内容是**英文**（代码 + 推理 + 工具调用）→ `--data-lang zh` 会得到空流，
+train.py 已提前拦下并自动改为不过滤。
 
 
 ## 四、datasets 是独立仓库

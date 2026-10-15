@@ -17,6 +17,9 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)
+# P196：`_ROOT` 是 **tools/**（不是仓库根）→ `import phdnet` 失败。
+# 原来只插了 tools/，连 --help 都跑不起来（门禁既存失败之一）。
+sys.path.insert(0, os.path.dirname(_ROOT))
 
 from phdnet.backends.torch_backend import (bench_readout,          # noqa: E402
                                            probe_devices)

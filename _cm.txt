@@ -1,43 +1,46 @@
-P195: DeepSeek-V4-Flash 主权重 + 低精度影子副本
+P196: Claude Code traces 作为测试训练集（--data cc_traces）
 
-fhz 指令「模仿 DeepSeek-V4-Flash：保持 fp8 的精度和 fp16 的迭代精度」。
+fhz 指定：https://www.modelscope.cn/datasets/choucisan/mimo-claude-code-traces-1k
+（1,017 traces / 15,046 events / 11,995 messages / 5,271 tool calls /
+10 类 / 40.5 MB / MIT）。
 
-## 机制
-- fp32 master 常驻，所有更新作用于此（非目标行更新 100% 保留，解除
-  P110 的舍入丢失：fp16 26.67% / fp8 更差）
-- 影子副本（fp8/bf16/fp16 位模式）只用于前向 GEMV，保留低精度访存收益
-- 每 shadow_refresh 步重量化一次（默认 8 = DeepSeek 同款折中）
-- 默认 off；显式 --readout-master-weight 开启（代价：1b 档 +866.7 MiB）
+## 数据形态与读取路径
+数据集是 **event-stream JSONL**（每行一个 event：user / assistant /
+tool_use / tool_result / 元数据），**不是 parquet** —— 通用 iter_texts
+找不到 text 字段会得到空流。故新增专用读取路径：
 
-## 覆盖范围（两条臂行为一致）
-- AccelReadout：_eager_step / learn() / commit_grad / NPU Graph /
-  降级路径全部走 master；torch.compile 在 master 模式禁用
-- numba Readout（--accel cpu）：同机制补齐（GAP-4，原来 silent 失效）
+- phdnet/corpus.py：iter_cc_traces / load_cc_traces / cc_trace_to_text
+  只抽语言内容、按 event 原顺序还原成对话文本，保留 thinking 块
+  （reasoning trace 是这份数据的独特价值）
+- corpus.py：远程 .jsonl 直读（ms:// 经 open_ms_file，零落盘）；
+  原来对非 parquet 远程源 raise NotImplementedError
+- corpus.py：expand_paths 接受已展开的列表（幂等）—— 两级目录
+  session/<cat>/*.jsonl 由 train.py 按 10 类逐个展开绕开单层 glob 限制
 
-## 检查点
-- master 的 fp32 精确值逐位往返（ro_W 跳过 ckpt_dtype 压缩）
-- 非 master 模式按影子粒度恢复（与训练期同一把尺子）
-- 修掉原生 fp8 检查点恢复即崩的预存 bug（BugA）
+## train.py 接线
+- DATA_FILES 新增 cc_traces；MS_CC_REPO / CC_CATEGORIES 常量
+- 远程模式：按类别逐个 expand_ms 合并 + 前缀抽样（ fraction 语义不变）
+- 词表构建走 load_cc_traces；full scan 与训练流走 iter_cc_traces
+- --data-lang zh 在这份数据上会得空流 → 提前拦下并自动改为不过滤
 
-## 本机 A/B（tests/checks_p195.py --ab，固定探针集）
-- accel fp8 无 master PPL 2.84 → 有 master 2.15（-24.2%，fp32 基线 2.14）
-- numba int8 无 master 2.83 → 有 master 2.15（-24.1%）
-- master 与 fp32 基线差 +1.1%（无 master 时 +33.5%）
+## 工具
+tools/data/cc_traces_to_text.py：--list / --dry-run / --out（转 parquet）
+--local-dir / --categories / --per-shard / --no-thinking
+
+## 本机实测（smoke 档 3000 tokens）
+PPL 2474 → 1457；LTM imprints=430（长出 30,720 突触）；
+OOV 0.0000%；3.04 ms/tok；词表 2,631 词
+
+## 顺带修掉 3 个既存失败（gate_ms_stream 的 --help 检查）
+三个脚本的 sys.path 指向 tools/ 而非仓库根，连 --help 都跑不起来：
+- tests/demos/demo_generalization.py：补 tests/evals 路径
+- tools/bench/bench_readout_devices.py：补仓库根
+- tools/eval/rebaseline.py：补仓库根 + tests/evals
+（已验证 stash 后在干净树上同样失败，与本次改动无关）
 
 ## 验证
 - run_tests.py 9/9
-- run_gates.py 44/44（新增 gate_readout_master_weight.py 23 项）
-- tests/checks_p195.py 6/6
-
-## 同时修掉（两个子代理审计发现）
-- BugC：更新分派原来只在 fp8 存储下走 master → fp32/fp16 下 master
-  永不更新但 ckpt 仍记 ro_master=1（静默语义漂移）
-- BUG-1：learn()（非 softmax）的 master 门排在 int8 之后（同族顺序错）
-- BugA：原生 fp8 的 ckpt 保存存位模式、恢复 TypeError（预存）
-- BugB：ckpt_dtype 压缩会抹掉 master 精度 → ro_W 跳过压缩
-- BugD：int8→fp16 降级后 _int8_like 未清 → 影子被按 int8 码本重量化
-- BUG-2：降级重绑 self.W 后 NPU Graph 指向旧地址 → 降级即废图
-- BugE：ro_master 同时写 npz 数组与 meta 键（两个同名对象）→ 只留 meta
-- BugF：load_W 的 fp8 cast 在设备上做 → 910B 无 fp8 cast 算子，改 CPU
-- BUG-3：W_cpu() 在 master 模式返回影子 → 新增 W_authoritative()，
-  RL 的 KL 参考策略改用它；stats() 增加 master/master_MB/shadow_*
+- run_gates.py 45/45（新增 gate_cc_traces.py 23 项，含远程实读；
+  另修掉 gate_ms_stream 的 2 例既存失败）
+- checks_p195.py 5/5
+- 端到端：--preset smoke --data cc_traces --remote-data --tokens 3000

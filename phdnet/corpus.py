@@ -30,7 +30,8 @@ from pathlib import Path
 import numpy as np
 
 __all__ = ["load_text", "iter_texts", "write_parquet", "corpus_stats",
-           "open_parquet_source"]
+           "open_parquet_source", "cc_trace_to_text", "iter_cc_traces",
+           "load_cc_traces"]
 
 _SEP = "\n\n"
 
@@ -78,12 +79,19 @@ def _require_pyarrow():
         ) from e
 
 
-def expand_paths(path: str | Path) -> list[Path]:
+def expand_paths(path: str | Path | list) -> list[Path]:
     """路径展开：支持 glob 通配符（如 `pretrain_*.parquet`），返回确定性排序的文件列表。
 
     远程（fhz 2026-09-29）：`ms://<ns>/<path>` 走 ModelScope 直连
     （phdnet/ms_stream.py，HTTP Range 流式零落盘）；本地逻辑一字未动。
+
+    P196：**接受已展开的列表**（原样返回）——调用方若已自行展开
+    （如 cc_traces 的两级目录按类别逐个 glob），不能再走一遍 expand_ms
+    （会重复列目录 + 把跨目录 pattern 拒掉）。这让
+    `expand_paths` 对下游（PrefetchChars / iter_texts）幂等。
     """
+    if isinstance(path, (list, tuple)):
+        return list(path)
     if is_remote_path(path):
         from phdnet.ms_stream import expand_ms
         return expand_ms(str(path))
@@ -108,9 +116,32 @@ def _iter_one(p, column: str, batch_size: int):
                 if v:
                     yield v
     elif suffix in (".jsonl", ".json"):
+        # P196：远程 .jsonl 直读（ms:// 经 HTTP Range 流式，零落盘）。
+        # 用途：Claude Code traces（choucisan/mimo-claude-code-traces-1k，
+        # 1,017 个 session/*.jsonl）这类**非 parquet** 的 ModelScope 数据集。
+        # ⚠ 远程流是**二进制**且可能跨块断行 → 按字节读入后自行 splitlines，
+        #   不依赖 fsspec 的行缓冲（其 block_size 语义对行级迭代不可靠）。
         if is_remote_path(p):
-            raise NotImplementedError(
-                f"ms:// 远程源仅支持 .parquet（收到 {p.name}）")
+            from .ms_stream import open_ms_file
+            with open_ms_file(str(p)) as fh:
+                raw = fh.read()
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", errors="replace")
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(d, dict):
+                    v = d.get(column) or d.get("text") or d.get("content")
+                else:
+                    v = d
+                if v:
+                    yield v
+            return
         with open(p, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -161,6 +192,33 @@ def load_text(path: str | Path, limit_chars: int | None = None,
                                         # 列目录发网络请求，审计 B4）
     for p in paths:
         if p.suffix.lower() in (".parquet", ".jsonl", ".json"):
+            # P196：远程 .jsonl 走 open_ms_file 整文件流式读入（零落盘），
+            # 与本地 jsonl 同口径（逐行 JSON → column 字段）。
+            if is_remote_path(p) and p.suffix.lower() in (".jsonl", ".json"):
+                from .ms_stream import open_ms_file
+                with open_ms_file(str(p)) as fh:
+                    raw = fh.read()
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8", errors="replace")
+                for line in raw.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except Exception:
+                        continue
+                    v = None
+                    if isinstance(d, dict):
+                        v = d.get("text") or d.get("content") or d.get(column)
+                    elif isinstance(d, str):
+                        v = d
+                    if v:
+                        parts.append(v)
+                        n += len(v) + len(sep)
+                        if limit_chars and n >= limit_chars:
+                            return (sep.join(parts)[:limit_chars])
+                continue
             for t in _iter_one(p, "text", 2000):
                 parts.append(t)
                 n += len(t) + len(sep)
@@ -184,10 +242,112 @@ def load_text(path: str | Path, limit_chars: int | None = None,
     return sep.join(parts)[:limit_chars] if limit_chars else sep.join(parts)
 
 
+# ── P196：Claude Code traces（event-stream JSONL → 对话文本）────────────
+# 数据源：ModelScope choucisan/mimo-claude-code-traces-1k（1,017 traces）。
+# 每行是一个 event（user / assistant / tool_use / tool_result / 元数据），
+# **没有** `text` 字段 → 通用 `_iter_one` 会跳过全部行。故单独一条路径：
+# 只抽语言内容、按 event 原顺序还原成对话文本。
+_CC_SEP = "\n\n"
+_CC_MAX_TOOL_INPUT = 400
+
+
+def _cc_content_to_text(content, thinking: bool = True) -> str:
+    """message.content（str 或 block 列表）→ 可读文本。"""
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for b in content:
+        if not isinstance(b, dict):
+            continue
+        bt = b.get("type")
+        if bt == "text" and b.get("text"):
+            parts.append(b["text"].strip())
+        elif bt == "thinking" and thinking and b.get("thinking"):
+            # reasoning trace 是这份数据的独特价值（展示「如何一步步想」）
+            parts.append("[思考] " + b["thinking"].strip())
+        elif bt == "tool_use":
+            inp = json.dumps(b.get("input", {}), ensure_ascii=False)
+            parts.append(f"[调用工具 {b.get('name', '?')}] "
+                         + (inp if len(inp) <= _CC_MAX_TOOL_INPUT
+                            else inp[:_CC_MAX_TOOL_INPUT] + "\n…[截断]"))
+        elif bt == "tool_result":
+            c = b.get("content")
+            if isinstance(c, list):
+                c = "\n".join(str(x.get("text", "")) for x in c
+                              if isinstance(x, dict))
+            s = str(c or "").strip()
+            parts.append("[工具返回] "
+                         + (s if len(s) <= _CC_MAX_TOOL_INPUT
+                            else s[:_CC_MAX_TOOL_INPUT] + "\n…[截断]"))
+    return "\n".join(p for p in parts if p)
+
+
+def cc_trace_to_text(raw: str, thinking: bool = True) -> str:
+    """单个 JSONL event-stream → 一段对话文本。
+
+    只保留 ``type ∈ {user, assistant}`` 的行（跳过 mode / permission-mode /
+    last-prompt 等会话元数据）；按原文件顺序输出（event-stream 本身即时序）。
+    """
+    lines: list[str] = []
+    for ln in raw.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            o = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(o, dict):
+            continue
+        t = o.get("type")
+        if t not in ("user", "assistant"):
+            continue
+        msg = o.get("message") or {}
+        role = msg.get("role") or ("user" if t == "user" else "assistant")
+        body = _cc_content_to_text(msg.get("content"), thinking=thinking)
+        if body:
+            lines.append(f"{role}: {body}")
+    return _CC_SEP.join(lines)
+
+
+def iter_cc_traces(path, thinking: bool = True):
+    """流式迭代 Claude Code traces → 每条 trace 一段对话文本。
+
+    ``path`` 支持单个文件 / glob / **已展开的文件列表**（与 ``iter_texts``
+    同口径）。本地与远程（``ms://``，HTTP Range 零落盘）均可。
+    """
+    for p in expand_paths(path):
+        if is_remote_path(p):
+            from .ms_stream import open_ms_file
+            with open_ms_file(str(p)) as fh:
+                raw = fh.read()
+            raw = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+        else:
+            with open(p, encoding="utf-8") as f:
+                raw = f.read()
+        txt = cc_trace_to_text(raw, thinking=thinking)
+        if txt.strip():
+            yield txt
+
+
+def load_cc_traces(path, limit_chars: int | None = None,
+                   thinking: bool = True) -> str:
+    """把 traces 拼成一个字符串（供 WordTokenizer / PHDWordLM 消费）。"""
+    parts: list[str] = []
+    n = 0
+    for t in iter_cc_traces(path, thinking=thinking):
+        parts.append(t)
+        n += len(t) + len(_CC_SEP)
+        if limit_chars and n >= limit_chars:
+            return _CC_SEP.join(parts)[:limit_chars]
+    return _CC_SEP.join(parts)[:limit_chars] if limit_chars else _CC_SEP.join(parts)
+
+
 def write_parquet(texts, dst: str | Path, lang: str | None = None,
                   src: str | None = None, batch_size: int = 50_000,
                   compression: str = "zstd") -> int:
-    """把文本序列写成 parquet（列 `text`，可选 `lang` / `src`）。"""
     import pyarrow as pa
 
     pq = _require_pyarrow()

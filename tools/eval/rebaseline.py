@@ -23,6 +23,11 @@ _ROOT = os.path.dirname(_HERE)
 os.chdir(_ROOT)
 sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "tests", "evals"))
+# P196：`_ROOT` 是 **tools/**（不是仓库根）→ `from phdnet...` 失败，
+# `tests/evals` 也指向 tools/tests/evals（不存在）。补仓库根两跳。
+_REPO = os.path.dirname(_ROOT)
+sys.path.insert(0, _REPO)
+sys.path.insert(0, os.path.join(_REPO, "tests", "evals"))
 
 import numpy as np
 

@@ -101,9 +101,12 @@ def _main() -> int:
           "is_remote_path(path)" in inspect.getsource(_c.corpus_stats))
     check("corpus_stats 远程体积来自 API Size（无 getsize）",
           "ms_total_size" in inspect.getsource(_c.corpus_stats))
-    check("_iter_one 对非 parquet 远程源显式 NotImplementedError",
-          "NotImplementedError" in inspect.getsource(_c._iter_one))
-    check("load_text 对非 parquet 远程源显式 NotImplementedError",
+    # P196：远程 .jsonl **已支持**（Claude Code traces 是 event-stream JSONL，
+    # 不是 parquet）→ 旧的「显式 NotImplementedError」断言反转：
+    # _iter_one 现在对远程 .jsonl 走 open_ms_file 流式读取。
+    check("_iter_one 支持远程 .jsonl（P196：不再 raise NotImplementedError）",
+          "open_ms_file" in inspect.getsource(_c._iter_one))
+    check("load_text 对**非 parquet/jsonl** 远程源仍显式 NotImplementedError",
           "NotImplementedError" in inspect.getsource(_c.load_text))
     check("load_text 只展开一次路径（远程不再二次列目录）",
           inspect.getsource(_c.load_text).count("expand_paths(path)") == 1)
