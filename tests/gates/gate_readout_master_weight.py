@@ -55,6 +55,10 @@ def _mk(master=True, dtype="fp8", refresh=8, mb=1, **kw):
         seed=11, step_profiling=False, accel_readout="cpu:0",
         readout_dtype=dtype, readout_master_weight=master,
         readout_shadow_refresh=refresh, micro_batch=mb,
+        # P197：readout_replay 默认 True 会额外调 learn_softmax（每次 replay
+        # 也推进 _shadow_age）→ A3 的「refresh 间隔内影子不变」计数被污染。
+        # 本门禁测的是**主权重机制本身**，回放是正交机制 → 关掉以隔离。
+        readout_replay=False,
         nll_sync_every=1, eta_pc=0.05, eta_oja=0.05, pc_dev_steps=400,
         big_ltm=True, big_ltm_N=1 << 16, big_ltm_m=8, big_ltm_k=2, **kw)
     lm = PHDWordLM(TEXT, cfg, seg_kwargs=SEG_KW)

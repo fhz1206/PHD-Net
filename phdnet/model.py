@@ -120,6 +120,27 @@ class PHDNet:
         self.step_count = 0
         self._sleep_count = 0                       # C2：consolidate 节流计数
 
+        # P197：**SDR 支撑集新颖性检测**（海马模式分离的工程等价物）。
+        # 动机（实测诊断）：`surprise = ‖e0‖/√n` 对输入幅度**几乎不敏感**
+        # （2σ→0.1643 / 6σ→0.1667 / 10σ→0.1672）——因为 M1 的 k-WTA +
+        # 层内 min-max 归一化把绝对幅度完全抹掉（SDR 本就该对幅度不变），
+        # PC 的 tanh 再把残差压平。结果：再离群的输入也判 `mode=retrieve`、
+        # `gate≈0.47` → LTM 印迹门控（gate>0.8）**永不触发**（600 步实测
+        # 0.67%），1B 记忆栈空转。
+        # 修法：新颖性看**稀疏激活模式是否见过**（连续幅值不可靠，模式可以）。
+        #   `_seen_sdr` = 已出现的 SDR 支撑集哈希集合（有界，LRU 式淘汰）；
+        #   新支撑集 → novelty 1.0（印迹门控放行）；见过 → 按近期命中率衰减。
+        # ⚠ 默认开启（`sdr_novelty=True`）：这是**缺失能力**的修复，不是可选优化。
+        #   关闭时逐位回到旧行为（只用 surprise）。
+        # ⚠ 标志名 `_sdr_nov_on` 与方法名 `_sdr_novelty` **必须不同**——
+        #   同名会把 bool 绑到方法位置上（实测 TypeError: 'bool' object
+        #   is not callable）。
+        self._sdr_nov_on = bool(getattr(cfg, "sdr_novelty", True))
+        self._seen_sdr: dict[int, int] = {}         # hash → 最近一次命中的 step
+        self._seen_cap = int(getattr(cfg, "sdr_novelty_cap", 65536))
+        self._nov_hits = 0                          # 诊断：命中已见模式的次数
+        self._nov_miss = 0                          # 诊断：新模式次数
+
         # P194 (Q1)：微批量累积缓冲——主干/记忆仍按 token 严格保序（脑同构：
         # 微小兴奋性神经元簇并行放电的抽象），仅读出梯度累积到 B 步平均提交。
         self._micro_batch = int(getattr(cfg, "micro_batch", 1))
@@ -132,6 +153,61 @@ class PHDNet:
         # P115：滑窗计时（与 _prof 并行；_prof 是全程累计、从不清零）
         self._prof_win: dict = {}
         self._prof_win_n = 0
+
+    # ---------- P197：SDR 支撑集新颖性（海马模式分离）----------
+    def _sdr_novelty(self, rate: np.ndarray) -> float:
+        """当前顶层 SDR 支撑集的新颖度 ∈ [0,1]（1 = 从未见过）。
+
+        实现：支撑集（rate>0 的下标集合）经**顺序无关**的哈希聚合
+        （`np.bitwise_xor.reduce` 的位置哈希 —— 集合的对称函数），查
+        `_seen_sdr` 表。命中 → 0.0（熟悉）；未命中 → 1.0（新颖）并登记。
+        表有界（`_seen_cap`），满了按**最旧命中**淘汰（LRU 语义：
+        久未出现的模式让位，符合"少用即忘"）。
+
+        ⚠ 为什么不用连续幅值：M1 的 k-WTA + 层内 min-max 归一化把输入
+        绝对幅度抹掉（实测 2σ 与 10σ 的 surprise 只差 1.8%），
+        连续量在新颖性上是**死的**；稀疏模式的组合空间才是活的。
+        """
+        sup = np.nonzero(rate > 0.0)[0]
+        if sup.size == 0:
+            return 0.0
+        # 位置哈希（顺序无关的集合摘要）：64-bit mix，冲突概率 ~2^-64
+        h = int(np.bitwise_xor.reduce(
+            (sup.astype(np.uint64) * np.uint64(0x9E3779B97F4A7C15))
+            & np.uint64(0xFFFFFFFFFFFFFFFF)))
+        t = self.step_count
+        if h in self._seen_sdr:
+            self._nov_hits += 1
+            self._seen_sdr[h] = t                 # LRU：刷新命中时间
+            return 0.0
+        self._nov_miss += 1
+        if len(self._seen_sdr) >= self._seen_cap:
+            # 淘汰最旧命中（LRU）。_seen_cap 默认 65536 → 这一步是
+            # O(cap) 扫描；仅在**装满后**每次新模式触发一次。
+            # ⚠ 不用 heapq：命中刷新要改堆（O(log n) 但常数更大），
+            #   而 65536 的 min() 扫描实测 ~1 ms，与新模式的出现频率
+            #   （训练早期密集、后期稀疏）相比可忽略。
+            oldest = min(self._seen_sdr, key=self._seen_sdr.get)
+            del self._seen_sdr[oldest]
+        self._seen_sdr[h] = t
+        return 1.0
+
+    def _peek_sdr_novelty(self, rate: np.ndarray) -> float:
+        """只读版新颖性查询：**不登记**新模式（评估前向不得污染训练期集合）。"""
+        sup = np.nonzero(rate > 0.0)[0]
+        if sup.size == 0:
+            return 0.0
+        h = int(np.bitwise_xor.reduce(
+            (sup.astype(np.uint64) * np.uint64(0x9E3779B97F4A7C15))
+            & np.uint64(0xFFFFFFFFFFFFFFFF)))
+        return 0.0 if h in self._seen_sdr else 1.0
+
+    def novelty_stats(self) -> dict:
+        """新颖性检测的诊断计数（命中 / 新模式 / 表占用）。"""
+        return {"seen_hits": self._nov_hits, "novel_miss": self._nov_miss,
+                "table_size": len(self._seen_sdr),
+                "table_cap": self._seen_cap,
+                "enabled": self._sdr_nov_on}
 
     # ---------- P35 分段计时 ----------
     def _prof_t(self, name: str):
@@ -305,11 +381,22 @@ class PHDNet:
         seq_err = 1.0 - cos
 
         surprise = float(np.linalg.norm(cache["e0"]) / np.sqrt(len(cache["e0"])))
+        # P197：SDR 支撑集新颖性（补偿 surprise 的幅度盲区，见 _sdr_novelty）。
+        # 只读路径也计算（它不改状态，纯粹是查表 + 命中计数；但**不登记**
+        # 新模式——那会让评估前向污染训练期的"已见"集合）。
+        novelty = (self._sdr_novelty(rate) if self._sdr_nov_on else 0.0) \
+            if not readonly else self._peek_sdr_novelty(rate)
         if not readonly:
             _p = self._prof_t('M5_mod')
             gate, mode = self.modulator.observe(surprise)    # 4. M5 神经调制
             if cfg.multi_modulation:
                 self._last_da = self.modulator.da           # DA 巩固信号（供 sleep 回放）
+            # P197：新颖性**覆盖**调制器的模式判决——SDR 支撑集从未出现 ⇒
+            # 强行 encode（印迹门控放行）。连续幅值的 surprise 判不出这个
+            # （实测 10σ 输入 surprise 只比 1σ 高 1.8%，见 _sdr_novelty）。
+            if novelty > 0.5:
+                mode = "encode"
+                gate = max(gate, float(cfg.novelty_gate_floor))
             self._prof_end('M5_mod', _p)
         else:
             gate, mode = 0.0, ""                             # 只读：不更新调制器内部状态

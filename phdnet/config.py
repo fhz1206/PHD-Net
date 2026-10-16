@@ -62,11 +62,7 @@ class PHDNetConfig:
     readout_w_clip: float = 0.0 # C8：读出权重范数上限（0=关闭，保持旧行为）
 
     # 路线图 M1 升级（2026-09-18，三项开关默认关闭 = 旧行为，非破坏）
-    task_modulation: bool = False    # T1.3 误差广播调制：读出 NLL z 分数门控 PC/STDP 学习率
-    error_gated_memory: bool = False # T1.3 错误驱动写入：WM 写入/LTM 印迹门控改用任务误差（滞后一步）
-    ltm_imprint_gate: float = 0.8    # LTM 印迹的 mem_gate 阈值（2026-09-25 审计：默认 0.8 下
-                                     #   调制器 z 分布 std≈0.32 → gate>0.8 仅 ~0.4% 触发，
-                                     #   big_ltm 容量栈在 LM 训练中几乎从不印迹；调低以激活）
+    # 定义已下移到 P197 一节
     pred_in_readout: bool = False    # T3.1 预测通路三拼：h = [r2 ; WM ; STDP 时序预测]
                                      #   （首版用 LTM 原始召回向量，实测噪声压垮读出头，已修订）
     task_mod_gain: float = 2.0       # 任务误差 z → 门控的 sigmoid 增益
@@ -181,6 +177,42 @@ class PHDNetConfig:
     readout_shadow_refresh: int = 8       # 影子重量化间隔（步；DeepSeek refresh）
 
     # ───────────────────────────────────────────────────────────────────────
+    # P197（2026-10-15）：**缺失能力补齐**——让「会话中学习」真正发生。
+    # 诊断结论（本会话实测）：1B 预设下 LTM 印迹触发率 **0.67%**（600 步
+    # 只 4 次），1B 记忆栈几乎完全空转；根因是 surprise 对输入幅度盲视
+    # （M1 的 k-WTA + min-max 归一化抹掉幅度，实测 2σ→0.164 / 10σ→0.167）。
+    # ───────────────────────────────────────────────────────────────────────
+
+    # (1) SDR 支撑集新颖性检测（海马模式分离的工程等价物）。
+    #     新颖 = 顶层稀疏激活模式从未出现过 → 强制 encode + 放行印迹门控。
+    sdr_novelty: bool = True
+    sdr_novelty_cap: int = 65536    # 已见模式表容量（LRU 淘汰）
+    # 新颖时的 gate 下限（放行 ltm_imprint_gate=0.8 的门控）
+    novelty_gate_floor: float = 0.85
+
+    # (2) LTM 印迹门控：0.8 → 0.3。原值下 gate>0.8 仅 0.67% 触发
+    #     （审计记录 ~0.4%，本轮实测 0.67%）→ 容量栈空转。
+    #     配 (1) 的新颖性覆盖，写入由「真新颖」驱动而非「意外度幅值」。
+    ltm_imprint_gate: float = 0.3
+
+    # (3) 误差广播 + 错误驱动记忆（T1.1/T1.3，代码已实现但默认关）。
+    #     task_modulation：读出 NLL 的 z 分数门控本步主干学习率；
+    #     error_gated_memory：WM 写入/LTM 印迹门控改用任务误差。
+    #     两者合起来把**任务误差**接进 M1–M5 的门控（此前监督信号只到
+    #     读出头，主干收不到任何误差信息——「学什么」的缺失）。
+    task_modulation: bool = True
+    error_gated_memory: bool = True
+
+    # (4) 验证驱动睡眠巩固 + 回放稳定读出（T4.4 / PC 突破②）。
+    #     plateau_sleep：验证 PPL 平台期 → 触发 sleep() 巩固；
+    #     readout_replay：储备旧 (输入,目标) 对，周期性在当前表征下重训
+    #     读出——缓解「表征漂移 × 恒定读出率」的灾难性遗忘。
+    plateau_sleep: bool = True
+    readout_replay: bool = True
+    readout_master_weight: bool = False   # True = fp32 主权重 + 低精度影子（P195）
+    readout_shadow_refresh: int = 8       # 影子重量化间隔（步；DeepSeek refresh）
+
+    # ───────────────────────────────────────────────────────────────────────
     # 路线图第二轮全量优化（2026-09-19，M9）：补齐剩余轨道
     # T1.2 / T2.2 / T3.2 / T3.3 / T3.4 / T4.4 / T5.1–T5.3
     # + PC 突破三方向 + 情景记忆双向校验。全部默认关闭 = 旧行为（非破坏）。
@@ -212,7 +244,7 @@ class PHDNetConfig:
 
     # T4.4 验证驱动睡眠：train_stream 内按验证 PPL 平台期触发 sleep()
     #      （连续 plateau_patience 段无改善 → 巩固）。睡眠稳态调节的科学化时机。
-    plateau_sleep: bool = False
+    # P197: 定义已上移（:210，默认 True）
     plateau_patience: int = 2       # 连续 N 个验证段无改善才触发
 
     # O1-2：主干**结构性稀疏连接**（sparse connectivity）。
@@ -279,7 +311,7 @@ class PHDNetConfig:
     # PC 突破②：回放稳定读出——储备库保存旧 (输入, 目标) 对，每 replay_every
     #      步把一条旧输入在**当前表征**下前向（只读）并重训读出——
     #      以旧目标重新锚定漂移后的表征，缓解读出灾难性遗忘。
-    readout_replay: bool = False
+    # P197: 定义已上移（:211，默认 True）
     replay_buffer: int = 256        # 储备库容量（旧输入条数）
     replay_every: int = 4           # 每隔多少步重演一条
     replay_eta: float = 0.5         # 回放读出学习率倍率（防回放主导）

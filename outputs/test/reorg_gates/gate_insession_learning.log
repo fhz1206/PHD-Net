@@ -1,0 +1,57 @@
+==========================================================================
+P197 会话中学习能力（新颖性驱动印迹 + 误差广播）
+==========================================================================
+
+[A] SDR 支撑集新颖性（海马模式分离）
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+  PASS A1a 6 个互异输入 → 6 个新模式  [miss=6]
+  PASS A1b 重复输入 → 命中（熟悉化）  [hits=1]
+  PASS A2 只读路径不登记新模式（评估不污染训练期集合）
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+  PASS A3 LRU 淘汰到容量上限  [table=4/4]
+
+[B] LTM 印迹（旧默认 0.67% → 现在；smoke 档宽度）
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+[ltm-diag] imprints=10 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=428 k_hash=4
+[ltm-diag] imprints=20 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=632 k_hash=4
+[ltm-diag] imprints=30 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=772 k_hash=4
+[ltm-diag] imprints=40 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=848 k_hash=4
+[ltm-diag] imprints=50 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=880 k_hash=4
+[ltm-diag] imprints=60 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=924 k_hash=4
+[ltm-diag] imprints=70 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=932 k_hash=4
+[ltm-diag] imprints=80 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=944 k_hash=4
+[ltm-diag] imprints=90 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=968 k_hash=4
+[ltm-diag] imprints=100 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=980 k_hash=4
+[ltm-diag] imprints=110 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=980 k_hash=4
+[ltm-diag] imprints=120 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=996 k_hash=4
+[ltm-diag] imprints=130 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,004 k_hash=4
+[ltm-diag] imprints=140 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,004 k_hash=4
+[ltm-diag] imprints=150 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,008 k_hash=4
+[ltm-diag] imprints=160 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,008 k_hash=4
+[ltm-diag] imprints=170 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,012 k_hash=4
+[ltm-diag] imprints=180 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,012 k_hash=4
+[ltm-diag] imprints=190 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,012 k_hash=4
+  PASS B1 印迹触发率 > 30%（旧默认 0.67%）  [100.0% (200/200)]
+  PASS B2 LTM 表真的生长  [60,720 突触]
+[ltm-diag] imprints=200 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,012 k_hash=4
+  PASS B3 重复刺激不再持续印迹（熟悉化）  [60720 → 60720]
+
+[C] 会话中学习（读出头单对记忆）
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+  PASS C1 读出头学会映射（nll 降 > 50%）  [3.431 → 0.003]
+  PASS C2 不泛化到未见输入（防过拟合假象）  [nll=5.626]
+
+[D] 配置默认值
+  PASS D1a sdr_novelty 默认 True
+  PASS D1b ltm_imprint_gate 默认 0.3（旧 0.8）  [0.3]
+  PASS D1c task_modulation 默认 True
+  PASS D1d error_gated_memory 默认 True
+  PASS D1e plateau_sleep 默认 True
+  PASS D1f readout_replay 默认 True
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+  PASS D2a sdr_novelty=False → 不建表
+  PASS D2b 标志如实反映关闭态
+
+PASS: 17/17 项通过
+
+[stderr]

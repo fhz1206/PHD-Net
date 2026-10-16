@@ -306,11 +306,53 @@ def save_model(path: Path, lm, cfg, done: int, extra: dict | None = None,
     arrs["tok_max_len"] = np.array([lm.tok.seg.max_len], dtype=np.int64)
 
     # ── 运行时状态（缺任何一项，续训路径即分叉——对拍 _verify_roundtrip.py 抓出）──
-    if cfg.pc_predictive_target or cfg.multi_modulation or cfg.readout_replay:
-        raise NotImplementedError(
-            "pc_predictive_target / multi_modulation / readout_replay 开启时"
-            "存在未序列化的内部缓存（_prev_pc / 多通道调制器 / 回放储备库），"
-            "1B 档配置默认关闭；如需开启请先扩展 ckpt_1b 的状态覆盖。")
+    # P197：readout_replay 默认改为 True（PC 突破②），其储备库
+    # `net._replay_buf` = [(x0, target_idx), ...] **必须序列化**，否则
+    # 续训后回放分布断档。原实现是「检测到就 raise NotImplementedError」
+    # （把开关关掉来回避序列化）——那在默认开启时等于**每次保存都崩**。
+    # 改为真序列化：x0 堆成 (n, n_input) fp32，target_idx 单独一列。
+    _rb = getattr(net, "_replay_buf", None)
+    if _rb:
+        arrs["replay_x"] = np.stack([np.asarray(x0, dtype=np.float32)
+                                     for x0, _ in _rb])
+        arrs["replay_t"] = np.asarray([int(t) for _, t in _rb],
+                                      dtype=np.int64)
+    else:
+        arrs["replay_x"] = np.zeros((0, cfg.n_input), dtype=np.float32)
+        arrs["replay_t"] = np.zeros(0, dtype=np.int64)
+    # P197：回放 RNG 的**完整位发生器状态**也必须存——否则续训后
+    # `_replay_rng.integers()` 抽到与训练期**不同**的旧样本 → 读出权重
+    # 立刻分叉（门禁逐位对拍抓到 ro 不一致）。
+    # `bit_generator.state` 是**嵌套** dict：
+    #   {'bit_generator': 'PCG64',
+    #    'state': {'state': <128bit int>, 'inc': <128bit int>},
+    #    'has_uint32': 0/1, 'uinteger': <32bit int>}
+    # ⚠ 两个大整数是 **128-bit**（超出 uint64，实测溢出后 state 数字变了
+    #   → 下一次 draw 仍不同）。故用**十进制字符串**存（numpy unicode 数组，
+    #   allow_pickle=False 可读，`int(str)` 精确还原）。
+    try:
+        _st = net._replay_rng.bit_generator.state
+        _inner = _st.get("state", {})
+        arrs["replay_rng"] = np.array(
+            [str(int(_inner.get("state", 0))), str(int(_inner.get("inc", 0))),
+             str(int(_st.get("has_uint32", 0))), str(int(_st.get("uinteger", 0)))],
+            dtype=np.str_)
+    except Exception:                                   # noqa: BLE001
+        arrs["replay_rng"] = np.array(["0", "0", "0", "0"], dtype=np.str_)
+    # P197：SDR 新颖性表（`_seen_sdr`: hash → 最近命中 step）也必须存——
+    # 不恢复的话，续训后所有已见模式重新判「新颖」→ gate 被推到
+    # novelty_gate_floor、mode 强制 encode → STDP/LTM 学习轨迹分叉
+    # （门禁逐位对拍抓到 stdp 不一致，而 ro 一致——读出不看 gate）。
+    # 键是 64-bit 哈希（uint64），值是步数（uint64）。
+    _sd = getattr(net, "_seen_sdr", None)
+    if _sd:
+        arrs["novelty_k"] = np.fromiter(_sd.keys(), dtype=np.uint64,
+                                        count=len(_sd))
+        arrs["novelty_v"] = np.fromiter(_sd.values(), dtype=np.uint64,
+                                        count=len(_sd))
+    else:
+        arrs["novelty_k"] = np.zeros(0, dtype=np.uint64)
+        arrs["novelty_v"] = np.zeros(0, dtype=np.uint64)
     st = net.stdp
     # STDP 内部迹：短窗 pre/post、长窗（dual）、二阶矩（adaptive）、BCM 阈值、E/I 结构
     arrs["stdp_traces"] = np.stack([np.asarray(st.t_pre), np.asarray(st.t_post),
@@ -628,6 +670,34 @@ def load_model(path: Path, lm) -> dict:
             float(x) for x in z["net_scalars"])
         net._prev_rate[:] = z["net_prev_rate"]
         net._last_rate[:] = z["net_last_rate"]
+        # P197：回放储备库（readout_replay 默认开启；不恢复则续训后
+        # 回放分布从空开始 = 丢掉已积累的旧样本）。
+        _rbx = np.asarray(z["replay_x"]) if "replay_x" in z else None
+        _rbt = np.asarray(z["replay_t"]) if "replay_t" in z else None
+        if _rbx is not None and _rbt is not None and _rbx.size:
+            net._replay_buf = [(np.asarray(_rbx[i], dtype=float).copy(),
+                                int(_rbt[i])) for i in range(len(_rbt))]
+        elif hasattr(net, "_replay_buf"):
+            net._replay_buf = []
+        # P197：恢复回放 RNG 的**完整**位发生器状态（字符串精确还原 128-bit）
+        if "replay_rng" in z and hasattr(net, "_replay_rng"):
+            try:
+                _v = [str(s) for s in np.asarray(z["replay_rng"]).tolist()]
+                net._replay_rng.bit_generator.state = {
+                    "bit_generator": "PCG64",
+                    "state": {"state": int(_v[0]), "inc": int(_v[1])},
+                    "has_uint32": int(_v[2]), "uinteger": int(_v[3])}
+            except Exception:                           # noqa: BLE001
+                pass
+        # P197：恢复 SDR 新颖性表（不恢复则已见模式重判新颖 → 轨迹分叉）
+        if "novelty_k" in z and hasattr(net, "_seen_sdr"):
+            try:
+                _nk = np.asarray(z["novelty_k"]).tolist()
+                _nv = np.asarray(z["novelty_v"]).tolist()
+                net._seen_sdr = {int(k): int(v)
+                                 for k, v in zip(_nk, _nv)}
+            except Exception:                           # noqa: BLE001
+                pass
     return meta
 
 

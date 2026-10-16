@@ -8,20 +8,20 @@ P195 主权重 + 低精度影子（DeepSeek-V4-Flash 模式）不变量
   PASS A1a master_weight 标志为真
   PASS A1b master 是 fp32  [dtype=torch.float32]
   PASS A1c 影子是 fp8 存储  [torch.uint8]
-  PASS A2 更新落在 master 上  [max|Δ|=5.650e-02]
+  PASS A2 更新落在 master 上  [max|Δ|=5.684e-02]
   PASS A3a 影子在 refresh 间隔内不变（不每步重量化）
   PASS A3b 影子到间隔后刷新
-  PASS A4 master 保有亚 fp8 粒度的值（非目标行更新未被舍入）  [231/1088 个 |w|<2^-6]
+  PASS A4 master 保有亚 fp8 粒度的值（非目标行更新未被舍入）  [223/1088 个 |w|<2^-6]
 
 [B] 更新分派与存储 dtype 无关（BugC 回归）
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
-  PASS B1 fp8: master 被更新  [max|Δ|=5.583e-02]
+  PASS B1 fp8: master 被更新  [max|Δ|=5.600e-02]
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
-  PASS B1 fp32: master 被更新  [max|Δ|=5.583e-02]
+  PASS B1 fp32: master 被更新  [max|Δ|=5.599e-02]
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
-  PASS B1 fp16: master 被更新  [max|Δ|=5.583e-02]
+  PASS B1 fp16: master 被更新  [max|Δ|=5.599e-02]
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
-  PASS B1 bf16: master 被更新  [max|Δ|=5.583e-02]
+  PASS B1 bf16: master 被更新  [max|Δ|=5.599e-02]
 
 [C] 检查点往返（master fp32 逐位恢复）
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
@@ -43,7 +43,7 @@ P195 主权重 + 低精度影子（DeepSeek-V4-Flash 模式）不变量
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
   PASS D2 NPU Graph 捕获前 master 已建（或图未启用）  [graph_ready=False]
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
-  PASS D3 micro_batch 的 commit_grad 走 master  [Σ|W|=43.747]
+  PASS D3 micro_batch 的 commit_grad 走 master  [Σ|W|=43.917]
 
 [E] 默认（master off）零参与
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）

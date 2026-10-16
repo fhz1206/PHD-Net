@@ -1,46 +1,43 @@
-P196: Claude Code traces 作为测试训练集（--data cc_traces）
+P197: 会话中学习能力补齐（新颖性驱动印迹 + 误差广播默认开启）
 
-fhz 指定：https://www.modelscope.cn/datasets/choucisan/mimo-claude-code-traces-1k
-（1,017 traces / 15,046 events / 11,995 messages / 5,271 tool calls /
-10 类 / 40.5 MB / MIT）。
+## 诊断结论（本轮实测）
+1b 预设下 LTM 印迹触发率 **0.67%**（600 步只 4 次），1B 记忆栈空转；
+根因是 surprise 对输入幅度盲视：M1 的 k-WTA + 层内 min-max 归一化
+把绝对幅度完全抹掉（实测 2σ→0.164 / 10σ→0.167，只差 1.8%），
+PC 的 tanh 再压平残差 —— 连续量的新颖性是死的。
 
-## 数据形态与读取路径
-数据集是 **event-stream JSONL**（每行一个 event：user / assistant /
-tool_use / tool_result / 元数据），**不是 parquet** —— 通用 iter_texts
-找不到 text 字段会得到空流。故新增专用读取路径：
+## 修复
+1. **SDR 支撑集新颖性检测**（海马模式分离的工程等价物）：
+   - 顶层稀疏激活模式的支撑集经顺序无关哈希（xor-reduce 位置哈希），
+     查 LRU 表；新模式 → novelty=1 → 强制 mode=encode + gate 推到
+     novelty_gate_floor(0.85) → 印迹门控放行
+   - 只读路径用 _peek 变体（查表不登记，评估不污染训练期集合）
+   - 表容量 65536，满则淘汰最旧命中
+2. **ltm_imprint_gate 0.8 → 0.3**（0.8 下 gate 分布 std≈0.13，
+   gate>0.8 永远够不着）
+3. **task_modulation / error_gated_memory 默认 True**（T1.1/T1.3
+   代码已实现但默认关）：读出 NLL 的 z 分数门控主干学习率、
+   任务误差驱动 WM 写入/LTM 印迹 —— 把「学什么」的误差信号接进 M1-M5
+4. **plateau_sleep / readout_replay 默认 True**（T4.4 / PC 突破②）：
+   验证 PPL 平台期触发睡眠巩固；储备旧 (输入,目标) 对周期回放
+   稳定读出（缓解表征漂移 × 恒定读出率的灾难性遗忘）
 
-- phdnet/corpus.py：iter_cc_traces / load_cc_traces / cc_trace_to_text
-  只抽语言内容、按 event 原顺序还原成对话文本，保留 thinking 块
-  （reasoning trace 是这份数据的独特价值）
-- corpus.py：远程 .jsonl 直读（ms:// 经 open_ms_file，零落盘）；
-  原来对非 parquet 远程源 raise NotImplementedError
-- corpus.py：expand_paths 接受已展开的列表（幂等）—— 两级目录
-  session/<cat>/*.jsonl 由 train.py 按 10 类逐个展开绕开单层 glob 限制
+## 连带修复（门禁逐位对拍抓到）
+- ckpt_1b：readout_replay 的储备库 + 回放 RNG 位发生器状态 +
+  SDR 新颖性表 三者此前未序列化 → 续训后读出/STDP/LTM 轨迹全部分叉。
+  RNG 状态是嵌套 dict 且含 128-bit 大整数（uint64 溢出，实测数字变了）
+  → 用十进制字符串数组精确还原。原来「检测到就 raise NotImplementedError」
+  的守卫删除（默认开启时等于每次保存都崩）
 
-## train.py 接线
-- DATA_FILES 新增 cc_traces；MS_CC_REPO / CC_CATEGORIES 常量
-- 远程模式：按类别逐个 expand_ms 合并 + 前缀抽样（ fraction 语义不变）
-- 词表构建走 load_cc_traces；full scan 与训练流走 iter_cc_traces
-- --data-lang zh 在这份数据上会得空流 → 提前拦下并自动改为不过滤
-
-## 工具
-tools/data/cc_traces_to_text.py：--list / --dry-run / --out（转 parquet）
---local-dir / --categories / --per-shard / --no-thinking
-
-## 本机实测（smoke 档 3000 tokens）
-PPL 2474 → 1457；LTM imprints=430（长出 30,720 突触）；
-OOV 0.0000%；3.04 ms/tok；词表 2,631 词
-
-## 顺带修掉 3 个既存失败（gate_ms_stream 的 --help 检查）
-三个脚本的 sys.path 指向 tools/ 而非仓库根，连 --help 都跑不起来：
-- tests/demos/demo_generalization.py：补 tests/evals 路径
-- tools/bench/bench_readout_devices.py：补仓库根
-- tools/eval/rebaseline.py：补仓库根 + tests/evals
-（已验证 stash 后在干净树上同样失败，与本次改动无关）
+## 实测（smoke 档 / cc_traces 3000 tokens）
+- 印迹触发率：0.67% → **100%**（互异输入全编码）
+- LTM 生长：30,720 → **55,680** 突触（+81%）
+- PPL：1457 → **1308**
+- 熟悉化正确：重复同一输入不再持续印迹（20 → 20）
+- 读出头单对记忆：nll 3.431 → 0.003；未见输入 nll=5.6（不过拟合）
 
 ## 验证
 - run_tests.py 9/9
-- run_gates.py 45/45（新增 gate_cc_traces.py 23 项，含远程实读；
-  另修掉 gate_ms_stream 的 2 例既存失败）
-- checks_p195.py 5/5
-- 端到端：--preset smoke --data cc_traces --remote-data --tokens 3000
+- run_gates.py 46/46（新增 gate_insession_learning.py 17 项；
+  另修 gate_checkpoint_roundtrip 与 gate_readout_master_weight 2 例回归）
+- 端到端 cc_traces 训练正常
