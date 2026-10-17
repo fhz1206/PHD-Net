@@ -7,6 +7,12 @@ numpy>=2.0          # 实测 2.5.3
 numba>=0.60         # 实测 0.67.0（STDP/CSR/读出融合核；缺失自动回退 numpy）
 psutil>=5.9         # 实测 7.2.2（并行 worker 数探测）
 pyarrow>=14.0       # 实测 25.0.1（语料 parquet 流式读取）
+Cython>=3.0         # 实测 3.3.0（P192 CPU 核：M2/M3 加速，缺失自动回落 numba；
+                    #   服务器 2026-10-17 实测缺失 → [p192] active=False）
+                    #   ⚠ 装完首次运行会**自动编译扩展**，需要 gcc（Linux）/MSVC（Windows）；
+                    #   编译失败不影响训练（回落 numba），只是慢。
+                    #   ⚠ pip 装包务必用与训练相同的解释器：
+                    #   /usr/local/python3.11.14/bin/python3 -m pip install -r requirements.txt
 
 # ── 可选依赖 ──
 # torch：硬件后端栈（CUDA/ROCm/昇腾 NPU/CPU）与 nanoGPT 对照模型所需；
