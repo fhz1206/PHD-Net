@@ -1465,9 +1465,16 @@ def main() -> None:
                         print(f"[probe] 探针不可用（不影响训练）："
                               f"{type(_pe).__name__}: {str(_pe)[:90]}", flush=True)
 
-            if (i - done) % args.log_every == 0 and seg_nll:
+            if (i - done) % args.log_every == 0:
+                # P198：`loop:`/`segments:` 不再挂在 `seg_nll` 非空上——
+                # 服务器实测（train_1b_1b_pretrain_20261017-132908.log）：
+                # 930 步无一行进度输出。原因链：计时行只在 `seg_nll` 非空时打，
+                # 而 seg_nll 只在 trainable 步积累；一旦语料/掩码让前 500 步
+                # 全部 OOV 跳过，进度行与分段行**一起消失**（看起来像
+                # --step-profiling 没输出）。用时信息与 PPL 是两回事，
+                # 应该独立可见。
                 k = min(args.log_every, len(seg_nll))
-                ppl = float(np.exp(np.mean(seg_nll[-k:])))
+                ppl = float(np.exp(np.mean(seg_nll[-k:]))) if seg_nll else float("nan")
                 spent = time.perf_counter() - t_start
                 ms = spent / max(1, i - done) * 1000
                 # P20：读出分项（后端 + 设备 + 占比）——直接看出加速是否生效、
