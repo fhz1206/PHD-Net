@@ -1432,7 +1432,18 @@ def main() -> None:
             #   **只能用差值**做 A/B。
             if args.probe_every > 0 and i % args.probe_every == 0:
                 try:
-                    from ppl_probe import probe_nll
+                    # P198：`ppl_probe` 在 **tools/eval/** 下，而 sys.path 只
+                    # 加了 `tools/` → `from ppl_probe import ...` 恒
+                    # ModuleNotFoundError，`--probe-every` **从未工作过**
+                    # （实测：日志打「探针不可用」然后静默跳过）。
+                    # 文档一直把 probe_PPL 指定为 A/B 判据（P146），
+                    # 所以这是「判据工具实际不可用」的缺口。
+                    try:
+                        from ppl_probe import probe_nll
+                    except ModuleNotFoundError:
+                        # P198：ppl_probe.py 实际在 tools/eval/（不在 tools/ 根）
+                        sys.path.insert(0, str(_ROOT / "tools" / "eval"))
+                        from ppl_probe import probe_nll
                     _pr = probe_nll(lm, args.probe_tokens)
                     if _pr["n_tok"]:
                         _probe_ppl = _pr["ppl"]

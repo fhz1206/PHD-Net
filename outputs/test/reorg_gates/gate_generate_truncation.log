@@ -1,0 +1,22 @@
+==========================================================================
+P198 generate() top-k / nucleus 截断
+==========================================================================
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+
+[A] 截断语义
+  PASS A1 topk=1 → 贪心（与 rng 无关，确定性）
+  PASS A2 topk=3 → 恰 3 个非零  [3]
+  PASS A5a 截断后归一（topk）  [1.000000000000]
+  PASS A3 topp=0.9 → 最小覆盖集  [n=7 cum[-1]=0.9103]
+  PASS A5b 截断后归一（topp）
+  PASS A4 topk+topp 同时给 → 交集（不比任一单独更宽）  [n=5 vs topk-only=5 topp-only=7]
+  PASS A6 都关闭 → 逐位等于原分布
+  PASS A7 非法值（topk<0/topp>1）→ 按关闭处理
+  PASS A8 输出全是词表内 token
+  PASS A9 长度正确（seed + n_tokens）  [31]
+  PASS B1 全零输入 → 均分回退（不产生 NaN）  [sum=1.000000]
+
+PASS: 11/11 项通过
+
+[stderr]
+<string>:147: RuntimeWarning: eta_oja=0.05 > 0：上行识别权重 Oja 学习在生产规模会正反馈发散（P198 实测：3000 步 probe_PPL 9.1e11）。小规模/短跑的机制测试可忽略本警告；生产训练请保持 0。

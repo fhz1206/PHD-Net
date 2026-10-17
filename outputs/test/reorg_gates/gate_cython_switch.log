@@ -14,10 +14,10 @@ P192 cython-kernels switch gate
   PASS E4 auto 下 STDP 权重仍非负（clip 到 [0, w_max] 生效）  [min=0.000e+00]
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
   PASS E5 M2 plain 确实调用 Cython [plain+encoder=fp32]  [调用 64 次]
-  PASS E6 生产组合能跑/有限/容差一致 [plain+encoder=fp32]  [max|d|=5.960e-08（非逐位）]
+  PASS E6 生产组合能跑/有限/容差一致 [plain+encoder=fp32]  [max|d|=8.941e-08（非逐位）]
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
   PASS E5 M2 plain 确实调用 Cython [plain+encoder=fp64]  [调用 64 次]
-  PASS E6 生产组合能跑/有限/容差一致 [plain+encoder=fp64]  [max|d|=5.960e-08（非逐位）]
+  PASS E6 生产组合能跑/有限/容差一致 [plain+encoder=fp64]  [max|d|=8.941e-08（非逐位）]
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
   PASS E6 生产组合能跑/有限/容差一致 [fused+encoder=fp32]  [max|d|=0.000e+00（非逐位）]
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）

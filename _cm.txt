@@ -1,43 +1,38 @@
-P197: 会话中学习能力补齐（新颖性驱动印迹 + 误差广播默认开启）
+P198: 修复 eta_oja 正反馈发散 + 生成采样 top-k/nucleus + 词表预算诊断
 
-## 诊断结论（本轮实测）
-1b 预设下 LTM 印迹触发率 **0.67%**（600 步只 4 次），1B 记忆栈空转；
-根因是 surprise 对输入幅度盲视：M1 的 k-WTA + 层内 min-max 归一化
-把绝对幅度完全抹掉（实测 2σ→0.164 / 10σ→0.167，只差 1.8%），
-PC 的 tanh 再压平残差 —— 连续量的新颖性是死的。
+## 诊断（生产规模实测，n_top=256 / 40K token / cc_traces）
+P194 的 eta_oja=0.02 导致正反馈发散：
+  eta_oja>0 → PC 上行识别权重改动 pc.infer 前向 → r1/r2 喂 STDP + 读出
+  → 读出为拟合而拉大权重 → 反馈环 → 3000 步 probe_PPL 从 3403 → 9.1e11
+  （logits 动态范围 56，softmax 后非最大项全部下溢为 0，nll=27.6）
+
+  eta_oja=0 → 3000 步 probe_PPL 916 ✅（40K token 后 PPL 389，bigram 78%）
+  与 homeostasis/eta_pc 无关（消融实测）
 
 ## 修复
-1. **SDR 支撑集新颖性检测**（海马模式分离的工程等价物）：
-   - 顶层稀疏激活模式的支撑集经顺序无关哈希（xor-reduce 位置哈希），
-     查 LRU 表；新模式 → novelty=1 → 强制 mode=encode + gate 推到
-     novelty_gate_floor(0.85) → 印迹门控放行
-   - 只读路径用 _peek 变体（查表不登记，评估不污染训练期集合）
-   - 表容量 65536，满则淘汰最旧命中
-2. **ltm_imprint_gate 0.8 → 0.3**（0.8 下 gate 分布 std≈0.13，
-   gate>0.8 永远够不着）
-3. **task_modulation / error_gated_memory 默认 True**（T1.1/T1.3
-   代码已实现但默认关）：读出 NLL 的 z 分数门控主干学习率、
-   任务误差驱动 WM 写入/LTM 印迹 —— 把「学什么」的误差信号接进 M1-M5
-4. **plateau_sleep / readout_replay 默认 True**（T4.4 / PC 突破②）：
-   验证 PPL 平台期触发睡眠巩固；储备旧 (输入,目标) 对周期回放
-   稳定读出（缓解表征漂移 × 恒定读出率的灾难性遗忘）
+1. config.py：eta_oja 库默认 0.02 → 0.0；__post_init__ 对 >0 发
+   RuntimeWarning（不 raise——发散与规模相关，小规模机制测试合法用 >0）
+2. config_1b.py：build_cfg 显式 eta_oja=0.0（eta_pc=0.02 保留，安全）
 
-## 连带修复（门禁逐位对拍抓到）
-- ckpt_1b：readout_replay 的储备库 + 回放 RNG 位发生器状态 +
-  SDR 新颖性表 三者此前未序列化 → 续训后读出/STDP/LTM 轨迹全部分叉。
-  RNG 状态是嵌套 dict 且含 128-bit 大整数（uint64 溢出，实测数字变了）
-  → 用十进制字符串数组精确还原。原来「检测到就 raise NotImplementedError」
-  的守卫删除（默认开启时等于每次保存都崩）
+## 新增能力
+3. word_lm.py：generate() 加 top-k / nucleus(top-p) 截断
+   —— 缺它时温度采样把长尾分布放大成「字符碎片乱码」（bigram 5%）
+   gate_generate_truncation.py 11 项
+4. tools/eval/eval_generation.py：生成能力评估工具
+   （ckpt+词表快照 → 自回归采样 → bigram 合法率/distinct/未训练对照）
+5. tools/diag_vocab_budget.py：词表规模 vs 训练预算诊断
+   （本会话实测：曝光 <30 → PPL 接近随机；≥100 → 可学）
+6. phdnet/corpus.py：iter_cc_traces 支持本地 parquet（P196 转换产物）
+   —— 此前按 utf-8 文本读 parquet 会 UnicodeDecodeError
+7. train/train.py：--probe-every 的 import 修复（ppl_probe 在 tools/eval/
+   而非 tools/ 根 → 此前 ModuleNotFoundError → 探针从未工作）
 
-## 实测（smoke 档 / cc_traces 3000 tokens）
-- 印迹触发率：0.67% → **100%**（互异输入全编码）
-- LTM 生长：30,720 → **55,680** 突触（+81%）
-- PPL：1457 → **1308**
-- 熟悉化正确：重复同一输入不再持续印迹（20 → 20）
-- 读出头单对记忆：nll 3.431 → 0.003；未见输入 nll=5.6（不过拟合）
+## 实测（3392 词表 / 40K token / 冻结主干）
+  初始 PPL 3403（≈随机）→ 1000: 1512 → 5000: 620 → 30000: 389
+  bigram 合法率 78%（旧 5-13%）；distinct 76.5%
 
 ## 验证
 - run_tests.py 9/9
-- run_gates.py 46/46（新增 gate_insession_learning.py 17 项；
-  另修 gate_checkpoint_roundtrip 与 gate_readout_master_weight 2 例回归）
-- 端到端 cc_traces 训练正常
+- run_gates.py 47/47（新增 gate_generate_truncation.py）
+- docs/PHD-Net_性能评估与迭代方案.md §6.4 P198 章节
+- datasets/README.md P198 预算建议表

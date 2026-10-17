@@ -316,9 +316,29 @@ def iter_cc_traces(path, thinking: bool = True):
     """流式迭代 Claude Code traces → 每条 trace 一段对话文本。
 
     ``path`` 支持单个文件 / glob / **已展开的文件列表**（与 ``iter_texts``
-    同口径）。本地与远程（``ms://``，HTTP Range 零落盘）均可。
+    同口径）。三种来源均可：
+      · 远程 ``ms://.../*.jsonl``（HTTP Range 零落盘）；
+      · 本地 ``*.jsonl``（原始 event-stream）；
+      · 本地 ``*.parquet``（P196 转换产物：列 ``text`` 已是转换后的文本，
+        直接 yield，**不再走 JSONL 解析**）。
+
+    ⚠ 本地 parquet 分支是必需项：训练一旦用了 `--data cc_traces` 的本地
+    副本模式（`datasets/cc_traces/cc_000.parquet`），`DATA_FILES` 的 glob
+     就是 parquet，而 parquet 是**二进制**——按 utf-8 文本读会
+     `UnicodeDecodeError`（P198 实测）。
     """
     for p in expand_paths(path):
+        suf = p.suffix.lower()
+        if suf == ".parquet":
+            # 已转换的文本列（`tools/data/cc_traces_to_text.py` 的产物）
+            pf = open_parquet_source(p)
+            names = pf.schema_arrow.names
+            col = "text" if "text" in names else 0
+            for batch in pf.iter_batches(batch_size=256, columns=[col] if col == "text" else None):
+                for v in batch.column(0 if col == 0 else col).to_pylist():
+                    if v and v.strip():
+                        yield v
+            continue
         if is_remote_path(p):
             from .ms_stream import open_ms_file
             with open_ms_file(str(p)) as fh:

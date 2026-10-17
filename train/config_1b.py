@@ -89,7 +89,17 @@ def build_cfg(preset: str = "1b", width: int = 0, big_n: int = 0,
     return PHDNetConfig(
         n_sdr=w, n_mid=w, n_top=w,
         k_sparse=max(8, w // 8),                 # 稀疏编码 6.25%（库默认 16，此处按档位放大）
-        eta_pc=0.02, eta_oja=0.02,               # P194：表征发育（pc_dev_steps 窗口后冻结）
+        # P194 起 eta_pc=0.02（下行生成权重可塑，pc_dev_steps 窗口后冻结）。
+        # ⚠⚠ **P198 修复：eta_oja 必须保持 0**（2026-10-17 实测）。
+        #   eta_oja>0（上行识别权重 Oja 学习）会改 `pc.infer` 的前向计算，
+        #   而 r1/r2 又喂 STDP + 读出 → **正反馈发散**：
+        #     eta_oja=0.02 → 3000 步 probe_PPL 9.1e11（logits 动态范围 56，
+        #                    softmax 后非最大项全下溢为 0，nll=27.6）
+        #     eta_oja=0    → 3000 步 probe_PPL 916 ✅
+        #   与 homeostasis 无关（关掉也发散的），与 eta_pc 无关（0.005 也差）。
+        #   → 下行（eta_pc）安全、上行（eta_oja）危险，二者必须分开决策。
+        #   库默认已改 0 且 __post_init__ 对 >0 直接 raise（P198）。
+        eta_pc=0.02,
         pc_dev_steps=20000,                      # P194 (Q2)：前 2 万步余弦退火，之后冻结
         eta_stdp=0.02, seed=seed,
         pred_in_readout=True,

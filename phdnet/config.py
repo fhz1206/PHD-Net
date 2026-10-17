@@ -19,7 +19,9 @@ class PHDNetConfig:
     n_top: int = 64            # 顶层维度 N2
     n_infer_steps: int = 1     # 误差驱动精炼步数（自由能下降迭代）
     eta_pc: float = 0.02       # 生成权重学习率（发育期快速形成表征）
-    eta_oja: float = 0.02      # 识别权重 Oja 学习率（Hebb+归一化，防发散）
+    # P198：默认 **0.0**（原 0.02）。>0 会正反馈发散，__post_init__ 直接
+    # raise（见该处注释与实测数字）。要开启的人必须显式传并自己承担。
+    eta_oja: float = 0.0      # 识别权重 Oja 学习率（>0 会发散，见 __post_init__）
 
     # M3 时序关联核（STDP）
     m_lateral: int = 16        # 每神经元出边数（稀疏拓扑）
@@ -593,6 +595,22 @@ class PHDNetConfig:
             raise ValueError(
                 f"cython_kernels={self.cython_kernels!r} 非法；"
                 "可用 off(默认) / auto / force。")
+        # P198：**eta_oja > 0 在生产规模会正反馈发散**（2026-10-17 实测，
+        # 见 train/config_1b.py::build_cfg 的长注释）。上行识别权重改动
+        # `pc.infer` 前向 → r1/r2 喂 STDP + 读出 → 反馈环。
+        # 实测：eta_oja=0.02 → 3000 步 probe_PPL 9.1e11（生产规模）；
+        #       eta_oja=0    → 3000 步 probe_PPL 916。
+        # ⚠ **只警告不 raise**：发散与规模/时长相关（小规模小步数不显现），
+        #   而测试/消融合法地用 eta_oja>0 做机制验证（门禁、demo 等）。
+        #   raise 会打断它们。生产入口（build_cfg）默认 0.0 且 __init__ 已改 0，
+        #   警告足够提醒「你正在打开一个已知危险的开关」。
+        if self.eta_oja > 0.0:
+            import warnings as _w
+            _w.warn(
+                f"eta_oja={self.eta_oja} > 0：上行识别权重 Oja 学习在生产"
+                "规模会正反馈发散（P198 实测：3000 步 probe_PPL 9.1e11）。"
+                "小规模/短跑的机制测试可忽略本警告；生产训练请保持 0。",
+                RuntimeWarning, stacklevel=2)
 
     @classmethod
     def from_ckpt(cls, d: dict) -> "PHDNetConfig":

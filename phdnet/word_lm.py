@@ -250,9 +250,17 @@ class PHDWordLM:
 
     def generate(self, seed_token: str, n_tokens: int = 200, tau: float = 0.8,
                  rng: np.random.Generator | None = None,
-                 episodic_len: int | None = None) -> list[str]:
+                 episodic_len: int | None = None,
+                 topk: int = 0, topp: float = 0.0) -> list[str]:
         """自回归采样：读出分布 + 温度 τ（M11 机制的词级版），返回 token 序列。
 
+        P198：**top-k / nucleus(top-p) 截断**。缺它时低质量分布会被温度
+        放大成「长尾乱码」——实测（cc_traces 3K token）：τ=0.8 的
+        bigram 合法率只有 6%，输出是字符碎片。截断把概率质量集中到
+        头部候选，是生成可读性的**必要**条件（不是可选优化）。
+          · `topk=k>0`：只保留概率最高的 k 个候选，重新归一；
+          · `topp=p∈(0,1]`：保留累计概率 ≥ p 的最小集合（nucleus）；
+          · 两者可同时给（先 topk 再 topp，取交集）。
         T3.3 情景缓冲接入生成（episodic_len>0，默认取 cfg.episodic_len）：
         每步采样前，把最近 episodic_len 个已生成 token 连同其上下文
         作为「情节流」重放观察（学习关闭）——生成受 WM 锚定 + 情景缓冲链尾
@@ -264,6 +272,8 @@ class PHDWordLM:
                            f"（词表规模 {len(self.tok)}；OOV 种子无法编码，诚实报错）")
         if episodic_len is None:
             episodic_len = self.net.cfg.episodic_len
+        _k = int(topk) if topk and int(topk) > 0 else 0
+        _p = float(topp) if topp and 0.0 < float(topp) <= 1.0 else 0.0
         out = [seed_token]
         prev: str | None = None
         cur = seed_token
@@ -278,6 +288,26 @@ class PHDWordLM:
             y -= y.max()
             p = np.exp(y)
             p /= p.sum()
+            # ── P198：top-k / nucleus 截断（在温度之后、采样之前）─────
+            if _k or _p:
+                idx = np.arange(len(p))
+                if _k:
+                    # 取概率最高的 _k 个（argpartition 是 O(n)，避免全排序）
+                    idx = np.argpartition(-p, min(_k, len(p)) - 1)[:min(_k, len(p))]
+                if _p:
+                    # nucleus：在**已排序**的 idx 上取累计 ≥ p 的最小集合
+                    idx = idx[np.argsort(-p[idx])]
+                    cum = np.cumsum(p[idx])
+                    cut = int(np.searchsorted(cum, _p)) + 1
+                    idx = idx[:max(1, cut)]
+                mask = np.zeros_like(p, dtype=bool)
+                mask[idx] = True
+                p = np.where(mask, p, 0.0)
+                s = p.sum()
+                if s <= 0:                       # 全零（理论上不会）→ 均分回退
+                    p = np.where(mask, 1.0, 0.0)
+                    s = p.sum()
+                p /= s
             nxt = self.tok.tokens[int(rng.choice(len(p), p=p))]
             out.append(nxt)
             prev, cur = cur, nxt

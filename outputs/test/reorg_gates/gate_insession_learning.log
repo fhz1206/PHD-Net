@@ -12,29 +12,29 @@ P197 会话中学习能力（新颖性驱动印迹 + 误差广播）
 
 [B] LTM 印迹（旧默认 0.67% → 现在；smoke 档宽度）
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
-[ltm-diag] imprints=10 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=428 k_hash=4
-[ltm-diag] imprints=20 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=632 k_hash=4
+[ltm-diag] imprints=10 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=436 k_hash=4
+[ltm-diag] imprints=20 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=644 k_hash=4
 [ltm-diag] imprints=30 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=772 k_hash=4
 [ltm-diag] imprints=40 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=848 k_hash=4
-[ltm-diag] imprints=50 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=880 k_hash=4
-[ltm-diag] imprints=60 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=924 k_hash=4
-[ltm-diag] imprints=70 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=932 k_hash=4
-[ltm-diag] imprints=80 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=944 k_hash=4
-[ltm-diag] imprints=90 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=968 k_hash=4
-[ltm-diag] imprints=100 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=980 k_hash=4
-[ltm-diag] imprints=110 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=980 k_hash=4
-[ltm-diag] imprints=120 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=996 k_hash=4
-[ltm-diag] imprints=130 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,004 k_hash=4
-[ltm-diag] imprints=140 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,004 k_hash=4
-[ltm-diag] imprints=150 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,008 k_hash=4
-[ltm-diag] imprints=160 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,008 k_hash=4
-[ltm-diag] imprints=170 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,012 k_hash=4
-[ltm-diag] imprints=180 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,012 k_hash=4
-[ltm-diag] imprints=190 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,012 k_hash=4
+[ltm-diag] imprints=50 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=884 k_hash=4
+[ltm-diag] imprints=60 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=936 k_hash=4
+[ltm-diag] imprints=70 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=944 k_hash=4
+[ltm-diag] imprints=80 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=952 k_hash=4
+[ltm-diag] imprints=90 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=976 k_hash=4
+[ltm-diag] imprints=100 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=988 k_hash=4
+[ltm-diag] imprints=110 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=988 k_hash=4
+[ltm-diag] imprints=120 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,004 k_hash=4
+[ltm-diag] imprints=130 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,008 k_hash=4
+[ltm-diag] imprints=140 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,012 k_hash=4
+[ltm-diag] imprints=150 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,016 k_hash=4
+[ltm-diag] imprints=160 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,016 k_hash=4
+[ltm-diag] imprints=170 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,020 k_hash=4
+[ltm-diag] imprints=180 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,020 k_hash=4
+[ltm-diag] imprints=190 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,020 k_hash=4
   PASS B1 印迹触发率 > 30%（旧默认 0.67%）  [100.0% (200/200)]
-  PASS B2 LTM 表真的生长  [60,720 突触]
-[ltm-diag] imprints=200 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,012 k_hash=4
-  PASS B3 重复刺激不再持续印迹（熟悉化）  [60720 → 60720]
+  PASS B2 LTM 表真的生长  [61,200 突触]
+[ltm-diag] imprints=200 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,020 k_hash=4
+  PASS B3 重复刺激不再持续印迹（熟悉化）  [61200 → 61200]
 
 [C] 会话中学习（读出头单对记忆）
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
@@ -55,3 +55,5 @@ P197 会话中学习能力（新颖性驱动印迹 + 误差广播）
 PASS: 17/17 项通过
 
 [stderr]
+<string>:147: RuntimeWarning: eta_oja=0.02 > 0：上行识别权重 Oja 学习在生产规模会正反馈发散（P198 实测：3000 步 probe_PPL 9.1e11）。小规模/短跑的机制测试可忽略本警告；生产训练请保持 0。
+<string>:147: RuntimeWarning: eta_oja=0.02 > 0：上行识别权重 Oja 学习在生产规模会正反馈发散（P198 实测：3000 步 probe_PPL 9.1e11）。小规模/短跑的机制测试可忽略本警告；生产训练请保持 0。
