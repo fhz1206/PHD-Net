@@ -35,6 +35,12 @@ python train/train.py --preset 1b --data pretrain \
     --vocab-scan full --context-milestone 1000000 --resume
 ```
 
+> **P198（2026-10-17）**：`--step-profiling` 已**默认开启**——每段训练日志
+> 会自动带 `loop:`（主循环 tokenize/encode/step 三段）与 `segments:`
+> （`net.step` 内部九段取前 6），**无需再加参数**即可看到各段用时与占比。
+> 开销约 0.2 µs/段，可忽略；要关用 `--no-step-profiling`。
+> 日志字段怎么读见 §6.2。
+
 ### 推理 / 对话
 
 ```bash
@@ -117,7 +123,7 @@ python tests/run_tests.py fast
 | `--minutes` | `0.0`（不限） | 时间预算（分钟）。长跑的兜底闸门 |
 | `--log-every` | `500` | 每 N token 打一行进度。太小会刷爆 `train_logs/`，太大看不出 PPL 趋势 |
 | `--context-milestone` | `1000000` | 每跨过 N token 打一行里程碑，**显式证明状态连续未重置**（1M context 达标）。`0`=关闭 |
-| `--step-profiling` | 关 | 打开后追加 `loop:`（主循环三段）与 `segments:`（`net.step` 内部九段取前 6）。**诊断用**，有计时开销 |
+| `--step-profiling` | **开**（P198 起） | 每段进度日志追加 `loop:`（主循环三段）与 `segments:`（`net.step` 内部九段取前 6）——**直接看用时**。开销 ~0.2 µs/段可忽略。`--no-step-profiling` 关闭（P120 之前默认关，fhz 2026-10-17 指示改为默认开） |
 
 ### 2.5 词表
 

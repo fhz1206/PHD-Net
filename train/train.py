@@ -386,8 +386,15 @@ def main() -> None:
                          "cudagraphs reject mutated inputs); reduce-overhead / "
                          "max-autotune enable graph capture but will log 'skipping "
                          "cudagraphs due to mutated inputs' and lose that benefit")
-    ap.add_argument("--step-profiling", action="store_true",
-                    help="P35：step 分段计时（诊断 CPU 侧耗时分布；日志按段打印）")
+    ap.add_argument("--step-profiling", dest="step_profiling",
+                    action="store_true", default=True,
+                    help="P35：step 分段计时（诊断 CPU 侧耗时分布；日志按段打印）。"
+                         "P198 起默认开（fhz 2026-10-17：训练命令默认加，"
+                         "方便直接看用时；开销 ~0.2µs/段，可忽略）。"
+                         "--no-step-profiling 关闭")
+    ap.add_argument("--no-step-profiling", dest="step_profiling",
+                    action="store_false",
+                    help="关闭 step 分段计时")
     ap.add_argument("--omp-wait", default="active", choices=["active", "passive"],
                     help="P97: OpenMP 线程池空闲等待策略。active=自旋（默认，"
                          "小任务更快）；passive=让出 CPU（省 CPU 空转与 CS/s，"
@@ -800,7 +807,7 @@ def main() -> None:
     cfg.fp8_conv = str(args.fp8_conv)                 # P189：fp8→int8 转换核
     cfg.accel_readout = args.accel                     # P19 读出设备（默认 auto）
     cfg.nll_sync_every = args.nll_sync_every           # P34 nll 同步周期（默认 1）
-    cfg.step_profiling = args.step_profiling           # P35 step 分段计时（默认关）
+    cfg.step_profiling = args.step_profiling           # P35 step 分段计时（P198 起默认开）
     cfg.torch_compile = args.torch_compile             # P38 kernel 融合（默认开）
     cfg.torch_compile_mode = args.torch_compile_mode   # P44 模式（default=无 cudagraph）
     # P192：CPU/NPU 重叠三开关（默认全关，铁律④）───────────────────────
