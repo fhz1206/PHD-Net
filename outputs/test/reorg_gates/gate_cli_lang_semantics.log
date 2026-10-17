@@ -12,12 +12,12 @@ P119 门禁：--lang 只管终端文案（默认英文），不影响训练结�
   PASS  A3 前 5 步 NLL 逐位相同（放大看细节）  [[7.882701, 7.848661, 7.775831]]
 
 [B] 输出语言确实切换（默认英文 / --lang zh 中文）
-  PASS  B1 默认 (不传)=英文  [en]
+  PASS  B1 默认（不传）=英文  [en]
   PASS  B2 --lang en = 英文  [en]
   PASS  B3 --lang zh = 中文  [zh]
   PASS  B4 大写 EN 也识别为英文  [en]
   PASS  B5 zh-CN 识别为中文  [zh]
-  PASS  B6 未知值回落**英文** (不意外变中文)  [en]
+  PASS  B6 未知值回落**英文**（不意外变中文）  [en]
   PASS  B7 纯 ASCII 探针在两种语言下**都不被翻译**（翻译器不误伤）  [en='MARKER 12345' zh='MARKER 12345']
 
 [C] --data-lang 语料过滤职责仍在（与 --lang 分离）

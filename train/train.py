@@ -616,6 +616,11 @@ def main() -> None:
         log_path = LOG_DIR / f"train_1b_{args.preset}_{args.data}_{stamp}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     sys.stdout = TeeLogger(log_path)
+    # P199：**TeeLogger 必须先建、filter 必须后装**——原顺序（filter 先、
+    # Tee 后）让 TeeLogger 直接**覆盖**已包装的 stdout，翻译层整个失效
+    # （实测 --lang en 时容量验算表仍是中文）。重装一次包住 TeeLogger
+    # （_StreamFilter 只代理 write，与 Tee 双写兼容；install 幂等）。
+    install_stream_filter()
     # P127：重放 CANN 环境报告（此刻 stdout 已是日志文件 → 一定落盘）
     # ⚠ 用纯 ASCII 标签：这行在 `install_stream_filter()` **之后**打印，
     # 中文字面量会被输出层翻译器改写（曾出现「运行环境」被译成「run 环境」

@@ -1,28 +1,41 @@
-P198: 修复进度行/检查点从未在训练中执行的缩进错误（历史遗留）
+P199: i18n 重构——正则词表替换 → 显式消息目录（消除碎片化乱码）
 
-## 严重性：高（潜伏多个版本）
-AST 考古确认：自 P192 起 `log_every` 与 `ckpt_every` 两个块就缩进在
-while 循环**外**（indent 12 vs 循环体 16）——
-1. 进度行（token N sliding PPL + loop: + segments:）整个训练期间
-   从不执行，只在循环退出后打一次——大家以为 --log-every 在工作，
-   其实只有最后一行
-2. --ckpt-every 的**中途自动存档从未生效**——长跑中断只能靠
-   SIGINT 兜底路径存档，否则丢全部进度
+## 问题（用户指令：「现在的 i18n 逻辑一堆 bug」）
+旧方案用 200+ 词条的正则交替在输出层逐词替换中文。失败模式
+（338 个静态中文串只登记 <10%，本会话日志实测）：
+1. 子串误切：大空间表容量 → 「大 empty 间表 capacity」
+   （「空间」被「容量」词条夹击，专有组合无法穷举）
+2. 漏网残留：already 生长突触按 100 万 rows（词条永远追不完）
+3. 中英粘连：readout backendunavailable / loadedcheckpoint
+4. 白名单腐烂：诊断行被逐词翻成「run时提升」（P147 记录过的复发）
 
-用户服务器三份日志（13:13/13:29/13:38）都没有中途输出，最初误判
-为「服务器没拉代码」，本地复现（--log-every 500 跑 3000 token 只打
-1 行）后定位为缩进错误。
+## 新架构（phdnet/i18n.py 全量重写）
+三层策略，结构上排除碎片化：
+1. _CATALOG 整句精确匹配（完整消息 → 人写的完整英文句）O(1)
+2. _WORDMAP 多字词整词替换（键全部 ≥2 汉字；**扫描式游标**感知
+   前一个输出字符——相邻词条/英文↔汉字交界补空格，无正则交替）
+3. 未命中保留中文（可读），**不做单字替换**（单字夹击是乱码根源）
+诊断行（[ASCII 标签]）两模式逐字节一致（P147 纪律保留）。
+纯 ASCII 快速通道保留（<10µs）。API 兼容（set_lang/get_lang/T/
+translate/install_stream_filter 签名不变）。
 
-## 修复（train/train.py）
-- log_every 块、ckpt 块移回 while 循环体内（AST 验证三个块
-  probe/log/ckpt 均为 while 体顶层 If）
-- 进度行不再要求 seg_nll 非空（PPL 无样本打 nan；用时信息独立可见）
-- spent 预初始化（--tokens 小于首个 log 点时收尾段 UnboundLocalError）
-- 收尾段移回 main 层（原被裹进 for-ep 体内，tokens 跑满时被跳过）
-- --step-profiling 默认开的改动在 checkout 回滚中丢失，重新应用
+## 连带修复：TeeLogger 覆盖翻译层（新发现的真实 bug）
+train.py 原顺序 install_stream_filter()(600 行) → sys.stdout =
+TeeLogger(618 行)——Tee 直接覆盖已包装的 stdout，**翻译层整个失效**
+（--lang en 时容量验算表仍是中文，用户日志实测）。改为 Tee 先建、
+filter 重装（_StreamFilter 只代理 write，与 Tee 双写兼容）。
+门禁 E3 静态钉死顺序。
 
-## 验证（本地 smoke 3000 token，--log-every 500 --ckpt-every 1000）
-- 进度行 6 次（500/1000/.../3000）✓
-- [checkpoint] 中途存档 3 次（1000/2000/3000）✓
-- --step-profiling 默认开（不带参数也有 loop:/segments:）✓
+## 验证
+- gate_cli_i18n.py 重写为 30 项新契约（含旧方案五组坏例回归：
+  大 empty 间表/backendunavailable/loadedcheckpoint/cachedirectory/
+  total用时 全部消失）
 - run_tests.py 9/9；run_gates.py 47/47
+- 端到端 --lang en 实测：Synapse capacity audit / static memory /
+  M4b big-space table capacity 全部正常无碎片
+- 词级残留（如「固定 synapse 小计」「索引映射」）可读完整词，
+  随迭代逐步迁入 _CATALOG
+
+## 迁移策略
+训练热路径核心消息（容量验算/检查点/里程碑/汇总行）已入 _CATALOG；
+其余保持中文（可读无损），不再维护「短词词条表」。

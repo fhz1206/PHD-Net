@@ -4,9 +4,9 @@
 [OK ] params={'max_len': 6, 'min_count': 8, 'min_entropy': 1.5} | vocab: ref=24 new=24 equal=True | tokenize: len(ref)=5582 len(new)=5582 equal=True
 
 === O4 加速比实测（语料 = 全文 23504 字符，各 1 次）===
-旧实现构建耗时: 4560.4 ms
-新实现构建耗时: 163.1 ms
-加速比: 28.0×  （目标 ≥ 5×）
+旧实现构建耗时: 4799.7 ms
+新实现构建耗时: 161.5 ms
+加速比: 29.7×  （目标 ≥ 5×）
 
 对拍结论: 全部一致 ✅
 
