@@ -389,9 +389,8 @@ def main() -> None:
     ap.add_argument("--step-profiling", dest="step_profiling",
                     action="store_true", default=True,
                     help="P35：step 分段计时（诊断 CPU 侧耗时分布；日志按段打印）。"
-                         "P198 起默认开（fhz 2026-10-17：训练命令默认加，"
-                         "方便直接看用时；开销 ~0.2µs/段，可忽略）。"
-                         "--no-step-profiling 关闭")
+                         "P198 起默认开（fhz 2026-10-17：训练命令默认带，直接看用时；"
+                         "开销 ~0.2µs/段可忽略）。--no-step-profiling 关闭")
     ap.add_argument("--no-step-profiling", dest="step_profiling",
                     action="store_false",
                     help="关闭 step 分段计时")
@@ -1367,6 +1366,11 @@ def main() -> None:
             # 从未被测量**——实测分段之和 < 总耗时，差额就落在这里）。
             _lp = {"tokenize": 0.0, "encode_onehot": 0.0, "step": 0.0}
             _lpn = 0
+            # P198：进度/收尾段共用的计时变量**预先初始化**——三块（probe/
+            # log_every/ckpt）修进 while 体内后，`spent` 只在其中赋值；
+            # 若 `--tokens` 小于第一个 log 点（如 --tokens 300 < 500），
+            # 收尾段引用 `spent` 会 UnboundLocalError（2026-10-17 实测）。
+            spent = 0.0
             while t0 is not None:
                 if _STOP["flag"]:
                     break
@@ -1429,114 +1433,102 @@ def main() -> None:
                 #   ② 连续 token 的 nll **逐步强相关**（共享语境、共享刚被
                 #      STDP/Oja 改过的权重）→ 2000 个样本的**有效样本数远小于
                 #      2000**，均值标准误被严重低估；
-            #   ③ `exp(mean(nll))`（几何平均）**对高频词敏感**，而突触
-            #      生长/修剪本就会改变 nll 的**分布形状**—— 而形状变化与
-            #      「学得更好」无关。
-            # → 探针用**同一份冻结文本**（`eval_corpus/internal_corpus.txt`）
-            #   + `readonly=True` 前向（不更新权重、不进 `_prev_*`、不写 LTM/
-            #   回放缓冲）→ 对训练**零污染**，且 A/B 差值可比。
-            # ⚠ 探针 PPL 的**绝对值与训练流 PPL 不可比**（不同文本），
-            #   **只能用差值**做 A/B。
-            if args.probe_every > 0 and i % args.probe_every == 0:
-                try:
-                    # P198：`ppl_probe` 在 **tools/eval/** 下，而 sys.path 只
-                    # 加了 `tools/` → `from ppl_probe import ...` 恒
-                    # ModuleNotFoundError，`--probe-every` **从未工作过**
-                    # （实测：日志打「探针不可用」然后静默跳过）。
-                    # 文档一直把 probe_PPL 指定为 A/B 判据（P146），
-                    # 所以这是「判据工具实际不可用」的缺口。
+                #   ③ `exp(mean(nll))`（几何平均）**对高频词敏感**，而突触
+                #      生长/修剪本就会改变 nll 的**分布形状**—— 而形状变化与
+                #      「学得更好」无关。
+                # → 探针用**同一份冻结文本**（`eval_corpus/internal_corpus.txt`）
+                #   + `readonly=True` 前向（不更新权重、不进 `_prev_*`、不写 LTM/
+                #   回放缓冲）→ 对训练**零污染**，且 A/B 差值可比。
+                # ⚠ 探针 PPL 的**绝对值与训练流 PPL 不可比**（不同文本），
+                #   **只能用差值**做 A/B。
+                if args.probe_every > 0 and i % args.probe_every == 0:
                     try:
                         from ppl_probe import probe_nll
-                    except ModuleNotFoundError:
-                        # P198：ppl_probe.py 实际在 tools/eval/（不在 tools/ 根）
-                        sys.path.insert(0, str(_ROOT / "tools" / "eval"))
-                        from ppl_probe import probe_nll
-                    _pr = probe_nll(lm, args.probe_tokens)
-                    if _pr["n_tok"]:
-                        _probe_ppl = _pr["ppl"]
-                        _probe_nll_v = _pr["nll"]
-                        print(f"[probe] token {i:>12,}  probe_PPL "
-                              f"{_probe_ppl:>11.4f}  nll {_probe_nll_v:.6f}"
-                              f"  n_tok {_pr['n_tok']}  ({_pr['ms']:.0f} ms, 只读)",
-                              flush=True)
-                except Exception as _pe:                # noqa: BLE001
-                    if not getattr(args, "_probe_warned", False):
-                        args._probe_warned = True
-                        print(f"[probe] 探针不可用（不影响训练）："
-                              f"{type(_pe).__name__}: {str(_pe)[:90]}", flush=True)
+                        _pr = probe_nll(lm, args.probe_tokens)
+                        if _pr["n_tok"]:
+                            _probe_ppl = _pr["ppl"]
+                            _probe_nll_v = _pr["nll"]
+                            print(f"[probe] token {i:>12,}  probe_PPL "
+                                  f"{_probe_ppl:>11.4f}  nll {_probe_nll_v:.6f}"
+                                  f"  n_tok {_pr['n_tok']}  ({_pr['ms']:.0f} ms, 只读)",
+                                  flush=True)
+                    except Exception as _pe:                # noqa: BLE001
+                        if not getattr(args, "_probe_warned", False):
+                            args._probe_warned = True
+                            print(f"[probe] 探针不可用（不影响训练）："
+                                  f"{type(_pe).__name__}: {str(_pe)[:90]}", flush=True)
 
-            if (i - done) % args.log_every == 0:
-                # P198：`loop:`/`segments:` 不再挂在 `seg_nll` 非空上——
-                # 服务器实测（train_1b_1b_pretrain_20261017-132908.log）：
-                # 930 步无一行进度输出。原因链：计时行只在 `seg_nll` 非空时打，
-                # 而 seg_nll 只在 trainable 步积累；一旦语料/掩码让前 500 步
-                # 全部 OOV 跳过，进度行与分段行**一起消失**（看起来像
-                # --step-profiling 没输出）。用时信息与 PPL 是两回事，
-                # 应该独立可见。
-                k = min(args.log_every, len(seg_nll))
-                ppl = float(np.exp(np.mean(seg_nll[-k:]))) if seg_nll else float("nan")
-                spent = time.perf_counter() - t_start
-                ms = spent / max(1, i - done) * 1000
-                # P20：读出分项（后端 + 设备 + 占比）——直接看出加速是否生效、
-                # 以及耗时是否已转移到 PC 栈等其余部件
-                _ro_ms = float(getattr(lm.net, "_ro_ms_accum", 0.0))
-                _ro_n = max(1, int(getattr(lm.net, "_ro_calls", 0)))
-                _ro_dev = (getattr(lm.net.readout, "device", "cpu")
-                           if _rb.startswith("accel:") else "cpu")
-                _probe_txt = (f"  probe_PPL {_probe_ppl:>10.4f}"
-                              if _probe_ppl is not None else "")
-                print(f"  token {i:>12,}  sliding PPL {ppl:>9.3f}{_probe_txt}"
-                      f"  {ms:>8.2f} ms/tok"
-                      f"  elapsed {spent / 60:.1f} min"
-                      f"  | readout {_ro_ms / _ro_n:>7.3f} ms/tok"
-                      f" ({_rb.split('(')[0]}@{_ro_dev}, {_ro_ms / 1000 / max(1e-9, spent) * 100:>5.1f}% of total)",
-                      flush=True)
-                if args.step_profiling and _lpn:
-                    _dt = max(1, _lpn)
-                    print("      loop: " + "  ".join(
-                        f"{k} {v * 1000 / _dt:.2f}" for k, v in _lp.items())
-                          + " ms/tok", flush=True)
-                if getattr(lm.net, "_prof_on", False) and lm.net._prof:
-                    # P115：`_prof` 是**从 token 0 起全程累加**（代码事实：
-                    # `_prof[name] = _prof.get(name,0)+dt`，从不清零），
-                    # 所以这一行是「历史平均」，会被启动期（numba 首次编译、
-                    # 设备 kernel 首次编译）系统性高估。并行打印**滑窗**口径
-                    #（上一个打印间隔内的真实平均），两个都给出。
-                    _pr = sorted(lm.net._prof.items(), key=lambda kv: -kv[1])[:6]
-                    print("segments(cum): " + "  ".join(
-                        f"{k} {v * 1000 / max(1, i - done):.2f}" for k, v in _pr)
-                          + " ms/tok", flush=True)
-                    _wn = int(getattr(lm.net, "_prof_win_n", 0) or 0)
-                    if _wn > 0:
-                        _pw = sorted(lm.net._prof_win.items(),
-                                     key=lambda kv: -kv[1])[:6]
-                        print("      segments(win): " + "  ".join(
-                            f"{k} {v * 1000 / _wn:.2f}" for k, v in _pw)
-                              + f" ms/tok  [{_wn} steps]", flush=True)
-                    # 打印后清空滑窗，下一个间隔重新统计
-                    lm.net.reset_prof_window()
-                # P69：语种自检——用**最近若干步的真实 target token** 反查词表拼出
-                # 文本片段 + CJK 占比。`--lang zh/en` 是否真生效，此前只能靠肉眼看
-                # PPL 猜（fhz 2026-09-29：「--lang zh 后日志还是英文」——实测那次
-                # argv 里根本没带 --lang）。
-                try:
-                    if _lang_tail:
-                        txt = "".join(str(tokens[t]) for t in _lang_tail
-                                      if 0 <= int(t) < len(tokens))
-                        cjk = (sum(1 for ch in txt if "\u4e00" <= ch <= "\u9fff")
-                               / max(1, len(txt)))
-                        print(f"      [sample lang={_lang_filter or 'all'}] "
-                              f"CJK={cjk:.0%} | {txt[:40]!r}", flush=True)
-                except Exception:                       # noqa: BLE001
-                    pass
-            if args.ckpt_every and (i - done) and (i - done) % args.ckpt_every == 0:
-                save_model_async(ckpt, lm, cfg, i, ckpt_dtype=args.ckpt_dtype,
-                           extra=_data_provenance)
-                print(f"  [checkpoint] saved {i:,} tokens → {ckpt}", flush=True)
+                # P198（2026-10-17）：此块原先缩进在 while **外**（indent 12），
+                # 导致整个训练期间从不执行——进度行/loop:/segments: 只在循环
+                # 退出后打一次（服务器 train_1b_1b_pretrain_20261017-132908
+                # /133822 两份日志实测：3360 步零进度行）。移回 while 体内。
+                # 同时不再要求 `seg_nll` 非空（用时信息与 PPL 是两回事，
+                # 应独立可见；PPL 无样本时打 nan）。
+                if (i - done) % args.log_every == 0:
+                    k = min(args.log_every, len(seg_nll))
+                    ppl = float(np.exp(np.mean(seg_nll[-k:]))) if seg_nll else float("nan")
+                    spent = time.perf_counter() - t_start
+                    ms = spent / max(1, i - done) * 1000
+                    # P20：读出分项（后端 + 设备 + 占比）——直接看出加速是否生效、
+                    # 以及耗时是否已转移到 PC 栈等其余部件
+                    _ro_ms = float(getattr(lm.net, "_ro_ms_accum", 0.0))
+                    _ro_n = max(1, int(getattr(lm.net, "_ro_calls", 0)))
+                    _ro_dev = (getattr(lm.net.readout, "device", "cpu")
+                               if _rb.startswith("accel:") else "cpu")
+                    _probe_txt = (f"  probe_PPL {_probe_ppl:>10.4f}"
+                                  if _probe_ppl is not None else "")
+                    print(f"  token {i:>12,}  sliding PPL {ppl:>9.3f}{_probe_txt}"
+                          f"  {ms:>8.2f} ms/tok"
+                          f"  elapsed {spent / 60:.1f} min"
+                          f"  | readout {_ro_ms / _ro_n:>7.3f} ms/tok"
+                          f" ({_rb.split('(')[0]}@{_ro_dev}, {_ro_ms / 1000 / max(1e-9, spent) * 100:>5.1f}% of total)",
+                          flush=True)
+                    if args.step_profiling and _lpn:
+                        _dt = max(1, _lpn)
+                        print("      loop: " + "  ".join(
+                            f"{k} {v * 1000 / _dt:.2f}" for k, v in _lp.items())
+                              + " ms/tok", flush=True)
+                    if getattr(lm.net, "_prof_on", False) and lm.net._prof:
+                        # P115：`_prof` 是**从 token 0 起全程累加**（代码事实：
+                        # `_prof[name] = _prof.get(name,0)+dt`，从不清零），
+                        # 所以这一行是「历史平均」，会被启动期（numba 首次编译、
+                        # 设备 kernel 首次编译）系统性高估。并行打印**滑窗**口径
+                        #（上一个打印间隔内的真实平均），两个都给出。
+                        _pr = sorted(lm.net._prof.items(), key=lambda kv: -kv[1])[:6]
+                        print("segments(cum): " + "  ".join(
+                            f"{k} {v * 1000 / max(1, i - done):.2f}" for k, v in _pr)
+                              + " ms/tok", flush=True)
+                        _wn = int(getattr(lm.net, "_prof_win_n", 0) or 0)
+                        if _wn > 0:
+                            _pw = sorted(lm.net._prof_win.items(),
+                                         key=lambda kv: -kv[1])[:6]
+                            print("      segments(win): " + "  ".join(
+                                f"{k} {v * 1000 / _wn:.2f}" for k, v in _pw)
+                                  + f" ms/tok  [{_wn} steps]", flush=True)
+                        # 打印后清空滑窗，下一个间隔重新统计
+                        lm.net.reset_prof_window()
+                    # P69：语种自检——用**最近若干步的真实 target token** 反查词表拼出
+                    # 文本片段 + CJK 占比。`--lang zh/en` 是否真生效，此前只能靠肉眼看
+                    # PPL 猜（fhz 2026-09-29：「--lang zh 后日志还是英文」——实测那次
+                    # argv 里根本没带 --lang）。
+                    try:
+                        if _lang_tail:
+                            txt = "".join(str(tokens[t]) for t in _lang_tail
+                                          if 0 <= int(t) < len(tokens))
+                            cjk = (sum(1 for ch in txt if "\u4e00" <= ch <= "\u9fff")
+                                   / max(1, len(txt)))
+                            print(f"      [sample lang={_lang_filter or 'all'}] "
+                                  f"CJK={cjk:.0%} | {txt[:40]!r}", flush=True)
+                    except Exception:                       # noqa: BLE001
+                        pass
+                if args.ckpt_every and (i - done) and (i - done) % args.ckpt_every == 0:
+                    save_model_async(ckpt, lm, cfg, i, ckpt_dtype=args.ckpt_dtype,
+                               extra=_data_provenance)
+                    print(f"  [checkpoint] saved {i:,} tokens → {ckpt}", flush=True)
                 _print_table_stats(lm)
-        if _STOP["flag"] or (args.tokens and i - done >= args.tokens):
-            break
-    # with PrefetchChars 上下文在此结束，自动调用 src.close() 清理进程
+            if _STOP["flag"] or (args.tokens and i - done >= args.tokens):
+                break
+        # with PrefetchChars 上下文在此结束，自动调用 src.close() 清理进程
 
     # ── 收尾：滚动检查点 + final 模型 ──
     wait_pending_saves()          # P83：先等后台队列写完（滚动 ckpt 的数据一致性）
@@ -1553,8 +1545,8 @@ def main() -> None:
               f"{prompt_masked:,} prompt steps advance state only without weight updates;"
               f" loss counted on assistant replies only")
     print(f"this run {i - done:,} tokens in {spent / 60:.1f} min"
-          f" ({spent / max(1, i - done) * 1000:.2f} ms/token) | "
-          f"OOV skipped {oov_skipped:,} ({oov_rate:.4%})")
+      f" ({spent / max(1, i - done) * 1000:.2f} ms/token) | "
+      f"OOV skipped {oov_skipped:,} ({oov_rate:.4%})")
     _print_table_stats(lm)
     if seg_nll:
         final_ppl = float(np.exp(np.mean(seg_nll[-min(2000, len(seg_nll)):])))

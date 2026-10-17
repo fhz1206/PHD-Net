@@ -1,38 +1,28 @@
-P198: 修复 eta_oja 正反馈发散 + 生成采样 top-k/nucleus + 词表预算诊断
+P198: 修复进度行/检查点从未在训练中执行的缩进错误（历史遗留）
 
-## 诊断（生产规模实测，n_top=256 / 40K token / cc_traces）
-P194 的 eta_oja=0.02 导致正反馈发散：
-  eta_oja>0 → PC 上行识别权重改动 pc.infer 前向 → r1/r2 喂 STDP + 读出
-  → 读出为拟合而拉大权重 → 反馈环 → 3000 步 probe_PPL 从 3403 → 9.1e11
-  （logits 动态范围 56，softmax 后非最大项全部下溢为 0，nll=27.6）
+## 严重性：高（潜伏多个版本）
+AST 考古确认：自 P192 起 `log_every` 与 `ckpt_every` 两个块就缩进在
+while 循环**外**（indent 12 vs 循环体 16）——
+1. 进度行（token N sliding PPL + loop: + segments:）整个训练期间
+   从不执行，只在循环退出后打一次——大家以为 --log-every 在工作，
+   其实只有最后一行
+2. --ckpt-every 的**中途自动存档从未生效**——长跑中断只能靠
+   SIGINT 兜底路径存档，否则丢全部进度
 
-  eta_oja=0 → 3000 步 probe_PPL 916 ✅（40K token 后 PPL 389，bigram 78%）
-  与 homeostasis/eta_pc 无关（消融实测）
+用户服务器三份日志（13:13/13:29/13:38）都没有中途输出，最初误判
+为「服务器没拉代码」，本地复现（--log-every 500 跑 3000 token 只打
+1 行）后定位为缩进错误。
 
-## 修复
-1. config.py：eta_oja 库默认 0.02 → 0.0；__post_init__ 对 >0 发
-   RuntimeWarning（不 raise——发散与规模相关，小规模机制测试合法用 >0）
-2. config_1b.py：build_cfg 显式 eta_oja=0.0（eta_pc=0.02 保留，安全）
+## 修复（train/train.py）
+- log_every 块、ckpt 块移回 while 循环体内（AST 验证三个块
+  probe/log/ckpt 均为 while 体顶层 If）
+- 进度行不再要求 seg_nll 非空（PPL 无样本打 nan；用时信息独立可见）
+- spent 预初始化（--tokens 小于首个 log 点时收尾段 UnboundLocalError）
+- 收尾段移回 main 层（原被裹进 for-ep 体内，tokens 跑满时被跳过）
+- --step-profiling 默认开的改动在 checkout 回滚中丢失，重新应用
 
-## 新增能力
-3. word_lm.py：generate() 加 top-k / nucleus(top-p) 截断
-   —— 缺它时温度采样把长尾分布放大成「字符碎片乱码」（bigram 5%）
-   gate_generate_truncation.py 11 项
-4. tools/eval/eval_generation.py：生成能力评估工具
-   （ckpt+词表快照 → 自回归采样 → bigram 合法率/distinct/未训练对照）
-5. tools/diag_vocab_budget.py：词表规模 vs 训练预算诊断
-   （本会话实测：曝光 <30 → PPL 接近随机；≥100 → 可学）
-6. phdnet/corpus.py：iter_cc_traces 支持本地 parquet（P196 转换产物）
-   —— 此前按 utf-8 文本读 parquet 会 UnicodeDecodeError
-7. train/train.py：--probe-every 的 import 修复（ppl_probe 在 tools/eval/
-   而非 tools/ 根 → 此前 ModuleNotFoundError → 探针从未工作）
-
-## 实测（3392 词表 / 40K token / 冻结主干）
-  初始 PPL 3403（≈随机）→ 1000: 1512 → 5000: 620 → 30000: 389
-  bigram 合法率 78%（旧 5-13%）；distinct 76.5%
-
-## 验证
-- run_tests.py 9/9
-- run_gates.py 47/47（新增 gate_generate_truncation.py）
-- docs/PHD-Net_性能评估与迭代方案.md §6.4 P198 章节
-- datasets/README.md P198 预算建议表
+## 验证（本地 smoke 3000 token，--log-every 500 --ckpt-every 1000）
+- 进度行 6 次（500/1000/.../3000）✓
+- [checkpoint] 中途存档 3 次（1000/2000/3000）✓
+- --step-profiling 默认开（不带参数也有 loop:/segments:）✓
+- run_tests.py 9/9；run_gates.py 47/47

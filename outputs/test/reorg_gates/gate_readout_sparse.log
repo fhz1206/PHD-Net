@@ -15,18 +15,18 @@ Part 1 · 稀疏读出 vs 稠密读出（k = 全列，权重完全相同）
 Part 2 · 端到端（词级 LM，训练段前 4,000 字符）
 ========================================================================================
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
-dense_readout    ppl_char= 470.2495   3.263 ms/tok  params=2,304,772  读出连接率 100.0%
+dense_readout    ppl_char= 470.2495   2.027 ms/tok  params=2,304,772  读出连接率 100.0%
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
-readout_k8       ppl_char= 470.9336   1.345 ms/tok  params=  321,172  读出连接率   1.0%
+readout_k8       ppl_char= 470.9336   1.292 ms/tok  params=  321,172  读出连接率   1.0%
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
-readout_k16      ppl_char= 461.7394   1.546 ms/tok  params=  342,052  读出连接率   2.1%
+readout_k16      ppl_char= 461.7394   1.280 ms/tok  params=  342,052  读出连接率   2.1%
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
-readout_k32      ppl_char= 451.5952   1.535 ms/tok  params=  383,812  读出连接率   4.2%
+readout_k32      ppl_char= 451.5952   1.079 ms/tok  params=  383,812  读出连接率   4.2%
 ----------------------------------------------------------------------------------------
-dense_readout     470.2495   +0.00%     3.263 ms  2,304,772   100.0%
-readout_k8        470.9336   +0.15%     1.345 ms    321,172     1.0%
-readout_k16       461.7394   -1.81%     1.546 ms    342,052     2.1%
-readout_k32       451.5952   -3.97%     1.535 ms    383,812     4.2%
+dense_readout     470.2495   +0.00%     2.027 ms  2,304,772   100.0%
+readout_k8        470.9336   +0.15%     1.292 ms    321,172     1.0%
+readout_k16       461.7394   -1.81%     1.280 ms    342,052     2.1%
+readout_k32       451.5952   -3.97%     1.079 ms    383,812     4.2%
 
 === 全部通过 ===
 
