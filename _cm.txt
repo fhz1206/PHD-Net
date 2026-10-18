@@ -1,56 +1,42 @@
-P204: 多卡互联（读出列并行）+ 默认值调整（replay 16 / numba 16）+ 时间预估公式
+P205: M4b imprint 提速（批量 λ^Δt 补偿 + dict 局部绑定，1.6×）
 
-## ① 多卡互联（fhz 指示「训练代码请支持多卡互联」）
-新增 `phdnet/backends/sharded_readout.py::ShardedAccelReadout`：
-持 N 个 AccelReadout 分片（各持 V/N 词表行、各自设备/降级链/master），
-主卡全局 softmax + dp 行分片下发 + 各分卡 rank-1。
+## 定位（cProfile + dt 分布统计）
+服务器 1b 档日志 M4b_ltm/imprint 各 ~2.3ms（占 step 18%）。
+本机复现（4096 行稳态）：table.learn 占 imprint 的 88%，
+热点 = 768 次/步的 _decay_read（每次一层 Python 帧 + 2 次 dict.get）
+→ cProfile 实测 230,400 次调用 / 300 步，dict.get 921,600 次。
+dt 分布统计（打补丁统计 20 步）：**97% 的调用 dt==0**（裸值等价）、
+3% 需补偿——大量调用在付函数帧与 dict 查找的冤枉钱。
 
-**为什么是列并行而非 DDP**（P14 已论证，本次沿用）：逐 token 事件驱动
-稀疏网络无 batch 维、无反向图、全局状态（WM/STDP/LTM）跨样本连续携带
-→ 标准 DDP/DataParallel 在此没有可分的梯度或 batch 轴。
+## 优化（phdnet/sparse_table.py）
+1. `_decay_read_arr(trace, stamp, keys)`：批量取值入口——局部绑定
+   trace/stamp/step_count/lam 后单层循环，把 _learn_batch 的 3 组取值
+   （tpi/tpi_post/g_tpre）收敛为 3 次数组调用。**内部逐个调
+   _decay_read**（见下）。
+2. `_learn_batch`：3 组取值全部改走 `_decay_read_arr`；`_touch`/
+   gather/scatter 段的 dict 方法局部绑定（省属性链，语义逐位相同）。
+3. g_tpost 的裸读用 np.fromiter + 绑定后的 .get（免逐次函数帧）。
 
-**接入面**：
-- `phdnet/backends/accel_readout.py`：新增 `_accel_apply_dp`（分片 rank-1
-  原语，覆盖稠密/int8/fp8-bits/master 四种存储）；`pick_readout_backend`
-  在 `accel_readout_devices>1` 时分派到 ShardedAccelReadout
-- `phdnet/config.py`：新字段 `accel_readout_devices: int = 1`
-- `train/train.py`：新 CLI `--accel-devices N`
-- **单卡路径零变更**：devices=1 时完全走原 AccelReadout
+## ⚠ 中途踩坑与回滚记录（防再犯）
+- **cap 收紧优化是错的**：曾把 `cap = max(m_out, max行容量)` 收紧为
+  `max(行容量)` 想省 K/V 整行宽度 —— `_ltm_learn_rows` 核内会把行
+  **生长到 m_out**，K/V 必须预留到 m_out，否则 scatter 广播失败
+  （实测 ValueError (64,)→(72,)）。已回滚并留注释。
+- **内联展开破坏门禁突变测试**：首版把 _decay_read 的逻辑直接内联进
+  _learn_batch → `gate_ltm_trace_semantics` 的负向对照
+  （patch `t._decay_read = lambda...` 注入「未补偿」）变成**空操作** →
+  (a) 组 FAIL（ratio_pre=1.0000，检出能力静默消失）。
+  **修复**：取值统一收敛到 `_decay_read_arr`，而它**内部逐个调
+  `_decay_read`**——突变注入点保留，性能靠省属性链而非省函数调用。
+  两个方法的 docstring 都写明这条契约。
 
-**诚实边界（写进 docstring 与门禁文件头）**：
-- 仅**稠密读出**（`--readout-conn-k 0`）支持多卡；稀疏多卡 fail-fast 提示
-- 等价判据是 **fp32 容差 1e-6**（实测 max|d|=1.49e-08），**不是逐位**——
-  单卡 `W.add_(outer(dp,ht))` 一次写整张 W，多卡按行切片各写自己那片，
-  torch.outer 的分片 kernel 分块不同。与 P14 gate_multi_device 的
-  「同设备分片逐位」口径**不同**（那个是 cat 后整体更新），不得混淆
-- 上游 M1-M5（CPU numba）、LTM/STDP/WM（全局事件状态）不并行
-- 1B 档读出占端到端 ~20% → N 卡上限 1/(1-0.196+0.196/N)（N=4 → 1.15×）
-
-**新门禁** `tests/gates/gate_multi_device_sharded.py` 14/14：
-A 单卡零回归 / B 分片均衡+行覆盖+w0行对应+单设备fail-fast /
-C 前向逐位+更新容差+nll一致 / D 稀疏fail-fast / E 工厂分派
-
-## ② 默认值调整（fhz 2026-10-18 指示）
-- `replay_every: 4 → 16`（phdnet/config.py）：实测服务器 1b 档
-  M6_replay 5.6-6.2 → 1.2-1.4 ms/tok；本机端到端 11.00 → 8.27 ms/tok
-  （−25%），final_ppl 13,975 → 14,225（1.8%，噪声内）。语义 = 巩固周期
-  拉长 4×（非关闭）。`--replay-every 4` 可复原
-- `--numba-threads: 8 → 16`：按 fhz 指示；help 里记录 P201 本机 x86
-  实测的负收益区间（16/32 的 fork/join 屏障 24.7/64.3 µs/区）与
-  「本机 ≠ 昇腾」纪律，服务器 A/B 判据写在 help 中
-
-## ③ 训练时间预估公式（README §4）
-主式 T(h) = tokens × ms_per_token / 3.6e6，ms/tok = B/(f_cpu·e_cpu) + S；
-S 分解为 readout_overlap + replay_ms/replay_every + other，逐项给实测锚点；
-附 1B 档三档配置的 ms/tok 与 1M/10M token 时长表；三条纪律
-（不用首行 cum 口径 / ms/tok 必须目标机标定 / 词表×曝光只影响能否学会）
+## 实测（同进程交叉 A/B，median-of-11，消除外部负载漂移）
+- 第 1 轮（批量取值 + _touch 局部绑定）：imprint 5.392 → 4.606 ms（1.17×）
+- 第 2 轮（+ gather/scatter 局部绑定）：3.692 → 3.365 ms
+- 相对最初基线 5.392 → 3.365：**1.60×**
+- 服务器预期：M4b_ltm/imprint 各 2.29 → ~1.6-1.9 ms/tok
 
 ## 验证
-- run_tests.py 9/9；run_gates.py **48/48**（新增多卡门禁）
-- 门禁自捕获两个真 bug 并修复：分卡无 `main` 属性（应为 `device`）、
-  显式 devices 被 auto 过滤逻辑误吃导致同设备分片对拍失败
-
-## 顺带修复
-- `--no-readout-replay` 重复定义（上次编辑残留）→ 合并为一份
-- argparse help 里未转义的 `%`（`47%）`/`1.8%）`）导致 `--help` 直接 ValueError
-  → 转义为 `%%`（该 bug 会让 `train.py --help` 完全不可用）
+- gate_ltm_learn_batch 5/5（批量 vs Python 逐位一致，4 组合 + 6 步序列）
+- gate_ltm_trace_semantics **32/32**（突变测试能力恢复）
+- run_tests.py 9/9；run_gates.py 48/48

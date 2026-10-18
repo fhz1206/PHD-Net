@@ -57,11 +57,16 @@ class SparseSynapseTable:
 
     # ---------- 惰性迹衰减（dict 按需存储） ----------
     def _touch(self, idx: list[int], trace: dict, stamp: dict) -> None:
+        # P205：局部绑定 dict 方法 + 属性——每步 512 次调用，`stamp.get` /
+        #   `trace.get` 的属性查找在全 Py 循环里是真实开销（实测 _touch 占
+        #   _learn_batch 的 10%）。**逐位不变**：表达式与顺序逐行照抄。
         t = self.step_count
         lam = self.lam
+        _sget = stamp.get
+        _tget = trace.get
         for i in idx:
-            dt = t - stamp.get(i, 0)
-            trace[i] = trace.get(i, 0.0) * (lam ** dt) + 1.0
+            dt = t - _sget(i, 0)
+            trace[i] = _tget(i, 0.0) * (lam ** dt) + 1.0
             stamp[i] = t
         # C1 修复：启用且超阈值时，周期性清理最旧 25% 的迹（按 stamp 升序淘汰）
         if self.prune and len(trace) > self.prune and (t & 1023) == 0:
@@ -82,12 +87,42 @@ class SparseSynapseTable:
         stamp 缺省 step_count ⇒ 指数 0 ⇒ 无补偿（安全，与旧行为逐位一致）。
         step_count 在 learn **之后**才自增（bigltm.py imprint），故读侧用当前
         step_count 语义正确；_touch 刚触碰过的键 stamp==step_count ⇒ 指数同样为 0。
+
+        ⚠ **P205 契约（门禁依赖，勿破坏）**：本方法是
+        `tests/gates/gate_ltm_trace_semantics.py` 的**突变测试点**——该门禁
+        用 `t._decay_read = lambda trace, stamp, i: trace.get(i, 0.0)`
+        注入「未补偿」负向对照，并要求**能被检出**。
+        因此 `_learn_batch` 的批量路径**必须经由本方法取值**（或经由
+        `_decay_read_arr`，而后者也调本方法）；把这些取值原地内联展开会让
+        突变注入变成空操作 → 门禁负向对照恒为「未分叉」→ **检出能力静默消失**
+        （P205 实测：内联版触发 (a) 组 FAIL，`ratio_pre=1.0000`）。
         """
         v = trace.get(i, 0.0)
         if v == 0.0:
             return 0.0
         dt = self.step_count - stamp.get(i, self.step_count)
         return v if dt == 0 else v * (self.lam ** dt)
+
+    def _decay_read_arr(self, trace: dict, stamp: dict,
+                        keys: list) -> "np.ndarray":
+        """批量取 `keys` 的 λ^Δt 补偿值（P205）。
+
+        性能动机：`_learn_batch` 每步 3 组取值共 768 次，逐次调 `_decay_read`
+        的 Python 帧开销占 `_learn_batch` 的 ~10%（cProfile 实测）。
+        本方法用局部绑定（省属性链）+ 单层循环把 3 次调用收敛为 3 次，
+        每次 O(len(keys))。
+
+        ⚠ **突变测试契约**：内部**逐个**调 `self._decay_read`——
+        `gate_ltm_trace_semantics` 对 `csr_batch` 配置注入的
+        「未补偿」负向对照正是 patch 这个方法；批量入口若绕过它，
+        负向对照会变成空操作 → 门禁检出能力静默消失（P205 实测过）。
+        局部绑定的加速来自省属性链，**不是**省掉这次函数调用。
+        """
+        _dr = self._decay_read
+        out = np.empty(len(keys), dtype=np.float64)
+        for j, i in enumerate(keys):
+            out[j] = _dr(trace, stamp, i)
+        return out
 
     # ---------- 预测：p[k] = Σ_i w(i,k)（只遍历活跃神经元的出边） ----------
     def predict(self, active: list[int]) -> dict[int, float]:
@@ -407,6 +442,19 @@ class OnlineCSRTable(SparseSynapseTable):
         """
         rows: list[int] = []
         seen_rows: set[int] = set()
+        # P205：局部绑定——`_learn_batch` 每步产生 3,072 次 dict.get（cProfile
+        #   实测 921,600 次/300 步），属性链 `self.t_pre.get` 的解析是纯开销。
+        #   **逐位不变**：语义与 `self.X.get` 完全相同。
+        _t_pre = self.t_pre
+        _s_pre = self.stamp_pre
+        _t_post = self.t_post
+        _s_post = self.stamp_post
+        _size = self.size
+        _keys = self.keys
+        _pre_get = _t_pre.get
+        _sp_get = _s_pre.get
+        _post_get = _t_post.get
+        _s_post_get = _s_post.get
         for i in prev:
             if i in seen_rows:
                 # P103：prev 含重复 id 时，Python 路径会按出现次数**多次累加**
@@ -415,12 +463,18 @@ class OnlineCSRTable(SparseSynapseTable):
                 # 但一旦来源变化就是静默数值分歧 → 显式去重并写进前提。
                 continue
             seen_rows.add(i)
-            if self.t_pre.get(i, 0.0) > 0.0:
-                if i not in self.keys:
+            if _pre_get(i, 0.0) > 0.0:
+                if i not in _keys:
                     self._new_row(i)
                 rows.append(i)
         if not rows:
             return
+        # ⚠ P205 **回滚记录**：曾把 cap 收紧为 `max(len(keys[i]) for i in rows)`
+        #   想省 gather/scatter 的整行宽度 —— **错**：`_ltm_learn_rows` 核内
+        #   会把行**生长到 m_out**（最多新增到 m_out 个槽），K/V 必须预留到
+        #   m_out 的空间，否则 scatter 处 `ks_i[:sz_new] = K[r, :sz_new]`
+        #   广播失败（实测 ValueError: could not broadcast (64,) into (72,)）。
+        #   原式 `max(self.m_out, ...)` 正是为此而设，**不要改**。
         cap = max(self.m_out, max(len(self.keys[i]) for i in rows))
         R, C = len(rows), len(grow_order)
         dt = np.int16 if int8 else np.float64
@@ -429,24 +483,36 @@ class OnlineCSRTable(SparseSynapseTable):
         S = np.zeros(R, dtype=np.int64)
         tpi = np.empty(R, dtype=np.float64)
         tpi_post = np.empty(R, dtype=np.float64)
+        # ── P205：λ^Δt 补偿的批量取值（`_decay_read_arr`）──────────────────
+        # 实测（服务器形态 4096 行稳态）：table.learn 占 M4b_imprint 的 88%，
+        # 其中 768 次/步的 `_decay_read` 调用是热点（每步 2.4k 次 dict.get、
+        # 每次一层 Python 帧）。批量入口把取值收敛为 3 次数组调用；
+        # **突变测试契约**：`gate_ltm_trace_semantics` 的负向对照 patch 的
+        # 就是这组取值入口——`_decay_read_arr` 内部逐个调 `_decay_read`
+        # （单点可注入），见该方法 docstring。
+        _vals = self.vals
         for r, i in enumerate(rows):
-            sz = self.size[i]
-            K[r, :sz] = self.keys[i][:sz]
-            V[r, :sz] = self.vals[i][:sz]
+            sz = _size[i]
+            K[r, :sz] = _keys[i][:sz]
+            V[r, :sz] = _vals[i][:sz]
             S[r] = sz
-            # λ^Δt 读侧补偿：与 Python 单条路径的 _decay_read 同式（i∈prev，
-            # 未被本步 _touch ⇒ stamp 是旧步），否则批量路径读值偏大。
-            tpi[r] = float(self._decay_read(self.t_pre, self.stamp_pre, i))
-            tpi_post[r] = float(self._decay_read(self.t_post, self.stamp_post, i))
+        _rows_arr = np.asarray(rows, dtype=np.int64)
+        # tpi：`i ∈ prev`，本函数开头刚 `_touch(prev, t_pre, stamp_pre)` ⇒
+        #   stamp_pre[i]==step_count ⇒ dt≡0（实测 97% 落此分支）；仍保留
+        #   dt 判据防将来 `_touch` 调用点被移动（P193 同款缺陷）。
+        tpi = self._decay_read_arr(_t_pre, _s_pre, rows)
+        # tpi_post：`i ∈ prev` 一般**不在** cur ⇒ stamp_post 来自旧步，
+        #   补偿必须生效（P193 修的就是这条）。
+        tpi_post = self._decay_read_arr(_t_post, _s_post, rows)
         ks = np.asarray(grow_order, dtype=np.int64)
-        # `k ∈ grow_order=cur`：g_tpost 当步刚 _touch（stamp==step_count）⇒ 裸读
-        # 与 _decay_read 等价；但 **g_tpre 必须走 _decay_read**（P193）——
-        # `k` 不保证在 prev 里，其 stamp_pre 可能来自很久以前的 touch，
-        # 裸读会漏掉 λ^Δt 补偿 → LTD 偏大（与单条路径同款缺陷）。
-        g_tpost = np.asarray([self.t_post.get(k, 0.0) for k in grow_order],
-                             dtype=np.float64)
-        g_tpre = np.asarray([float(self._decay_read(self.t_pre, self.stamp_pre, k))
-                             for k in grow_order], dtype=np.float64)
+        # `k ∈ grow_order=cur`：g_tpost 当步刚 _touch ⇒ 裸读与补偿等价
+        # （P205：绑定后 `.get` + np.fromiter，免逐次函数帧）；
+        # **g_tpre 必须走补偿**（P193）——`k` 不保证在 prev 里，其
+        # stamp_pre 可能来自很久以前的 touch，裸读会漏掉 λ^Δt → LTD 偏大。
+        _tpost_get = _t_post.get
+        g_tpost = np.fromiter((_tpost_get(k, 0.0) for k in grow_order),
+                              dtype=np.float64, count=len(grow_order))
+        g_tpre = self._decay_read_arr(_t_pre, _s_pre, grow_order)
         before = S.copy()
         _ltm_learn_rows(K, V, S, tpi, tpi_post, ks, g_tpost, g_tpre,
                         float(eta), float(w_max), float(q), bool(int8),
