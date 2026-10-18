@@ -1509,6 +1509,16 @@ def main() -> None:
                 if (i - done) % args.log_every == 0:
                     k = min(args.log_every, len(seg_nll))
                     ppl = float(np.exp(np.mean(seg_nll[-k:]))) if seg_nll else float("nan")
+                    # P203：窗口内 nll 的分布摘要——sliding PPL 是 500 步几何
+                    # 平均，语料域切换时窗口内会**混着两个分布**（旧域 <5、
+                    # 新域 >9），均值掩盖分裂。min/median/max 让「域切换摆动」
+                    # 一眼可见：235 ↔ 8,587 这类 10× 摆动多数是换域，不是退化
+                    # （真退化的形态是 median 与 max 同步抬升且不回落）。
+                    _q = (np.quantile(seg_nll[-k:], [0.0, 0.5, 1.0])
+                          if seg_nll else None)
+                    _qtxt = (f"  nll[min/med/max] "
+                             f"{np.exp(_q[0]):.0f}/{np.exp(_q[1]):.0f}/{np.exp(_q[2]):.0f}"
+                             if _q is not None else "")
                     spent = time.perf_counter() - t_start
                     ms = spent / max(1, i - done) * 1000
                     # P20：读出分项（后端 + 设备 + 占比）——直接看出加速是否生效、
@@ -1520,6 +1530,7 @@ def main() -> None:
                     _probe_txt = (f"  probe_PPL {_probe_ppl:>10.4f}"
                                   if _probe_ppl is not None else "")
                     print(f"  token {i:>12,}  sliding PPL {ppl:>9.3f}{_probe_txt}"
+                          f"{_qtxt}"
                           f"  {ms:>8.2f} ms/tok"
                           f"  elapsed {spent / 60:.1f} min"
                           f"  | readout {_ro_ms / _ro_n:>7.3f} ms/tok"
