@@ -3,21 +3,91 @@ P116 方案 B（M4b imprint 摊销）+ 方案 C（稀疏前向算子）对拍
 ==============================================================================
 
 [A] 零回归：amortize=1 = 旧行为（逐位）
-[ltm-diag] imprints=10 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=176 k_hash=4
-[ltm-diag] imprints=10 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=176 k_hash=4
+[ltm-diag] imprints=1 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=32 grown=0 k_hash=4
+[ltm-diag] imprints=2 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=64 grown=0 k_hash=4
+[ltm-diag] imprints=3 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=88 grown=0 k_hash=4
+[ltm-diag] imprints=4 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=104 grown=0 k_hash=4
+[ltm-diag] imprints=5 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=115 grown=0 k_hash=4
+[ltm-diag] imprints=6 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=134 grown=0 k_hash=4
+[ltm-diag] imprints=7 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=149 grown=0 k_hash=4
+[ltm-diag] imprints=8 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=159 grown=0 k_hash=4
+[ltm-diag] imprints=9 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=163 grown=0 k_hash=4
+[ltm-diag] imprints=10 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=176 grown=0 k_hash=4
+[ltm-diag] imprints=11 prev=32 cur=31 combos=992 rate_dims=8/64 rows=179 grown=0 k_hash=4
+[ltm-diag] imprints=1 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=32 grown=0 k_hash=4
+[ltm-diag] imprints=2 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=64 grown=0 k_hash=4
+[ltm-diag] imprints=3 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=88 grown=0 k_hash=4
+[ltm-diag] imprints=4 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=104 grown=0 k_hash=4
+[ltm-diag] imprints=5 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=115 grown=0 k_hash=4
+[ltm-diag] imprints=6 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=134 grown=0 k_hash=4
+[ltm-diag] imprints=7 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=149 grown=0 k_hash=4
+[ltm-diag] imprints=8 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=159 grown=0 k_hash=4
+[ltm-diag] imprints=9 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=163 grown=0 k_hash=4
+[ltm-diag] imprints=10 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=176 grown=0 k_hash=4
+[ltm-diag] imprints=11 prev=32 cur=31 combos=992 rate_dims=8/64 rows=179 grown=0 k_hash=4
   PASS  A1 amortize=1 两次调用结果逐位相同  [keys 179==179 max|Δ|=0.000e+00]
   PASS  A2 step_count 每步递增（未被摊销吞掉）  [12 vs 12（期望 12）]
   PASS  A3 表确实生长了（对拍非空）  [n_keys=179]
 
 [B] 方案 B（M4b imprint 摊销）**已于 P122 移除** —— 验证 fail-fast
+[ltm-diag] imprints=1 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=32 grown=0 k_hash=4
+[ltm-diag] imprints=2 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=64 grown=0 k_hash=4
+[ltm-diag] imprints=3 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=88 grown=0 k_hash=4
+[ltm-diag] imprints=4 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=104 grown=0 k_hash=4
+[ltm-diag] imprints=5 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=115 grown=0 k_hash=4
+[ltm-diag] imprints=6 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=134 grown=0 k_hash=4
+[ltm-diag] imprints=7 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=149 grown=0 k_hash=4
   PASS  B1 amortize=1（默认）正常工作，step_count 每步递增  [step_count=8/8]
   PASS  B2 amortize=2 → ValueError fail-fast
   PASS  B2 amortize=3 → ValueError fail-fast
   PASS  B2 amortize=8 → ValueError fail-fast
   PASS  B2 amortize=64 → ValueError fail-fast
+[ltm-diag] imprints=1 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=32 grown=0 k_hash=4
+[ltm-diag] imprints=2 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=64 grown=0 k_hash=4
+[ltm-diag] imprints=3 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=88 grown=0 k_hash=4
+[ltm-diag] imprints=4 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=104 grown=0 k_hash=4
+[ltm-diag] imprints=5 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=115 grown=0 k_hash=4
+[ltm-diag] imprints=6 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=134 grown=0 k_hash=4
+[ltm-diag] imprints=7 prev=32 cur=32 combos=1024 rate_dims=8/64 rows=149 grown=0 k_hash=4
   PASS  B3 无摊销缓冲区残留（旧实现会永久滞留尾部对 = 持续丢数据）
-[ltm-diag] imprints=10 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,016 k_hash=4
-[ltm-diag] imprints=10 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,016 k_hash=4
+[ltm-diag] imprints=1 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=512 grown=0 k_hash=4
+[ltm-diag] imprints=1 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=512 grown=0 k_hash=4
+[ltm-diag] imprints=2 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=984 grown=0 k_hash=4
+[ltm-diag] imprints=2 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=984 grown=0 k_hash=4
+[ltm-diag] imprints=3 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=1,379 grown=0 k_hash=4
+[ltm-diag] imprints=3 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=1,379 grown=0 k_hash=4
+[ltm-diag] imprints=4 prev=512 cur=511 combos=261632 rate_dims=128/1024 rows=1,723 grown=0 k_hash=4
+[ltm-diag] imprints=4 prev=512 cur=511 combos=261632 rate_dims=128/1024 rows=1,723 grown=0 k_hash=4
+[ltm-diag] imprints=5 prev=511 cur=512 combos=261632 rate_dims=128/1024 rows=2,043 grown=0 k_hash=4
+[ltm-diag] imprints=5 prev=511 cur=512 combos=261632 rate_dims=128/1024 rows=2,043 grown=0 k_hash=4
+[ltm-diag] imprints=6 prev=512 cur=511 combos=261632 rate_dims=128/1024 rows=2,310 grown=0 k_hash=4
+[ltm-diag] imprints=6 prev=512 cur=511 combos=261632 rate_dims=128/1024 rows=2,310 grown=0 k_hash=4
+[ltm-diag] imprints=7 prev=511 cur=512 combos=261632 rate_dims=128/1024 rows=2,523 grown=0 k_hash=4
+[ltm-diag] imprints=7 prev=511 cur=512 combos=261632 rate_dims=128/1024 rows=2,523 grown=0 k_hash=4
+[ltm-diag] imprints=8 prev=512 cur=511 combos=261632 rate_dims=128/1024 rows=2,714 grown=0 k_hash=4
+[ltm-diag] imprints=8 prev=512 cur=511 combos=261632 rate_dims=128/1024 rows=2,714 grown=0 k_hash=4
+[ltm-diag] imprints=9 prev=511 cur=512 combos=261632 rate_dims=128/1024 rows=2,893 grown=0 k_hash=4
+[ltm-diag] imprints=9 prev=511 cur=512 combos=261632 rate_dims=128/1024 rows=2,893 grown=0 k_hash=4
+[ltm-diag] imprints=10 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,016 grown=0 k_hash=4
+[ltm-diag] imprints=10 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,016 grown=0 k_hash=4
+[ltm-diag] imprints=11 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,168 grown=0 k_hash=4
+[ltm-diag] imprints=11 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,168 grown=0 k_hash=4
+[ltm-diag] imprints=12 prev=512 cur=511 combos=261632 rate_dims=128/1024 rows=3,252 grown=0 k_hash=4
+[ltm-diag] imprints=12 prev=512 cur=511 combos=261632 rate_dims=128/1024 rows=3,252 grown=0 k_hash=4
+[ltm-diag] imprints=13 prev=511 cur=512 combos=261632 rate_dims=128/1024 rows=3,364 grown=0 k_hash=4
+[ltm-diag] imprints=13 prev=511 cur=512 combos=261632 rate_dims=128/1024 rows=3,364 grown=0 k_hash=4
+[ltm-diag] imprints=14 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,456 grown=0 k_hash=4
+[ltm-diag] imprints=14 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,456 grown=0 k_hash=4
+[ltm-diag] imprints=15 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,544 grown=0 k_hash=4
+[ltm-diag] imprints=15 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,544 grown=0 k_hash=4
+[ltm-diag] imprints=16 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,604 grown=0 k_hash=4
+[ltm-diag] imprints=16 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,604 grown=0 k_hash=4
+[ltm-diag] imprints=17 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,676 grown=0 k_hash=4
+[ltm-diag] imprints=17 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,676 grown=0 k_hash=4
+[ltm-diag] imprints=18 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,744 grown=0 k_hash=4
+[ltm-diag] imprints=18 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,744 grown=0 k_hash=4
+[ltm-diag] imprints=19 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,796 grown=0 k_hash=4
+[ltm-diag] imprints=19 prev=512 cur=512 combos=262144 rate_dims=128/1024 rows=3,796 grown=0 k_hash=4
   PASS  B4 生产尺寸（n_dim=1024/m_out=72）两臂逐位相同  [共同键 3796，max|Δw|=0.000e+00]
   PASS  B5 键数相同  [3796 vs 3796]
   PASS  B6 config.ltm_imprint_amortize 默认=1

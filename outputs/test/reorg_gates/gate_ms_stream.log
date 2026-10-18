@@ -41,7 +41,7 @@ ms:// 纯函数验证（零网络）
   ✓ 编译通过: phdnet/readout.py
   ✓ 编译通过: tests/gates/gate_ms_stream.py
   ✓ train.py --help 可执行（导入 + argparse 正常）
-  · 静态提示（不参与判据）：疑似裸 % 于 train\train.py:266 —— 请以实际 --help 是否通过为准
+  · 静态提示（不参与判据）：疑似裸 % 于 train\train.py:279 —— 请以实际 --help 是否通过为准
   ✓ 无重复定义的 CLI 选项（P134）— 已扫描 42 个入口
   ✓ 所有 argparse 入口 --help 均可执行（42 个候选文件）
 

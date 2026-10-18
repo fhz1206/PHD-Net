@@ -1,13 +1,17 @@
-"""P9 精度体系验证（2026-09-26，fhz 指令：停止 fp64；fp16/bf16/fp8/fp4；默认 fp32）。
+"""P9 精度体系验证（P201 重写为现存精度口径）。
 
-L1 逐位：各量化 dtype 的位算法融合核 vs numpy 参考
-        （fp16=IEEE RNE astype / bf16=RNE 位截断 / fp8·fp4=格点 searchsorted，
-        内核与参考的舍入约定逐格式对齐）→ 码本逐元素一致；
+L1 逐位：各量化 dtype 的位算法融合核 vs numpy 参考（码本逐元素一致）；
 L2 带宽：V=9219 × H=3072（1B 预设真实读出规模）各 dtype 更新核耗时/等效带宽/存储；
-L3 端到端：冻结语料 BASE 口径（4,000 字符训练段）各 dtype 的 ppl_char 与 ms/token；
-        fp32 / fp16 另测全语料口径。
-"""
+L3 端到端：冻结语料 BASE 口径（4,000 字符训练段）各 dtype 的 ppl_char 与 ms/token。
 
+## P201 修订（2026-10-18）
+原版本 import `_ro_q_update_fp4` / `quantize_fp4_mx` / `FP4_BLOCK` ——
+**fp4 已于 P191e 整体删除**（`RO_DTYPES = (fp32, fp16, bf16, int8, int16, int32)`）
+→ ImportError（.gitcode CI 的 precision job 必挂）。同时路径基准算错
+（`_ROOT = dirname(_HERE)` 得 tools/ 而非仓库根）→ `eval_common` 也找不到。
+现口径：**fp32 / fp16 / bf16 / fp8**（int8/int16/int32 是 CPU 码本路径的
+整数档，更新核同族，不单独跑 L1）。
+"""
 from __future__ import annotations
 
 import os
@@ -15,7 +19,9 @@ import sys
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_HERE)
+# P201 修复：`_HERE` = tools/eval/，原 `_ROOT = dirname(_HERE)` 得 **tools/**
+#   （不是仓库根）→ `tests/evals` 拼成 tools/tests/evals → ModuleNotFoundError。
+_ROOT = os.path.dirname(os.path.dirname(_HERE))
 os.chdir(_ROOT)
 sys.path.insert(0, _ROOT)
 sys.path.insert(0, os.path.join(_ROOT, "tests", "evals"))
@@ -26,16 +32,18 @@ import numba                                              # noqa: E402
 from eval_common import BASE, DOC, SEG                    # noqa: E402
 from phdnet.config import PHDNetConfig                    # noqa: E402
 from phdnet.readout import (Readout, RO_DTYPES, _ro_dense_update,   # noqa: E402
-                            _ro_q_update_fp16, _ro_q_update_bf16,
-                            _ro_q_update_fp8, _ro_q_update_fp4,
-                            _q_scratch, quantize_to, dequantize_from,
-                            quantize_fp4_mx, dequantize_fp4_mx,
-                            _q_fp4_row_sr, FP4_BLOCK)
+                             _ro_q_update_fp16, _ro_q_update_bf16,
+                             _ro_q_update_fp8,
+                             _q_scratch, quantize_to, dequantize_from)
 from phdnet.word_lm import PHDWordLM                      # noqa: E402
 
-UPD = {"fp32": _ro_dense_update, "fp16": _ro_q_update_fp16,
-       "bf16": _ro_q_update_bf16, "fp8": _ro_q_update_fp8,
-       "fp4": _ro_q_update_fp4}
+# P201：fp4 已删（P191e）→ 只保留现存四个低精度档
+UPD = {"fp16": _ro_q_update_fp16,
+       "bf16": _ro_q_update_bf16,
+       "int8": _ro_q_update_fp8}
+FMT_BYTES = {"fp32": 4, "fp16": 2, "bf16": 2, "int8": 1}
+# P100 起旧名 "fp8" 已更名 "int8"（P189 用 int8 码本承载 fp8 位模式存储）；
+# P201 把本工具的口径统一到 RO_DTYPES 现存名。
 
 
 def np_reference(fmt: str, codes, wscale: float, dp, h, eta) -> np.ndarray:
@@ -56,28 +64,7 @@ def np_reference(fmt: str, codes, wscale: float, dp, h, eta) -> np.ndarray:
         c = np.where(c >= np.uint32(0x7F80), np.uint32(0x7F7F), c)
         return (c | (sign >> 16)).astype(np.uint16).ravel()
     flat = w.ravel()
-    if fmt == "fp4":
-        flat = flat / wscale
     return quantize_to(fmt, flat)
-
-
-def _np_reference_fp4_mx(codes, ws, dp, h, eta, step: int = 0,
-                         block: int = FP4_BLOCK):
-    """fp4 MX+SR 更新的 numpy 参考：dequant(旧块缩放) → f32 更新 → 按块重算
-    缩放 → 逐行 SR 重量化（与 numba 核逐位一致）。"""
-    V, H = dp.shape[0], h.shape[0]
-    w = dequantize_fp4_mx(codes, ws, V * H).reshape(V, H) \
-        - (dp[:, None] * h[None, :]) * eta
-    n_blk = (H + block - 1) // block
-    Wp = np.zeros((V, n_blk * block), dtype=np.float32)
-    Wp[:, :H] = w
-    B = Wp.reshape(V, n_blk, block)
-    m = np.abs(B).max(axis=2)
-    ws2 = np.where(m > 0, m / 6.0, 1.0).astype(np.float32)
-    q = np.empty((V, n_blk * block), dtype=np.uint8)
-    for i in range(V):
-        q[i] = _q_fp4_row_sr(Wp[i], ws2[i], step, i, H, block)
-    return ((q[:, 0::2] | (q[:, 1::2] << 4)).astype(np.uint8)).ravel(), ws2
 
 
 def l1() -> bool:
@@ -85,7 +72,7 @@ def l1() -> bool:
     rng = np.random.default_rng(7)
     ok_all = True
     scr = _q_scratch()
-    for fmt in ("fp16", "bf16", "fp8", "fp4"):
+    for fmt in ("fp16", "bf16", "int8"):
         ok_fmt = True
         for trial in range(3):
             V, H = 300, 256
@@ -93,23 +80,10 @@ def l1() -> bool:
             dp = (rng.random(V) * 0.01).astype(np.float32)
             h = rng.standard_normal(H).astype(np.float32)
             eta = np.float32(0.05)
-            if fmt == "fp4":
-                # P12：fp4 = MX 块缩放（K=16），对拍核 vs numpy MX 参考
-                codes_a, ws_a = quantize_fp4_mx(W0)
-                codes_b = codes_a.copy()
-                ws_orig = ws_a.copy()          # 核会就地更新 ws → 参考须用进入时快照
-                n_blk = (H + FP4_BLOCK - 1) // FP4_BLOCK
-                wrow = np.empty((numba.get_num_threads(), H), dtype=np.float32)
-                mxs = np.empty((numba.get_num_threads(), n_blk), dtype=np.float32)
-                UPD[fmt](codes_a, wrow, mxs, dp, h, eta, H, ws_a, 777)
-                ref = _np_reference_fp4_mx(codes_b, ws_orig, dp, h, eta, step=777)
-                ok_fmt &= bool(np.array_equal(ws_a, ref[1]))
-                ref = ref[0]
-            else:
-                codes_a = quantize_to(fmt, W0).reshape(-1).copy()
-                codes_b = quantize_to(fmt, W0).reshape(-1).copy()
-                UPD[fmt](codes_a, scr, dp, h, eta, H)
-                ref = np_reference(fmt, codes_b, 1.0, dp, h, eta)
+            codes_a = quantize_to(fmt, W0).reshape(-1).copy()
+            codes_b = quantize_to(fmt, W0).reshape(-1).copy()
+            UPD[fmt](codes_a, scr, dp, h, eta, H)
+            ref = np_reference(fmt, codes_b, 1.0, dp, h, eta)
             ok_fmt &= bool(np.array_equal(codes_a.astype(np.int64),
                                           np.asarray(ref).astype(np.int64)))
         ok_all &= ok_fmt
@@ -121,7 +95,7 @@ def l2() -> None:
     print("[L2] 更新核带宽（V=9219 × H=3072，1B 预设真实读出规模）")
     V, H = 9219, 3072
     scr = _q_scratch()
-    for fmt in ("fp32", "fp16", "bf16", "fp8", "fp4"):
+    for fmt in ("fp32", "fp16", "bf16", "int8"):
         rng = np.random.default_rng(11)
         if fmt == "fp32":
             W = (rng.standard_normal((V, H)) * 0.01).astype(np.float32)
@@ -129,7 +103,6 @@ def l2() -> None:
             h = rng.standard_normal(H).astype(np.float32)
             eta = np.float32(0.05)
             args = (W, dp, h, eta)
-            nbytes = 4
 
             def K(a, b, c, d):
                 _ro_dense_update(a, b, c, d)
@@ -138,16 +111,9 @@ def l2() -> None:
             h = rng.standard_normal(H).astype(np.float32)
             eta = np.float32(0.05)
             K = UPD[fmt]
-            if fmt == "fp4":
-                codes, ws = quantize_fp4_mx(rng.standard_normal((V, H)) * 0.01)
-                n_blk = (H + FP4_BLOCK - 1) // FP4_BLOCK
-                wrow = np.empty((numba.get_num_threads(), H), dtype=np.float32)
-                mxs = np.empty((numba.get_num_threads(), n_blk), dtype=np.float32)
-                args = (codes, wrow, mxs, dp, h, eta, H, ws, 0)
-            else:
-                codes = quantize_to(fmt, rng.standard_normal((V, H)) * 0.01)
-                args = (codes, scr, dp, h, eta, H)
-            nbytes = {"fp16": 2, "bf16": 2, "fp8": 1, "fp4": 0.5}[fmt]
+            codes = quantize_to(fmt, rng.standard_normal((V, H)) * 0.01)
+            args = (codes, scr, dp, h, eta, H)
+        nbytes = FMT_BYTES[fmt]
         K(*args)                                          # JIT 预热
         t = time.perf_counter()
         for _ in range(5):
@@ -193,9 +159,9 @@ def l3(dtype_list) -> None:
 
 if __name__ == "__main__":
     print(f"numba threads = {numba.get_num_threads()}")
+    print(f"RO_DTYPES = {RO_DTYPES}（P201：fp4/int4 已于 P191e 删除）")
     ok = l1()
     l2()
-    l3(("fp32", "fp16", "bf16", "fp8", "fp4"))
+    l3(("fp32", "fp16", "bf16", "int8"))
     print("-" * 76)
-    print(f"L1 {'PASS' if ok else 'FAIL'}；L2/L3 数据见上。"
-          "默认 readout_dtype=fp32（fhz 指令）；fp64 已停止支持。")
+    print(f"L1 {'PASS' if ok else 'FAIL'}；L2/L3 数据见上。")

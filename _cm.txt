@@ -1,42 +1,57 @@
-P200: 全量重写文档 + 介绍网页 + 清理调试文件（子代理并行协作）
+P202: 性能三修复 + CI 两根因 + 日志降噪（诊断驱动，逐位不等价项全过门禁）
 
-## 清理（用户指令："_fix 这种的可以删除"）
-- 删 _fixroot.py / _fixroot2.py / _dbg_path.py（目录重组时的一次性调试脚本）
-- 删 _cm.txt（提交信息临时文件，此前误入版本库）
-- 删 outputs/test/_rt_dbg*.json（调试输出）
+## 背景（用户实测 1b 档 step 23.05ms/tok，segments 只对上 10.44）
+P201 诊断报告（docs/PHD-Net_P201_M2-PC并行瓶颈诊断.md，551 行）：
+cProfile + 14 个 micro-benchmark 系统性排查，结论按证据强度排序。
 
-## 全量重写（子代理，均先读源码核实后落笔）
-- README.md（221 行）：P199 现状、10 节、徽章数字、诚实边界
-- docs/index.html（354 行）：three.js 3D 导览（1303 行 + 外部 CDN）
-  → 单文件静态深色科研页，零外部依赖：M1-M6 数据流 + 9 张机制卡片
-- docs/PHD-Net_架构设计.md（375 行）：M1-M6 逐模块 + 新增「学习能力层
-  P194-P198」专章 + 数据流 ASCII 图 + 精度体系表
-- docs/PHD-Net_现状速查.md（121 行）：从"记忆归档"改为一页式事实基线，
-  51 项开关默认值全部源码核实
-- docs/PHD-Net_竞争力与脑同构性评估.md（230 行）：16 行机制完整性判级表
-  （✅10/◐3/○4）+ 能力三态（记忆✓/会话学习✓/生成✗）
-- 就地更新：性能评估/硬件后端/并行加速/CPU-NPU/扩展指南/写作基线/
-  文档规范/BUGS/tools README/backends README/chat README/docs README
+## ① PC_learn：homeostasis 融合核（12 次核调用 → 1 次，1.34×）
+P201 发现：config_1b.py:112 homeostasis=True 使 _pc_learn_fused 被整体
+旁路（sparse_pc.py L738）→ 生产 PC_learn 实为 12 次独立 numba 核调用，
+其中 4 次 _csr_clip 无 prange = learn 里唯一串行 O(nnz) 扫描。
+修复：
+- _csr_clip 加 parallel+nogil（逐元素 clamp 无归约，与融合核内已有
+  prange clip 同构；本机线程缩放 1.31× → 与 add_outer 同级）
+- 新增 _pc_learn_fused_homeo：add_outer×2 + oja×2 + clip×4 +
+  scale_rows×4 融为 1 次调用，表达式与写序逐行照抄 Python 路径
+- 验证：_p202_parity.py 四组合对拍全部逐位一致
+  （homeostasis×eta_oja = T/F × 0/0.01）；1b 尺寸 A/B 1.34×
+- gate_m2_infer_kernels C5b 期望 5→6 个 nogil 核（>=6 不写死）
 
-## 删除的过时声明（跨全部文档）
-rust/phdnet_rs 现行引用、sparse_conn 现行引用、fp4/int4（仅存"已删除"
-注记）、readout 默认 fp8（→fp32 P194）、eta_pc=0 铁律（→发育窗口
-pc_dev_steps=20000）、ltm_imprint_gate 0.8（→0.3）、旧门禁计数、
-旧 PPL 锚点、词表 73,958 旧口径、--readout-conn-k 默认 0 旧说法
+## ② NPU/CPU 拉平（replay 段）
+cProfile 定位 other 段（step 内未打点部分，smoke 实测 5.94/11.40=52%）：
+readout _apply_update（CPU-only 路径）+ sparse_table.learn + replay 里
+的完整 encoder+pc.infer+readout 链路。
+- 新增计时段：M6_replay（此前完全不可见）、M5_novelty、M6_build_h、
+  other（每步未打点余额，_prof_close_step）→ segments 与 step 总时长自洽
+- 服务器实测 replay 占 ~3ms/tok（每 4 步一次完整前向+读出更新）
+- 新 CLI：--replay-every N（默认 4；16 → 0.27ms/tok，6×）
+  --no-readout-replay（立省 ~1ms/tok，附 P197 取舍警告）
+- 实测 A/B（smoke win 合计除 other）：3.16 → 0.97/2.18 ms/tok
 
-## 连带修复（重测中发现）
-gate_csr_vectorization_perf.py B 组硬依赖 %TEMP%/perf_golden_.npz
-（仓库外一次性产物）→ 换机器必失败（实测 46/47）。改为自包含：
-golden 由同文件朴素参考实现即时生成，逐位对拍强度不变 → 32/32 PASS
+## ③ 日志降噪（用户指示「不要打印那么多」）
+- [big-ltm] 16.5万行 → 仅存档/里程碑时打（缩进修复：
+  _print_table_stats 曾在 while 内每 token 执行，占日志94%）
+- [ltm-diag] 8800 行 → 仅 rows/grown 变化时打（稳态零输出）
+- utilization 误导修复：capacity=2^24×72 是防冲突池，可寻址子空间仅
+  n_dim×k_hash=4096 → 新增 addressable 饱和度列
+  （实测 addressable 1,020/1,024=99.6% vs pool util 0.097%）
+- ltm-diag 稳态零输出（变才打），新增 grown 列
 
-## 统一口径
-datasets/README.md smoke 实测 2474→1457（旧配置）统一为
-2474→1308（P198 复测口径），与 README/index.html 一致
+## ④ CI 两个根因（.github/.gitcode 镜像 CI 报错修复）
+- gate_eval_readonly: eval_tasks_lm 在 tests/evals/ 而非 tests/
+  → ModuleNotFoundError；sys.path 补 tests/evals
+- tools/eval/audit_precision.py: ①_ROOT=dirname(_HERE) 得 tools/ 而非
+  仓库根；②import 已删除的 fp4 符号（P191e）→ ImportError；
+  ③旧名 fp8 已更名 int8（P100）。重写为现存四档（fp32/fp16/bf16/int8），
+  本机完整跑通（L1 PASS，L2/L3 数据完整）
 
 ## 验证
 - run_tests.py 9/9；run_gates.py 47/47
-- 文档关键数字 vs 源码自动核对 7/7（gates 47、9/9、fp32、eta_oja=0.0、
-  ltm_gate 0.3、1b big_m 72、cli conn_k 128）
-- index.html 零外部依赖（grep 确认）
-- 全仓 docs 硬过时终检：phdnet_rs/m2_backend/rs_threads/sparse_conn/
-  train_production.py 的现行引用为零（仅存"已删除/作废"注记）
+- 逐位对拍：homeo 融合核 vs Python 12 次调用 4/4 组合
+- gate_m2_infer_kernels 13/13（C5b 期望随 P202 更新）
+- 诊断报告入 docs/PHD-Net_P201_M2-PC并行瓶颈诊断.md
+
+## 服务器待办（零风险 A/B，按 P201 建议 3/6）
+- --numba-threads 8/16/32 A/B（判据 segments(win) + CS/s）
+- --nll-sync-every 1 vs 8（证实/否证 NPU 等 CPU 假设）
+- idx int64→int32（-33% 访存，最大潜力但触及 ckpt 格式，最后做）

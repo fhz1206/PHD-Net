@@ -231,12 +231,43 @@ class PHDNet:
         """
         if self._prof_on:
             self._prof_win_n += 1
+            # P202：记录本步起点，供 `_prof_close_step()` 算「未打点余额」——
+            # step 总时长 − 各段之和。此前无此项，用户实测 win 合计 10.44
+            # vs step 23.05，差额 12.6ms/tok 查不到源头。
+            self._prof_step_t0 = time.perf_counter()
+
+    def _prof_close_step(self) -> None:
+        """把「本步总时长 − 已计段之和」记入 `other` 段（P202）。
+
+        由 `step()` 返回前调用。让 segments 之和与 step 总时长**自洽**，
+        未打点代码（_build_h / _sdr_novelty / _rate / _exp EMA / sleep 等）
+        的开销从此可见，而不是消失在差额里。
+        """
+        if not self._prof_on:
+            return
+        t0 = getattr(self, "_prof_step_t0", None)
+        if t0 is None:
+            return
+        total = time.perf_counter() - t0
+        accounted = 0.0
+        # 本步已计的段：直接读 _prof_win 的**增量**不可靠（段名可能跨步出现），
+        # 故用轻量做法——每步开始时把 _prof_win 做快照太重；改为在 _prof_end
+        # 里同步累计「本步已计」，这里直接读该累计值。
+        accounted = getattr(self, "_prof_step_accounted", 0.0)
+        residual = total - accounted
+        if residual > 0.0:
+            self._prof["other"] = self._prof.get("other", 0.0) + residual
+            self._prof_win["other"] = self._prof_win.get("other", 0.0) + residual
+        self._prof_step_accounted = 0.0
 
     def _prof_end(self, name: str, t0) -> None:
         if t0 is not None:
             d = time.perf_counter() - t0
             self._prof[name] = self._prof.get(name, 0.0) + d
             self._prof_win[name] = self._prof_win.get(name, 0.0) + d
+            # P202：同步累计「本步已计」，供 _prof_close_step 算未打点余额
+            self._prof_step_accounted = (
+                getattr(self, "_prof_step_accounted", 0.0) + d)
 
     def reset_prof_window(self) -> None:
         """清空**滑窗**计时（`_prof_win` / `_prof_win_n`）。
@@ -316,6 +347,12 @@ class PHDNet:
         灾难性遗忘（M8.A 诊断链的对症机制之一）。唯一被写入的是 readout.W。
         """
         cfg = self.cfg
+        # P202：给回放加计时段——它含一次完整 encoder.encode + pc.infer +
+        # stdp.predict + readout.learn_softmax（与主路径同量级），此前
+        # **完全不在任何段计时内** → step 总时长与 segments 之和差 ~12ms/tok
+        # （用户 2026-10-18 实测：win 合计 10.44 vs step 23.05），缺口查不到源头。
+        # replay_every=4 → 每 4 步一次，摊销到每步 ≈ 该项/4。
+        _pr = self._prof_t('M6_replay')
         x0, t_idx = self._replay_buf[int(self._replay_rng.integers(len(self._replay_buf)))]
         s0, _ = self.encoder.encode(x0)
         c = self.pc.infer(s0, cfg.n_infer_steps)
@@ -327,6 +364,7 @@ class PHDNet:
         tgt = np.zeros(n_out)
         tgt[t_idx] = 1.0
         self.readout.learn_softmax(h, tgt, self._ro_eta * cfg.replay_eta)
+        self._prof_end('M6_replay', _pr)
 
     def step(self, x: np.ndarray, target: np.ndarray | None = None,
              learn: bool = True, readonly: bool = False,
@@ -384,8 +422,12 @@ class PHDNet:
         # P197：SDR 支撑集新颖性（补偿 surprise 的幅度盲区，见 _sdr_novelty）。
         # 只读路径也计算（它不改状态，纯粹是查表 + 命中计数；但**不登记**
         # 新模式——那会让评估前向污染训练期的"已见"集合）。
+        # P202：单独计时——用户实测 `other` 段占 step 的 52%（smoke 档
+        # 5.94/11.40 ms/tok），需拆开定位。
+        _p = self._prof_t('M5_novelty')
         novelty = (self._sdr_novelty(rate) if self._sdr_nov_on else 0.0) \
             if not readonly else self._peek_sdr_novelty(rate)
+        self._prof_end('M5_novelty', _p)
         if not readonly:
             _p = self._prof_t('M5_mod')
             gate, mode = self.modulator.observe(surprise)    # 4. M5 神经调制
@@ -469,7 +511,10 @@ class PHDNet:
         #
         # 这里只做**纯异步**：`nll` 不再在每步同步（默认沿用 nll_sync_every），
         # 语义与现有 P34 行为完全一致，故不需要额外开关。
+        # P202：`_build_h` 单独计时（此前归入 `other`；实测 other 占 step 52%）
+        _p = self._prof_t('M6_build_h')
         h = self._build_h(r2, pred_feat, fused)              # 7. M6 读出（拼装见 _build_h）
+        self._prof_end('M6_build_h', _p)
         # P20：读出计时（后端可能是 numba CPU 或加速器设备）。两次 perf_counter
         # ≈ 0.2 μs，相对读出本身（ms 级）可忽略；只累计时间不改变任何数值。
         _t_ro = time.perf_counter()
@@ -654,6 +699,9 @@ class PHDNet:
             self._last_rate = rate      # T3.1：每步跟踪预测特征（只读时冻结以保证评估可复现）
             self.step_count += 1
 
+        # P202：本步收尾计时（未打点余额 → `other` 段）。必须在 return 前、
+        # 所有 _prof_end 都执行完之后——否则余额会漏算已计段。
+        self._prof_close_step()
         return {"seq_err": seq_err, "surprise": surprise, "gate": gate,
                 "mode": mode, "wm_written": wm_written, "recall_hit": recall_hit,
                 "nll": nll, "y": y, "r2": r2, "pred": pred, "rate": rate}

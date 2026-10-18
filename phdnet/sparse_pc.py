@@ -90,9 +90,14 @@ if NUMBA_OK:                                        # pragma: no cover
             for p in range(indptr[i], indptr[i + 1]):
                 val[p] += eta * pi * (pre[idx[p]] - pi * val[p])
 
-    @njit(cache=True, fastmath=True)
+    # P202：加 prange + nogil —— 此前**无并行**（P201 诊断：生产路径
+    # `homeostasis=True` 走 12 次独立核调用，其中 4 次 `_csr_clip` 是
+    # learn 里唯一真正串行的 O(nnz) 全扫描；本机线程缩放 1T/8T 仅 1.31×，
+    # 而有 prange 的同类核是 2.7-4.0×）。逐位不变：逐元素 clamp 无归约
+    # 顺序问题，与 `_pc_learn_fused` L453-476 已有的 prange clip 完全同构。
+    @njit(cache=True, fastmath=True, parallel=True, nogil=True)
     def _csr_clip(val, w_max):
-        for p in range(val.shape[0]):
+        for p in prange(val.shape[0]):
             v = val[p]
             if v > w_max:
                 val[p] = w_max
@@ -485,6 +490,147 @@ else:                                                   # numba 缺失回退
         for t in (up0, up1, dn0, dn1):
             _csr_clip(t[2], w_max)
 
+
+# ── P202：homeostasis 变体融合核（生产 1b 档走的就是这条路）──────────────
+# P201 诊断的实测结论：`config_1b.py:112 homeostasis=True` 使 `_pc_learn_fused`
+# 被整体旁路（`learn()` L738 的 `if not homeostasis`），生产路径变成
+# **12 次独立核调用**，其中 4 次 `_csr_clip` 原先无 prange（已修，P202）。
+# 本核把剩余 12 次融成 1 次：add_outer×2 + oja×2 + clip×4 + scale_rows×4。
+#
+# **逐位一致的依据**（与 `_pc_learn_fused` 同标准）：
+#   · 每个子操作的表达式与遍历顺序**逐行照抄** Python 路径
+#     （`learn()` L748-759 → `_homeostatic_scale()` L809-814）；
+#   · `_csr_scale_rows` 的 `nrm = s ** 0.5` + `f = target[i]/nrm` 在 prange 内
+#     逐行独立（无跨行归约）→ 行序无关；
+#   · 同一 val 不被多个子操作写（add_outer/oja 写 val、scale_rows 也写 val ——
+#     ⚠ 这里**有**写序依赖：Python 路径的顺序是 add_outer→oja→clip→scale_rows，
+#     本核严格保持该顺序 → 逐位一致。门禁 gate_parallel_consistency.py 的
+#     B 组对拍的就是这条路径。
+# ⚠ eta_oja=0（P198 生产默认）时 oja 两段是 no-op，但仍保留在核内以保持
+#   「homeostasis 开 + eta_oja>0」这个组合的语义（P198 只禁生产默认值，
+#   不删机制）。
+if NUMBA_OK:
+    @njit(cache=True, nogil=True, parallel=True, fastmath=True)
+    def _pc_learn_fused_homeo(dn0, dn1, up0, up1, e0, e1, r1, r2, s0,
+                              eta_pc, eta_oja, w_max,
+                              hn_up0, hn_up1, hn_dn0, hn_dn1):
+        # ① 下行生成：val += η·e0[i]·r1[j]（照抄 _csr_add_outer）
+        n = dn0[0].shape[0] - 1
+        for i in prange(n):
+            ai = e0[i]
+            if ai == 0.0:
+                continue
+            for p in range(dn0[0][i], dn0[0][i + 1]):
+                dn0[2][p] += eta_pc * ai * r1[dn0[1][p]]
+        n = dn1[0].shape[0] - 1
+        for i in prange(n):
+            ai = e1[i]
+            if ai == 0.0:
+                continue
+            for p in range(dn1[0][i], dn1[0][i + 1]):
+                dn1[2][p] += eta_pc * ai * r2[dn1[1][p]]
+        # ② 上行识别：Oja（照抄 _csr_oja_up）
+        n = up0[0].shape[0] - 1
+        for i in prange(n):
+            pi = r1[i]
+            if pi == 0.0:
+                continue
+            for p in range(up0[0][i], up0[0][i + 1]):
+                up0[2][p] += eta_oja * pi * (s0[up0[1][p]] - pi * up0[2][p])
+        n = up1[0].shape[0] - 1
+        for i in prange(n):
+            pi = r2[i]
+            if pi == 0.0:
+                continue
+            for p in range(up1[0][i], up1[0][i + 1]):
+                up1[2][p] += eta_oja * pi * (r1[up1[1][p]] - pi * up1[2][p])
+        # ③ clip ×4（照抄 _csr_clip，P202 起该核本身也有 prange）
+        for p in prange(up0[2].shape[0]):
+            v = up0[2][p]
+            if v > w_max:
+                up0[2][p] = w_max
+            elif v < -w_max:
+                up0[2][p] = -w_max
+        for p in prange(up1[2].shape[0]):
+            v = up1[2][p]
+            if v > w_max:
+                up1[2][p] = w_max
+            elif v < -w_max:
+                up1[2][p] = -w_max
+        for p in prange(dn0[2].shape[0]):
+            v = dn0[2][p]
+            if v > w_max:
+                dn0[2][p] = w_max
+            elif v < -w_max:
+                dn0[2][p] = -w_max
+        for p in prange(dn1[2].shape[0]):
+            v = dn1[2][p]
+            if v > w_max:
+                dn1[2][p] = w_max
+            elif v < -w_max:
+                dn1[2][p] = -w_max
+        # ④ scale_rows ×4（照抄 _csr_scale_rows：行范数 → target/nrm 缩放）
+        #    ⚠ target 是**构造期快照**（self._hn_*），本核只读不写。
+        n = up0[0].shape[0] - 1
+        for i in prange(n):
+            s = 0.0
+            for p in range(up0[0][i], up0[0][i + 1]):
+                s += up0[2][p] * up0[2][p]
+            nrm = s ** 0.5
+            if nrm < 1e-12:
+                nrm = 1e-12
+            f = hn_up0[i] / nrm
+            for p in range(up0[0][i], up0[0][i + 1]):
+                up0[2][p] *= f
+        n = up1[0].shape[0] - 1
+        for i in prange(n):
+            s = 0.0
+            for p in range(up1[0][i], up1[0][i + 1]):
+                s += up1[2][p] * up1[2][p]
+            nrm = s ** 0.5
+            if nrm < 1e-12:
+                nrm = 1e-12
+            f = hn_up1[i] / nrm
+            for p in range(up1[0][i], up1[0][i + 1]):
+                up1[2][p] *= f
+        n = dn0[0].shape[0] - 1
+        for i in prange(n):
+            s = 0.0
+            for p in range(dn0[0][i], dn0[0][i + 1]):
+                s += dn0[2][p] * dn0[2][p]
+            nrm = s ** 0.5
+            if nrm < 1e-12:
+                nrm = 1e-12
+            f = hn_dn0[i] / nrm
+            for p in range(dn0[0][i], dn0[0][i + 1]):
+                dn0[2][p] *= f
+        n = dn1[0].shape[0] - 1
+        for i in prange(n):
+            s = 0.0
+            for p in range(dn1[0][i], dn1[0][i + 1]):
+                s += dn1[2][p] * dn1[2][p]
+            nrm = s ** 0.5
+            if nrm < 1e-12:
+                nrm = 1e-12
+            f = hn_dn1[i] / nrm
+            for p in range(dn1[0][i], dn1[0][i + 1]):
+                dn1[2][p] *= f
+
+else:                                                   # numba 缺失回退
+    def _pc_learn_fused_homeo(dn0, dn1, up0, up1, e0, e1, r1, r2, s0,
+                              eta_pc, eta_oja, w_max,
+                              hn_up0, hn_up1, hn_dn0, hn_dn1):
+        _csr_add_outer(*dn0, e0, r1, eta_pc)
+        _csr_add_outer(*dn1, e1, r2, eta_pc)
+        _csr_oja_up(*up0, r1, s0, eta_oja)
+        _csr_oja_up(*up1, r2, r1, eta_oja)
+        for t in (up0, up1, dn0, dn1):
+            _csr_clip(t[2], w_max)
+        _csr_scale_rows(*up0, hn_up0)
+        _csr_scale_rows(*up1, hn_up1)
+        _csr_scale_rows(*dn0, hn_dn0)
+        _csr_scale_rows(*dn1, hn_dn1)
+
 class SparsePCStack:
     """结构性稀疏预测编码栈（接口与 `PredictiveCodingStack` 对齐，可 drop-in）。
 
@@ -552,6 +698,11 @@ class SparsePCStack:
         self = cls.__new__(cls)
         self._cyk = _CYK
         self.eta_pc, self.eta_oja, self.w_max = eta_pc, eta_oja, w_max
+        # P202：补 `fused` 属性 —— `from_dense` 走 `cls.__new__` 绕过
+        # `__init__`，此前**没有**这个属性 → `infer()`/`learn()` 一调就
+        # AttributeError（实测：任何用 from_dense 构造的对拍脚本/测试都跑
+        # 不到 learn）。默认 True 与 `__init__` 的形参默认一致（主路径）。
+        self.fused = True
         self.n0, self.n1, self.n2 = W_up0.shape[1], W_up0.shape[0], W_up1.shape[0]
         self.k0 = min(k, W_up0.shape[1]) if k > 0 else W_up0.shape[1]
         self.k1 = min(k, W_up1.shape[1]) if k > 0 else W_up1.shape[1]
@@ -729,7 +880,12 @@ class SparsePCStack:
             e1 = e1 / max(float(np.linalg.norm(e1)), 1e-9)
         eta = self.eta_pc * eta_scale
         # P59：homeostasis=False 走融合核（8 次 → 1 次，逐位一致）；
-        # homeostasis=True 保持原路径（e0/e1 归一化在核外，见融合核注释）。
+        # P202：homeostasis=True 也走融合核（12 次 → 1 次）——P201 诊断实测
+        #   生产 1b 档恒走这条路（config_1b.py:112），原先被旁路的代价是
+        #   12 次独立核调用 + 4 次串行 O(nnz)_csr_clip（后者已加 prange）。
+        #   新核 `_pc_learn_fused_homeo` 逐行照抄 Python 路径的表达式与
+        #   写序（add_outer→oja→clip→scale_rows）→ 逐位一致。
+        # ⚠ 唯一不在核内的：`e0/e1` 的范数归一化（Python 侧两行，微秒级）。
         if not homeostasis:
 
             _pc_learn_fused(self.dn0, self.dn1, self.up0, self.up1,
@@ -740,18 +896,11 @@ class SparsePCStack:
         #   `homeostasis=False` 走上面的 numba 融合核。
         # （2026-10-07：原 P175 的「Rust 算子分派」已随 rust 版本一并删除。）
         # 下行生成权重：误差 × 上层表示（稀疏外积）
-        self._add_outer(self.dn0, e0, r1, eta)
-        self._add_outer(self.dn1, e1, r2, eta)
-        # 上行识别权重：Oja 规则
-        eo = self.eta_oja * eta_scale
-        self._oja(self.up0, r1, s0, eo)
-        self._oja(self.up1, r2, r1, eo)
-        self._clip(self.up0[2], self.w_max)
-        self._clip(self.up1[2], self.w_max)
-        self._clip(self.dn0[2], self.w_max)
-        self._clip(self.dn1[2], self.w_max)
-        if homeostasis:
-            self._homeostatic_scale()
+        _pc_learn_fused_homeo(
+            self.dn0, self.dn1, self.up0, self.up1,
+            e0, e1, r1, r2, s0, eta, self.eta_oja * eta_scale,
+            self.w_max,
+            self._hn_up0, self._hn_up1, self._hn_dn0, self._hn_dn1)
 
     def learn_predictive(self, prev: dict, cache: dict, eta_scale: float = 1.0,
                          mix: float = 0.5, homeostasis: bool = False) -> None:

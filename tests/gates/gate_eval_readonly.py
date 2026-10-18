@@ -35,7 +35,10 @@ import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
-for _d in (str(_ROOT), str(_ROOT / "tests")):
+# P201：`eval_tasks_lm` / `eval_common` 在 **tests/evals/**（不是 tests/）——
+#   原 sys.path 只加了 tests/ → CI 上 `from eval_tasks_lm import ...`
+#   直接 ModuleNotFoundError（本门禁在 .github/.gitcode 两个 CI 都跑）。
+for _d in (str(_ROOT), str(_ROOT / "tests"), str(_ROOT / "tests" / "evals")):
     if _d not in sys.path:
         sys.path.insert(0, _d)
 

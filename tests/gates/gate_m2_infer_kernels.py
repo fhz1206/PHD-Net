@@ -162,8 +162,12 @@ def main() -> int:
     _csr_n = len(_re2.findall(
         r"@njit\(cache=True, fastmath=True, parallel=True, nogil=True\)\s*\n\s*def _csr_",
         _pc))
-    check(_csr_n == 5, "C5b M2 的 5 个 CSR 核都带 nogil（plain 默认路径）",
-          f"实际 {_csr_n} 个")
+    # P202：`_csr_clip` 补了 parallel+nogil（P201 诊断：生产路径
+    # homeostasis=True 走 12 次独立核调用，其中 4 次 clip 是 learn 里唯一
+    # 串行 O(nnz) 扫描；本机线程缩放 1T/8T 仅 1.31×）→ 5 → 6 个。
+    # 期望值随「新核获得 nogil」递增，不要写死一个数以后又忘改。
+    check(_csr_n >= 6, "C5b M2 的 CSR 核都带 nogil（P202 起 clip 也并行）",
+          f"实际 {_csr_n} 个（P202 前为 5：clip 无 nogil）")
 
     # ── C. 三态映射 + 零回归 ──────────────────────────────────────────────
     print("\n[C] 三态映射与零回归")

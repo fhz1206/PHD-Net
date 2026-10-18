@@ -239,15 +239,25 @@ class SparseLTM:
             # ⚠ 门槛为每 10 次（fhz 2026-09-29 指示）：imprint 是**条件触发**
             # （mode=="encode" 且 gate 达标），设 1000 次时 3500 token 一行都
             # 不出；recall 同理。
+            # P202（用户 2026-10-18 指示「不要打印那么多」）：改判据为
+            # **结构性变化才打**（行数或突触数增长）——原「每 10 次 imprint」
+            # 在 1b 档（每步印迹）等于每 10 token 一行，17.6 万行日志里
+            # 8,800 行是这个；而 rows/grown 饱和后内容完全不变（实测冻结在
+            # 4,096/294,912），纯噪声。改成「变了才打」后稳态零输出，
+            # 生长初期（每次增长）仍可看到全过程。
             self._diag_n = getattr(self, "_diag_n", 0) + 1
-            if self._diag_n % 10 == 0:
-                t = self.table
-                rows = len(getattr(t, "keys", getattr(t, "out", {})))
+            t = self.table
+            rows = len(getattr(t, "keys", getattr(t, "out", {})))
+            grown = sum(getattr(t, "size", {}).values()) if hasattr(t, "size") else 0
+            last = getattr(self, "_diag_last", None)
+            if last is None or last != (rows, grown):
+                self._diag_last = (rows, grown)
                 print(f"[ltm-diag] imprints={self._diag_n} "
                       f"prev={len(self._prev) if self._prev else 0} "
                       f"cur={len(cur)} combos={len(self._prev or []) * len(cur)} "
                       f"rate_dims={getattr(self, '_last_dims', 0)}/{self.n_dim} "
-                      f"rows={rows:,} k_hash={self.k_hash}", flush=True)
+                      f"rows={rows:,} grown={grown:,} k_hash={self.k_hash}",
+                      flush=True)
         self._prev = cur
         self.table.step_count += 1
 

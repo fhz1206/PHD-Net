@@ -243,14 +243,27 @@ def _make_tokenizer(seg: WordSegmenter, tokens: list[str], cfg) -> WordTokenizer
 
 
 def _print_table_stats(lm) -> None:
-    """打印大空间事件驱动表实时利用率 + 内存护栏（长跑增长有界性）。"""
+    """打印大空间事件驱动表实时利用率 + 内存护栏（长跑增长有界性）。
+
+    P202：utilization 补一列**可寻址子空间饱和度**。
+    `capacity = n_neurons × m_out`（1b 档 2²⁴×72 = 1.2B）是**防冲突容量池**，
+    而 `SparseLTM` 的静态哈希只绑定 `n_dim × k_hash`（1b 档 1024×4 = 4,096）
+    个大空间索引 → 池容量的 0.024% 永远到顶。
+    单看池利用率会误判「没学到东西」；真实语义是**可寻址子空间的饱和度**
+    （用户 2026-10-18 实测：rows=4,096/4,096 = 100%、每行 72/72 满）。
+    """
     if not hasattr(lm.net.ltm, "table"):
         return
     st = lm.net.ltm.table.stats()
     per = 10 if st.get("row_slots_allocated") else 100      # CSR 版 ≈10B/条，dict 版 ≈100B/条
     mb = st["grown_synapses"] * per / 1e6
+    # P202：可寻址子空间饱和度（SparseLTM 才有该属性；LongTermMemory 没有）
+    addr = getattr(lm.net.ltm, "n_dim", 0) * getattr(lm.net.ltm, "k_hash", 0)
+    sat = (f" | addressable {st['neurons_with_out']:,}/{addr:,}"
+           f" = {st['neurons_with_out'] / max(1, addr):.1%}"
+           if addr else "")
     print(f"  [big-ltm] grown {st['grown_synapses']:,} / capacity {st['capacity']:,}"
-          f" (utilization {st['utilization']:.3%}) | memory ≈{mb:.0f} MB"
+          f" (pool util {st['utilization']:.3%}){sat} | memory ≈{mb:.0f} MB"
           + ("  ⚠ dict backend: for long runs prefer --csr-online (≈10× memory saving)"
              if (not getattr(lm.net.ltm.table, "csr_online", False)
                  and st["grown_synapses"] > 50_000_000) else ""),
@@ -295,6 +308,19 @@ def main() -> None:
                          "→ **只能用差值**")
     ap.add_argument("--probe-tokens", type=int, default=2048,
                     help="P146：探针集 token 数（越大越稳，代价是每次多跑一遍前向）")
+    ap.add_argument("--replay-every", type=int, default=0,
+                    help="P202：回放间隔（M6_replay 每 N 步重训读出头部一次；"
+                         "0 = 沿用库默认 4）。⚠ 本机实测（smoke 500 步 win）："
+                         "M6_replay **1.65 ms/tok**（e6 每 4 步一次的摊销值），"
+                         "每隔 8 步 → ~0.8 ms/tok；每 16 步 → ~0.4 ms/tok。"
+                         "它是 readout_replay 的节奏，不影响主干学习；"
+                         "只配 --readout-replay-on/off 中的 on 场景。"
+                         "⚠ 改它会改变读出头的巩固节奏 → probe_PPL A/B 后再定")
+    ap.add_argument("--no-readout-replay", dest="readout_replay",
+                    action="store_false",
+                    help="P202：关闭 M6_replay（默认开 = P197）。"
+                         "关闭立省 ~1.65 ms/tok（本机实测），但解除读出头的"
+                         "漂移锚定（P197 的灾难性遗忘缓解）——先跑 A/B 再关")
     ap.add_argument("--readout-int8-compute", default="auto",
                     choices=["auto", "on", "off"],
                     help="P153/P154：int8 **计算域**（int8 x int8 → int32 累加）。"
@@ -833,6 +859,17 @@ def main() -> None:
     cfg.enable_cpu_parallel = args.enable_cpu_parallel  # CPU侧并行增强
     cfg.numba_threads = args.numba_threads          # numba并行线程数
     cfg.omp_threads = args.omp_threads              # OpenMP线程数
+    # P202：回放节奏与开关（M6_replay 是「other 之外的第三大段」）
+    if args.replay_every > 0 and args.replay_every != 4:
+        cfg.replay_every = int(args.replay_every)   # 覆库默认 4
+        print(f"[p202] replay_every = {args.replay_every}（库默认 4；"
+              f"M6_replay 摊销 ≈ 1.65×4/{args.replay_every} ms/tok）",
+              flush=True)
+    if not args.readout_replay:
+        cfg.readout_replay = False
+        print("[p202] readout_replay=off（M6_replay 段 ~1.65 ms/tok 立省；"
+              "⚠ 解除读出漂移锚定，P197 灾难性遗忘缓解失效——"
+              "建议先只跑 A/B 确认 PPL 无回退）", flush=True)
     # --beta 解析：逗号或短横线分隔 -> set
     _beta = set(filter(None, args.beta.replace("-", ",").split(",")))
     cfg.beta = _beta                               # NPU 实验性优化阶段集合
@@ -1530,7 +1567,10 @@ def main() -> None:
                     save_model_async(ckpt, lm, cfg, i, ckpt_dtype=args.ckpt_dtype,
                                extra=_data_provenance)
                     print(f"  [checkpoint] saved {i:,} tokens → {ckpt}", flush=True)
-                _print_table_stats(lm)
+                    _print_table_stats(lm)      # P202：只在存档时打（原先 indent
+                    # 错位到 while 体内 → **每 token 一行 [big-ltm]**：
+                    # 实测 17.6 万行日志里 16.5 万行是它（94%），长跑日志被冲爆，
+                    # 且 stats() 每步全表统计有真实开销）
             if _STOP["flag"] or (args.tokens and i - done >= args.tokens):
                 break
         # with PrefetchChars 上下文在此结束，自动调用 src.close() 清理进程

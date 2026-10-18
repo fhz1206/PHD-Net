@@ -18,7 +18,7 @@
   [PASS] A3 int4 显式请求被拒（P191e 已删，fail-fast）
   [PASS] A3b fp4 显式请求被拒（P191e 已删，fail-fast）
 [A4] 接口完整性（扫描全仓库 readout.X 访问面）
-  [PASS] A4 访问面无缺失（W, X, _accel_fallback_reason …）
+  [PASS] A4 访问面无缺失（W, X, _accel_fallback_reason, learn_softmax …）
   [PASS] A4 stats() 可用
   [PASS] A4 conn_k/hidden 为 0（稠密单级）
   [PASS] A4 _csr 显式拒绝（稀疏未实现） —— NotImplementedError

@@ -16,8 +16,8 @@ P113 M2 推理核三态数值等价对拍（fused / serial / plain）
   PASS  B2 plain vs serial 非逐位（已在容差内）  [max|Δ|=4.441e-16—— 若在昇腾上出现非逐位，需在文档注明「plain 与 serial 非逐位」，不可宣称零回归]
 
 [C5] parallel 核的 nogil 覆盖（P123）
-  PASS  C5 所有 parallel=True 的核都带 nogil=True  [共 19 个，缺 0]
-  PASS  C5b M2 的 5 个 CSR 核都带 nogil（plain 默认路径）  [实际 5 个]
+  PASS  C5 所有 parallel=True 的核都带 nogil=True  [共 21 个，缺 0]
+  PASS  C5b M2 的 CSR 核都带 nogil（P202 起 clip 也并行）  [实际 6 个（P202 前为 5：clip 无 nogil）]
 
 [C] 三态映射与零回归
   PASS  C1 fused 参数三态映射正确  [True→True / 'serial'→'serial' / False→False]
