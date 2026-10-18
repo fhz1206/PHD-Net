@@ -115,7 +115,8 @@ assistant: [调用工具 Bash] {"command": "pytest -q"}
 user: [工具返回] 3 passed
 ```
 
-**本机 smoke 实测**（`--preset smoke --tokens 3000`）：PPL **2474 → 1457**、
+**本机 smoke 实测**（`--preset smoke --tokens 3000`）：PPL **2474 → 1308**
+（P198 复测口径；早期记录的 1457 为旧配置结果，已作废）、
 LTM imprints=430（长出 30,720 突触）、OOV 0.0000%、3.04 ms/tok。
 对拍门禁：`tests/gates/gate_cc_traces.py`（23 项，含远程实读）。
 

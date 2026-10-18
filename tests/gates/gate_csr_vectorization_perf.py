@@ -20,9 +20,11 @@ gate_readout_sparse_structure / run_tests --fast 等对拍门禁抓到），必�
   专门用 全 0 矩阵 / 大量重复值 / 两值矩阵 / k=1 / k=n_cols / NaN 行
   把边界情形打满。值路径 fp64→fp32 按位比（view(uint32)）。
 
-【B】固定 seed 的 infer/learn 输出对拍 golden（golden 存 %TEMP%）
-  · golden 在优化落地**前**由基准脚本生成：%TEMP%/perf_golden_.npz
-    （115 个数组）+ %TEMP%/perf_golden.sha256（内容哈希 = 跨进程确定性证据）；
+【B】固定 seed 的 infer/learn 输出对拍 golden（**自包含**，P200）
+  · golden 由**本文件的朴素参考实现**（naive_*，逐行照抄优化前代码）
+    即时生成（115 个数组）+ sha256（内容哈希 = 确定性证据）；
+    ⚠ 原实现依赖 `%TEMP%/perf_golden_.npz` 这一**仓库外一次性产物**
+    → 换机器/清临时目录必然失败（实测门禁 46/47）。P200 改为自包含。
   · 本门禁重建同样构造 → 逐数组 np.array_equal + sha256 双重比对；
   · 同时跑**朴素实现自比对**：把模块里两个函数临时换回朴素参考实现再重建
     一遍 → 必须与向量化版逐位一致（证「向量化无副作用」+「结果确定性」），
@@ -37,7 +39,6 @@ from __future__ import annotations
 
 import hashlib
 import sys
-import tempfile as _tmp
 import time
 from pathlib import Path
 
@@ -213,43 +214,52 @@ def section_a() -> None:
 
 # ──────────────────────────────────────────────────────── (B) golden 对拍
 def section_b() -> None:
-    print("【B】固定 seed infer/learn 输出对拍 golden（%TEMP%）")
-    tmp = Path(_tmp.gettempdir())
-    npz_path = tmp / "perf_golden_.npz"
-    sha_path = tmp / "perf_golden.sha256"
-    if not (npz_path.exists() and sha_path.exists()):
-        check(False, "B golden 文件存在",
-              f"缺 {npz_path if not npz_path.exists() else sha_path}（优化前基准产物）")
-        return
-    z = np.load(npz_path)
-    golden = {k: z[k] for k in z.files}
-    stored = sha_path.read_text().split()[0]
+    # P200 修复：原实现硬依赖 `%TEMP%/perf_golden_.npz` + `.sha256`
+    # （「优化落地前由基准脚本生成」的一次性外部产物）→ **换机器/清临时
+    # 目录必然失败**（实测：本机与服务器都没有该文件 → 门禁 46/47）。
+    # 外部状态不该是门禁前提。改为**自包含**：golden 由**朴素参考实现**
+    # （本文件的 naive_* 函数，逐行照抄优化前代码）即时生成 ——
+    # 对拍强度不变（仍是「向量化 == 朴素」逐位），且无仓库外依赖。
+    print("【B】向量化 vs 朴素参考 逐位对拍（自包含 golden，P200）")
 
-    out1 = build_golden()                       # B1 向量化重建
-    check(_eq(golden, out1), "B1 重建输出 vs %TEMP% golden 逐数组 np.array_equal",
-          f"{len(golden)} 数组")
-    h1 = golden_hash(out1)
-    check(h1 == stored == golden_hash(golden),
-          "B2 重建 sha256 == 存档 golden sha256", h1[:16] + "...")
-
-    out2 = build_golden()                       # B2b 同进程第二遍
-    check(_eq(out1, out2), "B2b 同进程重建两遍逐位一致（确定性）")
-
-    # B3 朴素实现自比对：临时把两个函数换回朴素版，重建必须逐位一致
+    # B0：切到朴素实现生成 golden，然后**立刻恢复**现场
     orig_fd, orig_dense = spc._from_dense_csr, SparsePCStack._dense
     try:
         spc._from_dense_csr = naive_from_dense_csr
         SparsePCStack._dense = naive_dense
-        out_naive = build_golden()
+        golden = build_golden()
     finally:
         spc._from_dense_csr = orig_fd
         SparsePCStack._dense = orig_dense
-    check(_eq(out1, out_naive),
-          "B3 朴素版自比对：朴素重建 == 向量化重建（逐位）")
     check(spc._from_dense_csr is orig_fd and SparsePCStack._dense is orig_dense,
-          "B3b 对拍后现场恢复（未污染模块状态）")
-    h_naive = golden_hash(out_naive)
-    check(h_naive == stored, "B4 朴素版 sha256 == 存档 golden sha256", h_naive[:16] + "...")
+          "B0 golden 生成后现场恢复（未污染模块状态）",
+          f"{len(golden)} 数组")
+
+    # B1：向量化重建 vs 朴素 golden（逐位）
+    out1 = build_golden()
+    check(_eq(golden, out1),
+          "B1 向量化输出 vs 朴素参考 golden 逐数组 np.array_equal",
+          f"{len(golden)} 数组")
+
+    # B2：确定性——同进程两遍逐位一致
+    out2 = build_golden()
+    check(_eq(out1, out2), "B2 同进程重建两遍逐位一致（确定性）")
+
+    # B3：哈希稳定（跨进程确定性的可记录证据）
+    h1, hg = golden_hash(out1), golden_hash(golden)
+    check(h1 == hg, "B3 向量化 sha256 == 朴素 golden sha256", h1[:16] + "...")
+
+    # B4：朴素实现重建两遍也稳定（证明 golden 本身确定，非偶然一致）
+    try:
+        spc._from_dense_csr = naive_from_dense_csr
+        SparsePCStack._dense = naive_dense
+        naive2 = build_golden()
+    finally:
+        spc._from_dense_csr = orig_fd
+        SparsePCStack._dense = orig_dense
+    check(_eq(golden, naive2), "B4 朴素 golden 重建两遍逐位一致（参考自身确定）")
+    check(spc._from_dense_csr is orig_fd and SparsePCStack._dense is orig_dense,
+          "B4b 第二次对拍后现场恢复")
 
 
 # ────────────────────────────────────────────────────────── (C) 性能断言

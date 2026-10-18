@@ -73,6 +73,8 @@ python train/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz \
 长 prompt 走 `StreamingTokenizer` **流式预热，不截断**（任意长，含 1M 级），
 按 `--milestone`（默认 1,000,000，0 = 关闭）打点；OOV token 跳过并打印计数，
 与训练侧同一回退语义。`infer.py` 另有 `--devices auto` 打印设备清单与多卡计划。
+⚠ **P198：`train/infer.py` 的 `generate()` 新增 top-k / nucleus 截断**
+（`--topk` 语义对齐 TUI；另有 nucleus 采样）——此前推理是无截断全分布。
 
 ---
 
@@ -90,20 +92,20 @@ python train/infer.py --model outputs/models/phdnet1b_1b_sft_final.npz \
   （副本每 `--fp8-refresh` 步重建）。推理时它只体现为前向副本的量化误差，
   不再有任何「更新写回」环节。
 
-### 当前加速器侧只支持 fp32 / fp16 / bf16
+### 加速器侧精度档位（P189 后更新）
 
-`--readout-dtype` 在**加速器后端**可用档位为 **fp32 / fp16 / bf16**；
-**fp8 / fp4 已在所有加速器禁用**（P86）—— 不是「能力不足」，而是**没有算子**：
-昇腾 Ascend910B4 + CANN 8.5 + torch_npu 2.9 上 `float8_e4m3fn` 的
-create / cast / matmul 全部 ERR01007，fp4 的 MX 块缩放同样没有算子。
+`--readout-dtype` 在**加速器后端**可用档位为 **fp32 / fp16 / bf16 / fp8**：
+**fp8 已于 P189 放行**（位模式 uint8 承载存储 + fp16 迭代），**fp4/int4 仍禁用**
+（P152/P191e）—— 910B 上 `float8_e4m3fn` 的 create / cast / matmul 全部 ERR01007
+（fp4 的 MX 块缩放同样没有算子），P189 起用位模式存储绕行。
+⚠ 训练侧 readout 默认自 P194 起为 **fp32**；推理侧精度由训练产物决定（见下）。
 
-想用 fp8/fp4 的量化码本，只能走 numba CPU 路径
-（`python train/train.py --accel cpu --readout-dtype fp8`）—— 那是 P9/P12 的
-**位算法量化核**（CPU 上可用），**不代表加速器具备 fp8 能力**。
-根因与实测证据见 `docs/PHD-Net_硬件后端适配报告.md` 与 `BUGS.md`。
+想在加速器上用 fp8 前向，训练时配 `--readout-dtype fp8 --readout-master-weight`
+（P195）；纯 CPU 的 P9/P12 位算法量化核（`--accel cpu --readout-dtype fp8`）
+也仍可用。根因与实测证据见 `docs/PHD-Net_硬件后端适配报告.md` 与 `BUGS.md`。
 
-其它精度口径（训练侧，推理时由检查点 `cfg` 决定）：M1 编码器默认 **fp64**、
-分词 onehot 缓冲 **fp16**、检查点默认 `--ckpt-dtype bf16`（存位模式）。
+其它精度口径（训练侧，推理时由检查点 `cfg` 决定）：M1 编码器默认 **fp64**（形状参数默认，
+CLI 覆盖 fp32）、分词 onehot 缓冲 **fp16**、检查点默认 `--ckpt-dtype fp16`（存位模式）。
 **推理入口不暴露 `--readout-dtype` / `--ckpt-dtype`** —— 想要不同精度就用不同的训练产物，
 不要在推理时切换。
 

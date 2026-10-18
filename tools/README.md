@@ -4,6 +4,8 @@
 （`python tools/<名>.py --help`）；未列出的参数表示该脚本没有该开关。
 **数据截止：2026-10-11（P192 发布复核）。** 相关文档：`README.md`、`train/README.md`、
 `datasets/README.md`、`datasets/UPLOAD_README.md`。
+⚠ P198 新增 `tools/diag_vocab_budget.py`（词表预算探针）；`tools/probe_fp8.py` /
+`probe_npu_quant.py` 已删除（逻辑并入 `accel_doctor`/`_probe`）。
 
 > **生产入口单轨**：训练只有 `train/train.py`，推理只有 `train/infer.py`。
 > 本目录**不放**新的训练入口（见文末「非生产轨」）。
@@ -80,14 +82,15 @@ M5 公平评测（PHD-Net vs nanoGPT 级 Transformer）入口**不在本目录**
 
 | 脚本 | 一句话 | 典型命令 |
 |---|---|---|
-| `probe_fp8.py` | 探测当前设备/框架**实际暴露**的 fp8 能力：`float8_e4m3fn` 的建张量/cast/matmul、`torch.ops` 里的 fp8 算子、`torch_npu` 量化 API、设备型号与 CANN 版本。秒级出结果，不需要训练数据 | `python tools/probe_fp8.py --json` |
-| `probe_npu_quant.py` | 定向探测昇腾**量化矩阵乘 API**（fp8 张量不通之后的下一步）：`npu_weight_quant_batchmatmul` / `npu_quant_matmul` 等支持什么 dtype、签名能否吃读出的形状 | `python tools/probe_npu_quant.py --json` |
+| ~~`probe_fp8.py`~~ / ~~`probe_npu_quant.py`~~ | **已删除**（fp8 探测逻辑并入 `phdnet/backends/accel_readout.py::_probe` 与 `accel_doctor.py` 的 create/roundtrip/matmul 三档探测） | `python tools/probe/accel_doctor.py --json` |
 
-**结论（已定案，写在这里避免重复实验）**：fp8 / fp4 在**所有加速器**已禁用。
+**结论（已定案，写在这里避免重复实验）**：⚠ **fp8 已于 P189 放行**（位模式绕行：
+uint8 承载存储 + fp16 迭代；P194 起读出默认回 fp32，fp8 需显式选择且建议配
+`--readout-master-weight`）；**fp4/int4 仍禁**。
 实测昇腾 Ascend910B4 + CANN 8.5 + torch_npu 2.9 上 `float8_e4m3fn` /
 `float8_e5m2` 的 create / cast / matmul **全部 ERR01007**，`torch.ops` 零个 fp8 算子；
-CPU torch 能建 fp8 张量但**无 fp8 addmv**。因此 `--accel cpu --readout-dtype fp8`
-仍可用——走的是 numba CPU 的量化核，**不是加速能力**。根因与处置见
+CPU torch 能建 fp8 张量但**无 fp8 addmv**。`--accel cpu --readout-dtype fp8`
+走的是 numba CPU 的量化核，**不是加速能力**。根因与处置见
 `docs/PHD-Net_硬件后端适配报告.md` 与 `BUGS.md`。
 
 ---
@@ -117,7 +120,8 @@ CPU torch 能建 fp8 张量但**无 fp8 addmv**。因此 `--accel cpu --readout-
 `--tau 1.0`、`--topk 0`、`--baseline-decay 0.9`、`--kl-coef 0.0`、`--accel auto`。
 
 `tools/legacy/`：`bench.py`、`bench_1b_migrate.py`、`audit_prof_1b.py`、
-`hunt_bugs.py`、`rerun_task6.py` —— 保留可追溯，**不再维护**，不要在新工作里引用。
+`rerun_task6.py` —— 保留可追溯，**不再维护**，不要在新工作里引用。
+（⚠ `hunt_bugs.py` 已删除，不再存在。）
 
 一次性实验脚本（`experiment_*.py`）与已产出数据的语料制备脚本
 （`prepare_{mimo,mix,r1sft,toolcall}.py`）已于 2026-09-30 删除；

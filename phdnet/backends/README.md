@@ -4,7 +4,8 @@
 > 关键口径、昇腾踩坑速查指针。
 > **不写**：昇腾坑的完整根因与处置（→ `../../docs/PHD-Net_硬件后端适配报告.md`）、
 > 任何性能数字（→ `../../docs/PHD-Net_性能评估与迭代方案.md`，唯一出处）。
-> **数据截止：2026-09-30。**
+> **数据截止：2026-09-30。** ⚠ P194–P199 增量（2026-10-17）：读出默认 **fp32**
+> （P194 Q4）；fp8 于 P189 放行（位模式绕行），要当默认须配 master（P195）。
 
 支持的平台：**numba CPU（生产主力）/ CANN·昇腾 NPU / CUDA / ROCm / DirectML**。
 
@@ -73,23 +74,25 @@ python tools/bench/bench_readout_devices.py       # 读出基准，报等效带�
 |---|---|
 | `--accel cpu/off/numba` | 不算回落，直接走 numba 主路径 |
 | `readout_hidden > 0`（两级读出） | 加速后端未实现 |
-| `readout_conn_k > 0`（稀疏读出） | 加速后端未实现 |
-| `readout_dtype ∈ {fp8, fp4}` | 加速后端**禁用量化码本**（见下） |
+| `readout_dtype ∈ {fp4, int4}` 等 | 加速后端**禁用量化码本**（fp8/int8 已于 P189 放行，见下） |
 | 无加速器 / torch 未安装 / 构造异常 | 物理不可用 |
+
+（⚠ `readout_conn_k > 0` **不再回落**：稀疏读出已随 P111 在加速后端实现
+gather-GEMV，本表旧行已过时。）
 
 设计原则：**宁可回落，也不要「能跑但语义不同」** —— 后者比回落到 numba 更糟。
 
-### 精度：读出默认 int8
+### 精度：读出默认 fp32（P194 Q4）
 
 | 项 | 口径 |
 |---|---|
-| 默认 | `--readout-dtype fp16`（**CLI 默认**；库 `config` 默认 bf16 —— 两者不一致是事实） |
-| 动机 | **学习精度**，不是访存收益：bf16 半 ULP ≈ 2e-4 ≫ 非目标行更新 \|dp\| ≈ 1e-6 → 更新被舍 → 退化为纯 Hebbian |
-| 加速器可用档位 | **fp32 / fp16 / bf16** |
-| **fp8 / fp4** | **在所有加速器禁用**（P86）。昇腾实测 `Float8_e4m3fn has not been supported`（ERR01007），fp4 的 MX 块缩放同样无算子 |
-| fp8 的唯一可用路径 | `--accel cpu --readout-dtype fp8` —— 走 numba CPU 的 P9/P12 位算法量化核，**不是加速能力** |
-| 检查点 | bf16/fp8 存**位模式**（uint16 / uint8），加载侧按 `ckpt_dtype` 解码闭环（numpy 无原生 bf16，不这样存会崩） |
-| 其它 | M1 编码器默认 fp64；分词 onehot 缓冲 fp16（值域 0/1，无损） |
+| 默认 | `--readout-dtype fp32`（**CLI 与库 config 一致**，P194 Q4） |
+| 动机 | **学习精度**，不是访存收益：低精度半 ULP ≫ 非目标行更新 \|dp\| ≈ 1e-6 → 更新被舍 → 退化为纯 Hebbian（P110 实测：fp16 保留率仅 26.67%，fp8 更低） |
+| 加速器可用档位 | **fp32 / fp16 / bf16 / fp8**（fp8 已于 P189 放行：位模式 uint8 存储 + fp16 迭代） |
+| **fp4 / int4** | **仍禁用**（P152/P191e：unpack 抵消收益；910B 无 INT4 矩阵乘单元） |
+| fp8 的正确用法 | 显式 `--readout-dtype fp8` + **`--readout-master-weight`**（P195：fp32 master 承接更新、fp8 影子只做前向）；或 `--accel cpu` 走 numba P9/P12 位算法量化核 |
+| 检查点 | 低精度存**位模式**（uint16 / uint8），加载侧按 `ckpt_dtype` 解码闭环（numpy 无原生 bf16/fp8，不这样存会崩） |
+| 其它 | M1 编码器默认 fp64（形状参数默认）；分词 onehot 缓冲 fp16（值域 0/1，无损） |
 
 各精度的 PPL / 带宽数字见《性能评估与迭代方案》，本文不复制。
 
@@ -131,7 +134,7 @@ python tools/bench/bench_readout_devices.py       # 读出基准，报等效带�
 | `OMP_PLACES=cores` 反噬（已回滚，只留 `PROC_BIND`） | §七 |
 | M1 aarch64 numpy GEMV 病态（两次误判） | §七 |
 | bf16 检查点保存崩（numpy 无原生 bf16） | §七 |
-| fp8 / fp4 ERR01007、量化码本禁用 | §四 精度与后端 |
+| fp8/fp4 ERR01007（⚠ fp8 已于 P189 位模式绕行放行，fp4/int4 仍禁） | §四 精度与后端 |
 | 多卡读出列并行为什么不是 DDP | §六 多卡 |
 
 ## 六、验证入口

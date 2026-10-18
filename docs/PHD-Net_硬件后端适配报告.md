@@ -3,7 +3,9 @@
 > **适用范围**：加速后端的**能力矩阵、精度能力、机制性代价、昇腾真机踩坑、迁移路径、诊断入口**。
 > **不写**：训练怎么跑（→ `../train/README.md`）、机制设计（→ `PHD-Net_架构设计.md`）、
 > 任何性能数字（**唯一出处 `PHD-Net_性能评估与迭代方案.md`**，本文只链接不复制）。
-> **数据截止：2026-10-07（P189）。**
+> **数据截止：2026-10-07（P189）。** ⚠ **P194–P199 增量（2026-10-17）**：读出默认
+> **fp8 → fp32**（P194 Q4），fp8 改走 `--readout-master-weight`（P195）；本文 §3.1
+> 精度矩阵已同步，其余保留 P189 口径。
 >
 > **相关文档**：
 > 子包文件索引与每层设备归属 → `../phdnet/backends/README.md`；
@@ -134,9 +136,9 @@ M1 fp32（x86 快 1.80× / 昇腾慢约 70×）、M2 融合核、`OMP_PLACES=cor
 
 | 精度 | 加速后端 | 结论与依据 |
 |---|---|---|
-| **fp8** | ✅ **默认（P189）** | fp8 e4m3fn **位模式（uint8 承载）存储** + fp16 迭代计算；910B 无 fp8 matmul 算子（ERR01007）→ 前向可走每步 CPU 转换 int8 计算（P154/P155，`--fp8-conv` 选核）；有原生 fp8 算子的平台直接用 |
+| **fp8** | ✅ 可用（**P194 起不再是默认**，P189 曾默认） | fp8 e4m3fn **位模式（uint8 承载）存储** + fp16 迭代计算；910B 无 fp8 matmul 算子（ERR01007）→ 前向可走每步 CPU 转换 int8 计算（P154/P155，`--fp8-conv` 选核）；有原生 fp8 算子的平台直接用。**作默认已被 P194 推翻**（P110 保留率实测）；要 fp8 配 `--readout-master-weight`（P195） |
 | **fp16** / **bf16** | ✅ 可用 | 位保留率 26.67% / 5.79%（§四）；**请求后运行时提升 fp32**（P187，迭代全 fp32） |
-| **fp32** | ✅ 可用 | 显式 opt-in |
+| **fp32** | ✅ **默认（P194 Q4）** | 显式 opt-in 时代结束：P194 起默认（P110 保留率实测推翻 fp8 默认） |
 | **int8 显式请求** | ❌ raise | P163：int 族显式请求整体禁用（fp8 降级路径自动用 int8 **算子**不受此限） |
 | **fp4** / **int4** | ❌ 拒绝 | unpack 开销抵消存储收益（P152）；910B 无 INT4 矩阵乘单元 |
 
@@ -182,7 +184,8 @@ create / cast / matmul 全部 ERR01007，torch.ops 里零个 fp8 算子 ——
 
 ⚠ P100 曾把 `fp8` 正名为 `int8`（那时它确实是 1 字节码本）。
 P147 起 fp8 是**独立精度档**（`_DT` 映射到 `float8_e4m3fn`），
-P189 后为默认：位模式 uint8 存储 + fp16 迭代 + int8 计算可选；
+P189 后曾为默认（位模式 uint8 存储 + fp16 迭代 + int8 计算可选）——
+**P194 起默认回 fp32**（保留率实测推翻），fp8 改为显式选择 + master 模式（P195）；
 P193 起两处别名表（`readout._RO_DTYPE_ALIASES` / `accel_readout._DTYPE_ALIASES`）
 都已删除，fp8 在 numba 侧被显式归一为 int8 码本路径。
 numba CPU 路径走 P9/P12 位算法量化核。
@@ -247,9 +250,9 @@ updated  = _round(W0 + dp, dtype)
 ### 4.4 后果与现状
 
 `train/train.py` 启动日志按精度分叉（`:701-711`）：fp32 打印「精确 `p − t` 规则」，
-低精度打印警告并**点名实测保留率**。CLI 默认 `fp8`（P189，fhz 2026-10-07
-「模型 fp8，迭代 fp16」）；fp16/bf16 请求运行时提升 fp32（P187）。
-低精度降级为**显式 opt-in**。
+低精度打印警告并**点名实测保留率**。CLI 默认 **fp32**（P194 Q4；P189 曾默认 fp8，
+被 P110 实测的保留率证据推翻）；fp16/bf16 请求运行时提升 fp32（P187）。
+低精度降级为**显式 opt-in**；fp8 的访存收益走 `--readout-master-weight`（P195）。
 
 **教训**：**半 ULP 的数量级估算不能替代实测**。P105 曾认定「fp16 半 ULP 比 bf16
 小 8 倍，能保住非目标行更新」→ 实测发现 fp16 只是「比 bf16 好」，
@@ -466,11 +469,11 @@ ckpt 的 `val[:] = ...` 写进无人引用的数组 → **检查点「恢复成�
 | 1 | **能力表与 `_DT` 错位：`int16` / `int32` 被能力表放行但构造期 `ValueError`** | `_unsupported_reason()` 对 `int16`/`int32` 返回 `None`（放行），但 `_DT` 只有 `{fp32, fp16, bf16, int8}` → 构造抛 `ValueError: 不支持 dtype='int16'`。实测：`pick_readout_backend` 静默回落 `numba-cpu`，**`fallback_reason=None`（原因丢失！）** | 🔴 **活跃缺陷**。CLI `--readout-dtype` 的 `choices` 含 `int16`/`int32`，用户可选 → 选了就走 numba，且**日志不打印回落原因**（因为不是被 `_unsupported_reason` 拒的，是构造异常）。这正好是踩坑 15 的变种 |
 | 2 | `train/train.py:389`、`train/infer.py:222,248` 仍引用**已删除**的 `tools/train_torch_lm.py` | commit `4120a5b`（P30）删除了该文件；三个引用点仍在打印「torch 栈 tools/train_torch_lm.py --device auto」 | 🟠 用户按提示去跑会 `file not found` |
 | 3 | `phdnet/device.py::_verify` 永远返回 `False` | 函数体第一行就 `raise NotImplementedError`（`selftest_torch` 已随 P30 删除），`return bool(selftest_torch(...))` 是**不可达代码** | 🟡 `BackendInfo.verified` 恒 False。语义上是「等价自检已随旧栈移除」，但写法是死代码 + 会误导 |
-| 4 | ~~CLI `--readout-dtype` 实际默认 `fp32`，但部分文档写 `fp16`~~ | ✅ **已过时两次，现已解决**：`train/train.py:324` `default="fp8"`、`choices=["fp32","fp16","bf16","fp8"]`，help 写「**默认 fp8**（P189，fhz 2026-10-07：模型 fp8，迭代 fp16）」。`phdnet/config.py:318` 同样是 `readout_dtype: str = "fp8"` —— **CLI 与库 config 一致**，P110 的 fp32 默认已是历史 | 🟢 已修。⚠ 代价**不是**已消失而是**已记录**：fp8 步长比 fp16 粗约 4 倍，非目标行 `p − t` 更新保留率最低 → 学习偏向纯 Hebbian（§3.2、§四 P110 实测；启动日志按精度分叉点名保留率，`train/train.py:987-1037`） |
+| 4 | ~~CLI `--readout-dtype` 实际默认 `fp32`，但部分文档写 `fp16`~~ | ✅ **已过时两次，现已解决（并第三次反转）**：P189 把默认改为 `fp8`（位模式存储 + fp16 迭代），**P194 Q4 又改回 `fp32`**（`train/train.py:341` `default="fp32"`，`phdnet/config.py:177` `readout_dtype: str = "fp32"`——CLI 与库 config 一致）。P110 的 fp32 默认论据（保留率实测）最终胜出；P189 的 fp8 默认作废，fp8 改走 `--readout-master-weight`（P195） | 🟢 已修。⚠ 代价**不是**已消失而是**已记录**：fp8 步长比 fp16 粗约 4 倍，非目标行 `p − t` 更新保留率最低 → 学习偏向纯 Hebbian（§3.2、§四 P110 实测；启动日志按精度分叉点名保留率） |
 | 5 | ~~CLI `--m2-kernel` 实际默认 `serial`，但 help 文本写「默认 plain」~~ | ✅ **P113 已解决**：`train/train.py:250` `default="plain"`，help 同步改写为实测数字（M2 6.92 → 1.28 ms/tok、5.41×、端到端 17.63 → 12.09、四个采样点 PPL 逐位相同）。**`serial` 现为历史默认** | 🟢 已修（本文是修复范例：help 不必删数字，改成**实测数字**更有用） |
 | 6 | CLI `--encoder-dtype` **实际默认 `fp32`**，但 help 文本写「**默认 fp64**」 | `train/train.py:408` `default="fp32"`，help 写「**默认 fp64**：昇腾 aarch64 上 fp32 sgemv 实测慢约 70 倍」。库 `config.encoder_dtype` 是 `fp64`（`config.py:330`） | 🟡 help 自相矛盾（P107 已把**CLI** 默认改回 fp32；库默认 fp64 是有意的，CLI 显式覆盖 —— 见《扩展指南》§4） |
 | 7 | 稀疏读出**已在加速后端实现**，但 `phdnet/backends/README.md` §四回落表仍列 `readout_conn_k > 0 → 回落` | `_unsupported_reason()` 对 `readout_conn_k=128` 返回 `None`（实测）；README 表格仍写「加速后端未实现」 | 🟡 子包 README 滞后于 P111 |
-| 8 | `phdnet/backends/README.md` 标题写「精度：读出默认 int8」，正文表格写「默认 `--readout-dtype fp16`（CLI 默认；库 config 默认 bf16）」，且写「fp8 / fp4 在所有加速器禁用（P86）」 | 实际默认 **`fp8`**（`train/train.py:324` 与 `config.py:318` 一致），且 **fp8 的 blanket ban 已于 P189 解除**（`_unsupported_reason()` 对 `_rd in ("int8","fp8")` 返回 `None`，`accel_readout.py:1776-1777`）；fp4/int4 才仍禁（P152/P191e） | 🟡 同一文件内自相矛盾，**且禁令口径已过期**（`phdnet/backends/README.md:77,82,86,89,90`） |
+| 8 | `phdnet/backends/README.md` 标题写「精度：读出默认 int8」，正文表格写「默认 `--readout-dtype fp16`（CLI 默认；库 config 默认 bf16）」，且写「fp8 / fp4 在所有加速器禁用（P86）」 | 实际默认 **`fp32`**（P194 Q4，`train/train.py` 与 `config.py` 一致），且 **fp8 的 blanket ban 已于 P189 解除**（`_unsupported_reason()` 对 `_rd in ("int8","fp8")` 返回 `None`，`accel_readout.py:1776-1777`）；fp4/int4 才仍禁（P152/P191e） | 🟡 同一文件内自相矛盾，**且禁令口径已过期**（`phdnet/backends/README.md:77,82,86,89,90`） |
 | 9 | `phdnet/backends/README.md` 称 verifier 有 `gate_accel_sparse_readout` 外的引用、以及 `bench_accel.py` 三档 | `ls tests/gates/` = **22 个 `.py`**（21 个 `verify_*` + 1 个 `bench_accel_readout_path`；P113 新增 `gate_m2_infer_kernels.py`）。`文档写作规范.md` §2.7 已同步为 22 | 🟢 计数已同步（`gate_accel_sparse_readout` / `gate_readout_int_dtypes` / `gate_readout_sparse_structure` / `gate_ltm_learn_batch` / `gate_m2_infer_kernels` 是后加的） |
 | 10 | `phdnet/backends/torch_backend.py` 模块 docstring 首行仍写「STDP 关联核的 torch 实现」，但文件里**只有探针 + 基准** | `TorchSTDPCore` 已随 P30 删除；docstring 未同步 | 🟢 首行描述误导 |
 

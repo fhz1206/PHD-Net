@@ -10,6 +10,13 @@
 >
 > **数据截止：2026-10-08（P192）**（精度默认 fp8，P189；**P192 新增三个默认关闭的
 > CPU/NPU 重叠开关**，见 §2.1 CLI 表与 §8.3）。P186–P188 见 `docs/PHD-Net_现状速查.md` §5。
+> ⚠ **P194–P199 增量（截至 2026-10-17）**：读出默认 **fp8 → fp32**（P194 Q4），
+> fp8 改走 `--readout-master-weight`（P195）；`eta_oja` 默认 0（>0 发散，P198）；
+> 表征发育窗口 `pc_dev_steps=20000` + `eta_pc=0.02`（P194）；会话中学习四开关默认 True
+> （`sdr_novelty`/`task_modulation`/`error_gated_memory`/`readout_replay` 等，P197，
+> `ltm_imprint_gate` 0.8→0.3）；`--step-profiling` 默认开、`--data` 新增 `cc_traces`
+> （P196/P198）；训练循环进度行/检查点缩进 bug 修复（P198 末）；i18n 显式消息目录
+> （P199）。详见 §1.4 CLI 表、§6.2/§6.4 与 §十。
 >
 > **前一段基线（P111，`--m2-kernel serial`）** 保留在本文档里作为**历史对照**，
 > 日志名 `train_1b_1b_pretrain_20261001-172245.log`。凡标「serial 口径 / 历史对照」
@@ -81,7 +88,7 @@
 
 | 开关 | **现行默认** | 为什么影响测量 |
 |---|---|---|
-| `--step-profiling` | 关 | **唯一的分段计时来源**（九段 + 主循环三段）。关闭时零开销；不开只剩端到端一个数，无法归因 |
+| `--step-profiling` | **开（P198 起默认）** | **唯一的分段计时来源**（九段 + 主循环三段）。开销 ~0.2µs/段可忽略；`--no-step-profiling` 关闭。不开只剩端到端一个数，无法归因 |
 | `--readout-conn-k` | **128** | M6 读出稀疏度（0 = 稠密）。**128/3072 = 4.2% 连接率**，决定读出访存量（省 8.0×）。P108 取自 4M 档 A/B：k=128 时 PPL 477 vs 稠密 608 |
 | `--readout-dtype` | **fp32**（P194 Q4） | 读出**存储**精度。P194 起默认 fp32（P110：低精度把感知器 p−t 的非目标行更新舍入丢弃 → 学习退化为纯 Hebbian）。要 fp8 的访存收益请配 `--readout-master-weight`（P195 DeepSeek-V4-Flash：fp8 影子只做前向、更新落 fp32 master → 本机实测 PPL 与 fp32 基线差 1.1%，而无 master 的 fp8 差 33%，见 §6.2）。910B 无 fp8 算子 → 每步 CPU 转换 int8 计算可选（`--fp8-conv`） |
 | `--readout-master-weight` | **off** | P195：fp32 主权重 + 低精度影子副本（DeepSeek-V4-Flash 模式）。所有更新作用在 fp32 master（非目标行更新 100% 保留），影子只做前向 GEMV，每 N 步重量化一次。代价：多一份 fp32 master（1b 档 866.7 MiB）+ 最多 N 步 staleness；torch.compile 被禁用、NPU Graph 重量化移出图外。**默认 off**——fp32 存储时无收益（影子即 master） |
@@ -155,9 +162,9 @@
 > ⚠ **本节所有 12.09 / 7.83 / 1.28 等数字都属于 P113（plain）**。
 >
 > ⚠⚠ **口径提醒（易踩）**：上述 `--readout-dtype fp32` 是 **P113 当时的默认**，
-> **现行默认已是 fp8（P189）**。所以本节数字与「今天用默认参数跑出来的结果」
-> **不可直接比较** —— 不是精度对错问题，是口径不同。要与本节对比，必须显式带
-> `--readout-dtype fp32`。
+> P189 曾改为 fp8，**P194 起默认又回到 fp32** —— 口径巧合一致，但 P189 阶段的
+> fp8 默认 run 与本节数字**不可直接比较**（精度口径不同）。与本节对比，必须显式带
+> `--readout-dtype fp32`（现在恰好等于默认值）。
 > 上一段的 17.63 / 7.68 / 6.92 属于 serial 口径，**只在 §2.5 的 A/B 对照表里出现**，
 > 其余章节不再复述，避免两个口径混用。
 
@@ -558,10 +565,10 @@ fp32 权重 @ fp64 输入会**脱离 BLAS 的 sgemv**，走逐元素慢路径，
 
 | 精度 | 非目标行保留率 | 目标行保留率 | 判读 |
 |---|---|---|---|
-| fp32 | **99.95%** | 100% | 语义正确（显式 opt-in） |
+| fp32 | **99.95%** | 100% | 语义正确（**P194 起为默认**） |
 | fp16 | **26.67%** | 100% | 73% 的非目标行更新被丢弃 |
 | bf16 | **5.79%** | 100% | 94% 被丢弃 |
-| **fp8（P189 默认）** | 更低（步长比 fp16 粗约 4 倍） | 100% | fhz 知情选择：「模型 fp8，迭代 fp16」；验收靠 probe_PPL |
+| **fp8（P189 曾默认，P194 推翻）** | 更低（步长比 fp16 粗约 4 倍） | 100% | fp8 的正确姿势是配 master（P195），验收靠 probe_PPL |
 
 **目标行全部 100%**（目标更新 `~1e-2` ≫ 半 ULP）→ 低精度不是「完全不学习」，
 而是**丢掉了非目标行的抑制项**。
@@ -617,7 +624,7 @@ fp32 master 上，比 fp16 更准**（dp/ht 仍按 `_cdtype`=fp16 算，保持�
 反映的是舍入机制本身（dtype 半 ULP 是纯数值性质，与平台无关），
 但**「哪种精度跑得快」的平台相关部分不在此表**。
 
-### 6.2 fp8：硬件限制与 P189 软件绕行（本节旧结论已被推翻）
+### 6.2 fp8：硬件限制与 P189 软件绕行（P189 放行后，P194 又把默认改回 fp32）
 
 | 平台 | 实测 |
 |---|---|
@@ -629,6 +636,13 @@ fp32 master 上，比 fp16 更准**（dp/ht 仍按 `_cdtype`=fp16 算，保持�
 fp16 迭代计算**，访存与原生 fp8 相同（1 B/元素）；前向可选每步 CPU 转换
 int8 码本走真实存在的 int8 算子（P154/P155，`--fp8-conv` 选核）。机制细节见
 《PHD-Net_硬件后端适配报告.md》§3.2，本文不复制。
+
+⚠ **默认值的两次反转**：P189 曾把读出默认设为 fp8（位模式绕行）；**P194 Q4 起默认
+回到 fp32**（P110 实测：fp8 粗步长吞掉非目标行 `p − t` 更新，fp16 保留率也仅 26.67%
+→ 学习退化纯 Hebbian）。**要 fp8 的访存收益，现行正解是 `--readout-master-weight`**
+（P195 DeepSeek-V4-Flash 模式，见上文「§6.2 主权重模式」）：fp32 master 承接全部更新，
+fp8 影子只做前向。本机 A/B：fp8 无 master PPL 2.84 → 有 master 2.15（fp32 基线 2.14）。
+机制已完整记录于上方 §6.2，此处不重复表格；门禁 `gate_readout_master_weight.py`。
 
 ⚠ **能力表里的一行「不支持」只能靠目标机器实测确认**（`[台账]` B4/B11）——
 这条纪律不变；变的是「不支持」之后的动作：从「整体禁用」改为「位模式绕行」。
@@ -652,9 +666,9 @@ int8 码本走真实存在的 int8 算子（P154/P155，`--fp8-conv` 选核）�
 
 | 配置 | 3000 步后 probe_PPL |
 |---|---|
-| `eta_pc=0.02, eta_oja=0.02`（旧默认） | **9.1e11**（发散） |
-| `eta_pc=0.02, eta_oja=0`（新默认） | **916** ✅ |
-| `eta_pc=0, eta_oja=0`（冻结主干） | 1104 ✅（但失去表征发育） |
+| `eta_pc=0.02, eta_oja=0.02`（P194 曾设的旧默认） | **9.1e11**（发散） |
+| `eta_pc=0.02, eta_oja=0`（**P198 现行默认**） | **916** ✅ |
+| `eta_pc=0, eta_oja=0`（冻结主干，P194 之前的旧铁律） | 1104 ✅（但失去表征发育） |
 
 **发散机理**（逐层实测定位）：
 1. STDP 权重 `|W|` 从 0 → 47（1500 步）；`h` 分量仍正常（max 0.66）；
@@ -667,6 +681,9 @@ int8 码本走真实存在的 int8 算子（P154/P155，`--fp8-conv` 选核）�
 **修法**：`eta_oja` 库默认改为 0.0（原 0.02），`build_cfg` 显式 0.0；
 `PHDNetConfig.__post_init__` 对 `eta_oja > 0` 发 **RuntimeWarning**
 （不 raise——发散与规模相关，小规模/短跑的机制测试合法地用 `eta_oja>0`）。
+⚠ **对照 P194 的表征发育窗口**（`eta_pc=0.02` + `pc_dev_steps=20000` 余弦退火，
+发育期后冻结）：P194 的发育窗口仍成立，被 P198 推翻的只是 `eta_oja>0` 这一项
+（Oja 上行权重参与前向 → 正反馈环；eta_pc 本身无此问题）。
 
 **验证**（`eta_pc=0.02, eta_oja=0`，40K token / 3392 词表）：
 
@@ -978,8 +995,10 @@ python train/train.py --preset 1b --data pretrain --data-lang zh --remote-data \
 `--readout-conn-k 128` `--readout-dtype fp32` `--m2-kernel {serial,plain,fused}`
 `--numba-threads 8` `--nll-sync-every 8`
 ⚠ **上面这行里的 `--readout-dtype fp32` 是为了复现 P113 基线而显式指定的**，
-**不是现行默认值** —— 现行默认是 **fp8**（P189，见 §2.1 CLI 表）。照抄本行去跑新实验
-会得到与本文所有现行数字**不可比**的结果（语义更正确，但口径不同）。
+**与现行默认值相同**（P194 起默认就是 fp32，见 §1.4 CLI 表）——但它当初写下时
+默认是 fp8，照抄本行去跑新实验仍需注意 P192 之后的学习语义修正（LTD 迹补偿）
+使历史 PPL 数字不再可比。另：`--data` 自 P196 起新增 `cc_traces` 数据源；
+`--step-profiling` 自 P198 起默认开。
 
 ### 9.3 基准与探针工具
 
@@ -1100,8 +1119,9 @@ Markdown 与 `docs/index.html`**（20 份）作为语料，跑同一 `BASE` 口�
 ⚠ 语料实测为 internal_corpus **27,034** 字符 / ood_wiki **20,187**；
 本节早期版本写的「27,405 / 20,214」是**错的**，已更正。
 
-⚠ **锚点是 P110（fp32 读出）时期重测的**：读出默认自此经 fp32 → fp16 → **fp8**（P189）
-多轮变更（见《竞争力与脑同构性评估》§6.4），**fp8 锚点尚未重测** ——
+⚠ **锚点是 P110（fp32 读出）时期重测的**：读出默认多轮变更（fp32 → fp16 → fp8（P189）
+→ **回到 fp32（P194 Q4）**；fp8 若要用须配 `--readout-master-weight`（P195）），
+历史 fp8 默认阶段的锚点未重测 ——
 `tools/eval/rebaseline.py --readout-dtype fp8` 测 fp8；脚本默认显式 fp32，与库默认值分开
 （本节上表已实测当前工作区 fp8；不可外推到 NPU 或其他配置）。
 
@@ -1113,13 +1133,14 @@ Markdown 与 `docs/index.html`**（20 份）作为语料，跑同一 `BASE` 口�
 | 项 | 状态 |
 |---|---|
 | `python tests/run_tests.py fast` | **9/9**（零回归门槛） |
-| 专项 verifier | **43 个 `verify_*.py`**（另有 `bench_accel_readout_path.py`，不计入 verifier；清单见 §9.4） |
+| 专项 verifier | **47 个 `verify_*.py`（P199 现状；另有 `bench_accel_readout_path.py` 不计入）**（清单见 §9.4） |
 | ~~`verify_m2_rust_kernels.py`~~ | 🔴 **已随 P188 删除**（Rust 臂整体下线）。它 P182 时是 0 FAIL/31 条全绿，但**该 verifier 与它守护的实现都不再存在** —— 保留此行只为说明「Rust 臂的 bug 史」（int64→int32 漏转曾致 5 FAIL，N2 relerr≈1.9） |
 | P192 Cython/开关/loader/重叠契约/CANN 核对门禁 | 最新例数见发布日志，不复制过时计数；Cython 只声明容差等价，实例隔离、force 失败、plain/fused 与 fp32/fp64 编码输入另有覆盖 |
-| `gate_ltm_trace_semantics.py` | ⚠ **26/32，(a) 组 6 例失败且为既有失败**（已 stash 验证与新改动无关）；(b)(c)(d) 全绿。退出码保持 1 以免差异被永久掩盖 |
+| `gate_ltm_trace_semantics.py` | ✅ **P193 起全绿 32/32**（P192 时曾 26/32，(a) 组 6 例既有失败已归因修复：LTD 第二条迹 `t_pre[k]` 裸读缺 λ^Δt 补偿 → 改走 `_decay_read`，`max\|ΔW\|=5.551e-17`）。⚠ 该修复是**学习规则层面的语义变更**：LTD 强度此前系统性偏大，历史 PPL 数字不再可比，须重测 |
 | `gate_readout_fused.py` | ✅ PASS（融合更新核 1.54×） |
 | `gate_accel_readout.py` | ✅ 全部 PASS |
-| **P192 发布验证实测（2026-10-11，py -3.14.5）** | **40/41** verifier 通过（`outputs/test/p192_publication/summary.json` + 各 `.log`）；fast **9/9**；`compileall` + `train.py --help` + `infer.py --help` 全过；隔离目录、无预编译扩展、外部 cwd 下 `force` 真实构建成功（`fresh_cython_build.log`，`cp314 openmp=yes`）。唯一失败即上表 (a) 组既有失败 |
+| **P192 发布验证实测（2026-10-11，py -3.14.5）** | **40/41** verifier 通过（`outputs/test/p192_publication/summary.json` + 各 `.log`）；fast **9/9**；`compileall` + `train.py --help` + `infer.py --help` 全过；隔离目录、无预编译扩展、外部 cwd 下 `force` 真实构建成功（`fresh_cython_build.log`，`cp314 openmp=yes`）。唯一失败即上表 (a) 组既有失败（**P193 已修**） |
+| **P199 门禁现状（2026-10-17）** | `tests/gates/` **47/47**（`outputs/test/reorg_gates/summary.json`；唯一例外 `gate_csr_vectorization_perf` 26/27 因 golden 基准文件缺失非代码回归，后续已绿）；fast **9/9**。P194–P199 新增 `gate_insession_learning` / `gate_readout_master_weight` / `gate_generate_truncation` / `gate_cc_traces` / `gate_cli_i18n`（**P199 重写为 30 项显式契约**，旧 B1–F4 正则内部行为测试已不存在）等门禁 |
 | CI | 两套 workflow 已补 Python 3.14、Cython 构建/强制加载及新增门禁。GitCode 用 uv 创建 3.14 虚拟环境，GitHub 用 setup-python；仓库无 Jenkinsfile。远端本轮状态未核验，**不宣称 CI 全绿** |
 
 **四条与性能相关的门禁缺口**（详细台账见 `BUGS.md`）：
@@ -1148,7 +1169,7 @@ Markdown 与 `docs/index.html`**（20 份）作为语料，跑同一 `BASE` 口�
 | 2 | **`--m2-kernel` 现行默认值** | **`plain`**（P113 实测后改为默认，`train/train.py:394` `default="plain"`，源码核对） | **P113 前**本文档记`serial`，而 `train.py` 的 help 文本写「默认 plain」。**`serial` 现为历史对照**（§2.5） |
 | 3 | **`--encoder-dtype` 现行默认值** | **`fp32`**（CLI 层 `train/train.py:408`；库 `config.encoder_dtype` 是 `fp64`，`config.py:330` —— **两处都是对的，属有意分歧**） | `train.py` help 文本与《文档写作规范》§2.8 均写「默认 fp64」，未区分库/CLI |
 | 4 | **`--ckpt-dtype` 默认值** | **fp16**（`train/train.py:512`，源码核对） | 《文档写作规范》§2.8 记 bf16 |
-| 5 | **读出默认精度** | **fp8**（P189，fhz 2026-10-07；fp8 位模式 uint8 存储 + fp16 迭代） | 《硬件后端适配报告》§3 已同步 P189；`文档写作规范` §2.4 若仍写 fp16/fp32 则过时 |
+| 5 | **读出默认精度** | **fp32**（P194 Q4；P189 曾默认 fp8 位模式 uint8 存储 + fp16 迭代，P194 推翻——fp8 非目标行更新保留率最低） | 《硬件后端适配报告》§3.1 已同步 P194；《文档写作规范》§2.4 已同步 |
 | 6 | **CS/s 量级** | **~0.9 M**（2026-10-01 稳态）；**11.2 M**（同 run 早期）；**250–600 万**（2026-09-29，更早） | 旧文档只有 250–600 万一个量级。三个量级并存，引用**必须带日期与线程配置** |
 | 7 | **读出的字节流量与带宽口径**（⚠ **三套并存，刻意不统一**） | **229.15 MiB/步**（P113，`diag_readout_npu.py` 实算，**计idx 与临时张量 g**，vocab 51,962）→ ~800 GB/s 估算下界 **0.300 ms**，实测 7.83 ms = **26.1×** | ①《并行与加速架构分析》§3.3 复算 **492.5 MB/步**（设计词表 73,958，**同样计 idx 与临时张量**，词表口径不同）→ 64.1 GB/s ≈ HBM 4.0%；② 旧 **2600 MiB/步**（**稠密**口径）→「21%」**已作废**（§3.3）。**三套的差异来自「词表口径」与「是否计稀疏」，引用时必须写清是哪一套** |
 | 8 | **词表规模** | **51,962**（本次训练实建，`[日志]`）与 **73,958**（设计态满词表，用于访存上界） | 两者都出现在工具默认值里。**必须标明是哪个口径**（它直接决定上面第 7 条的字节数） |
@@ -1166,8 +1187,8 @@ Markdown 与 `docs/index.html`**（20 份）作为语料，跑同一 `BASE` 口�
 - ❌ 容量 1.317e9（1B 档实算 **1.370e9**）
 - ❌ 旧门禁数（fast 11/19/24 项）
 - ❌ 「三套 CI」（实际两套，无 Jenkinsfile）
-- ❌ 「读出默认 fp16/fp32」（**P189 起默认 fp8**；旧禁令「读出默认 fp8」同步作废）
-- ❌ 「fp8 已从加速后端整体删除/默认禁用」（P189：fp8 显式请求放行且为默认，位模式存储绕行）
+- ❌ 「读出默认 fp16」（P189 曾改 fp8，**P194 起默认 fp32**；引用一律带 P 编号与日期）
+- ❌ 「fp8 已从加速后端整体删除/默认禁用」（P189：fp8 显式请求放行；P194 起 fp8 默认被推翻，改走 master 模式）
 - ❌ 「语料中文 95%」（远程分片实测 zh 仅 2%）
 - ❌ **「`--m2-kernel` 默认 serial」/「M2_infer 跑在单核」**（P113 起默认 `plain`，M2 已并行；serial 6.92 ms 只能作为**历史对照**出现）
 - ❌ **「带宽已用 21%」/「读出差 13 倍」**（前者分子分母口径不匹配已作废，后者被 26.1× 实算取代）

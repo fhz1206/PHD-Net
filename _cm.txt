@@ -1,41 +1,42 @@
-P199: i18n 重构——正则词表替换 → 显式消息目录（消除碎片化乱码）
+P200: 全量重写文档 + 介绍网页 + 清理调试文件（子代理并行协作）
 
-## 问题（用户指令：「现在的 i18n 逻辑一堆 bug」）
-旧方案用 200+ 词条的正则交替在输出层逐词替换中文。失败模式
-（338 个静态中文串只登记 <10%，本会话日志实测）：
-1. 子串误切：大空间表容量 → 「大 empty 间表 capacity」
-   （「空间」被「容量」词条夹击，专有组合无法穷举）
-2. 漏网残留：already 生长突触按 100 万 rows（词条永远追不完）
-3. 中英粘连：readout backendunavailable / loadedcheckpoint
-4. 白名单腐烂：诊断行被逐词翻成「run时提升」（P147 记录过的复发）
+## 清理（用户指令："_fix 这种的可以删除"）
+- 删 _fixroot.py / _fixroot2.py / _dbg_path.py（目录重组时的一次性调试脚本）
+- 删 _cm.txt（提交信息临时文件，此前误入版本库）
+- 删 outputs/test/_rt_dbg*.json（调试输出）
 
-## 新架构（phdnet/i18n.py 全量重写）
-三层策略，结构上排除碎片化：
-1. _CATALOG 整句精确匹配（完整消息 → 人写的完整英文句）O(1)
-2. _WORDMAP 多字词整词替换（键全部 ≥2 汉字；**扫描式游标**感知
-   前一个输出字符——相邻词条/英文↔汉字交界补空格，无正则交替）
-3. 未命中保留中文（可读），**不做单字替换**（单字夹击是乱码根源）
-诊断行（[ASCII 标签]）两模式逐字节一致（P147 纪律保留）。
-纯 ASCII 快速通道保留（<10µs）。API 兼容（set_lang/get_lang/T/
-translate/install_stream_filter 签名不变）。
+## 全量重写（子代理，均先读源码核实后落笔）
+- README.md（221 行）：P199 现状、10 节、徽章数字、诚实边界
+- docs/index.html（354 行）：three.js 3D 导览（1303 行 + 外部 CDN）
+  → 单文件静态深色科研页，零外部依赖：M1-M6 数据流 + 9 张机制卡片
+- docs/PHD-Net_架构设计.md（375 行）：M1-M6 逐模块 + 新增「学习能力层
+  P194-P198」专章 + 数据流 ASCII 图 + 精度体系表
+- docs/PHD-Net_现状速查.md（121 行）：从"记忆归档"改为一页式事实基线，
+  51 项开关默认值全部源码核实
+- docs/PHD-Net_竞争力与脑同构性评估.md（230 行）：16 行机制完整性判级表
+  （✅10/◐3/○4）+ 能力三态（记忆✓/会话学习✓/生成✗）
+- 就地更新：性能评估/硬件后端/并行加速/CPU-NPU/扩展指南/写作基线/
+  文档规范/BUGS/tools README/backends README/chat README/docs README
 
-## 连带修复：TeeLogger 覆盖翻译层（新发现的真实 bug）
-train.py 原顺序 install_stream_filter()(600 行) → sys.stdout =
-TeeLogger(618 行)——Tee 直接覆盖已包装的 stdout，**翻译层整个失效**
-（--lang en 时容量验算表仍是中文，用户日志实测）。改为 Tee 先建、
-filter 重装（_StreamFilter 只代理 write，与 Tee 双写兼容）。
-门禁 E3 静态钉死顺序。
+## 删除的过时声明（跨全部文档）
+rust/phdnet_rs 现行引用、sparse_conn 现行引用、fp4/int4（仅存"已删除"
+注记）、readout 默认 fp8（→fp32 P194）、eta_pc=0 铁律（→发育窗口
+pc_dev_steps=20000）、ltm_imprint_gate 0.8（→0.3）、旧门禁计数、
+旧 PPL 锚点、词表 73,958 旧口径、--readout-conn-k 默认 0 旧说法
+
+## 连带修复（重测中发现）
+gate_csr_vectorization_perf.py B 组硬依赖 %TEMP%/perf_golden_.npz
+（仓库外一次性产物）→ 换机器必失败（实测 46/47）。改为自包含：
+golden 由同文件朴素参考实现即时生成，逐位对拍强度不变 → 32/32 PASS
+
+## 统一口径
+datasets/README.md smoke 实测 2474→1457（旧配置）统一为
+2474→1308（P198 复测口径），与 README/index.html 一致
 
 ## 验证
-- gate_cli_i18n.py 重写为 30 项新契约（含旧方案五组坏例回归：
-  大 empty 间表/backendunavailable/loadedcheckpoint/cachedirectory/
-  total用时 全部消失）
 - run_tests.py 9/9；run_gates.py 47/47
-- 端到端 --lang en 实测：Synapse capacity audit / static memory /
-  M4b big-space table capacity 全部正常无碎片
-- 词级残留（如「固定 synapse 小计」「索引映射」）可读完整词，
-  随迭代逐步迁入 _CATALOG
-
-## 迁移策略
-训练热路径核心消息（容量验算/检查点/里程碑/汇总行）已入 _CATALOG；
-其余保持中文（可读无损），不再维护「短词词条表」。
+- 文档关键数字 vs 源码自动核对 7/7（gates 47、9/9、fp32、eta_oja=0.0、
+  ltm_gate 0.3、1b big_m 72、cli conn_k 128）
+- index.html 零外部依赖（grep 确认）
+- 全仓 docs 硬过时终检：phdnet_rs/m2_backend/rs_threads/sparse_conn/
+  train_production.py 的现行引用为零（仅存"已删除/作废"注记）

@@ -1,166 +1,144 @@
 # PHD-Net
 
 **预测编码 × Hebbian/STDP × 双记忆**：一个完全不依赖自注意力的类脑模型架构，逐 token 流式训练，
-Python + numba + Cython + PyTorch/昇腾 NPU。
-
 学习规则全部局部化（无反向传播），计算事件驱动稀疏（只触碰活跃通路）。
+Python + numba + Cython（可选）+ PyTorch/昇腾 NPU（读出加速）。
+
 **唯一生产训练入口是 `train/train.py`。**
 
-适用范围：仓库根入口文档。数据截止 **2026-10-11（P192 发布复核）**。
-文档分工见 `docs/文档写作规范.md`；本文件不写详细性能数字与历史。
+适用范围：仓库根入口文档。数据截止 **2026-10-17（P199）**。
+文档分工见 `docs/文档写作规范.md`；详细性能数字与迭代历史见
+`docs/PHD-Net_性能评估与迭代方案.md`（性能唯一出处）。
 
 ---
 
-## 1. 四条铁律
+## 1. 当前状态（P199，2026-10-17）
+
+| 项 | 状态 |
+|---|---|
+| fast 回归 | `python tests/run_tests.py fast` = **9/9**（零回归门槛） |
+| 专项门禁 | `tests/gates/gate_*.py` = **47 个，当前全绿**（数量用 `ls tests/gates/gate_*.py` 现查，别写死） |
+| 生产默认 | 读出 fp32（P194）/ `eta_oja=0`（P198）/ SDR 新颖性印迹开（P197）/ `--step-profiling` 默认开（P198）/ `--lang en`（P199 消息目录） |
+| 已知红线 | `eta_oja>0` 生产规模正反馈发散（已默认 0 + RuntimeWarning）；1B 档大词表 × 少 token 曝光不足（见 §9） |
+
+近期迭代主线（均已在本仓库实测验证）：
+
+- **P194**：学习能力修复四件套——`micro_batch` 微批量、表征发育窗口（`eta_pc=0.02` 前 2 万步
+  余弦退火后冻结，`pc_dev_steps=20000`）、读出默认改回 **fp32**（精确 p−t 语义）、稳态缩放。
+- **P195**：DeepSeek-V4-Flash 主权重模式（`--readout-master-weight`）：fp8 影子前向 + fp32 master
+  迭代。本机 A/B（固定探针集）：fp8 无 master PPL **2.84** → 有 master **2.15**
+  （fp32 精确基线 **2.14**，差 ≈1%）。默认 off（多付 866.7 MiB fp32）。
+- **P196**：`--data cc_traces`（ModelScope `choucisan/mimo-claude-code-traces-1k`，
+  1,017 traces / 10 类 / 40.5 MB / MIT，英文代码+推理+工具调用）。
+- **P197**：会话中学习——SDR 支撑集新颖性检测使 LTM 印迹触发率 **0.67% → 100%**；
+  cc_traces 3,000 token 实测 PPL **2474 → 1308**、LTM 生长 **+81%**。
+- **P198**：`eta_oja>0` 会正反馈发散（生产规模 3,000 步 probe_PPL **9.1e11**；`eta_oja=0` → 916），
+  已默认 0 并对 >0 发 RuntimeWarning；`generate()` 支持 **top-k / nucleus(top-p)** 截断；
+  词表预算诊断工具 `tools/diag_vocab_budget.py`；`--step-profiling` 默认开
+  （日志自动带 `loop:` / `segments:` 分段用时）。
+- **P199**：i18n 重写为**显式消息目录**（`phdnet/i18n.py::_CATALOG` 整句精确匹配，
+  废弃正则词表替换）——`--lang en` 现在真正输出英文核心消息；TeeLogger 建立后重装
+  翻译层的顺序 bug 已修。新代码用 `T("中文", "English")`。
+
+---
+
+## 2. 四条铁律
 
 1. **禁自注意力 / 位置编码 / 堆叠层**——长程依赖由记忆机制承担，不由架构 shortcuts 承担。
 2. **每个机制必须有神经认知对应**，不接受「工程上好用但无认知对应」的部件。
 3. **逐 token 语义**：状态跨 token / 跨分片 / 跨 epoch 连续演化，读出 W 每步原地更新
-   → **不允许批处理**。这是语义约束，不是性能取舍。
-4. **行为变更以 config 开关承载，且默认关闭**。例外两个：`csr_online` / `k_sparse`
-   （default-on）。
+   → **不允许批处理**（读出微批量只是 B 步梯度平均后一次提交，主干/记忆仍严格保序）。
+4. **行为变更以 config 开关承载，默认关闭**。例外：`csr_online` / `k_sparse` /
+   P197 的缺失能力补齐项（`sdr_novelty` / `task_modulation` / `error_gated_memory` /
+   `plateau_sleep` / `readout_replay`）为 default-on——它们是**缺陷修复**而非行为偏好。
 
 ---
 
-## 2. 六机制速览
+## 3. 六机制速览
 
 | 机制 | 神经认知对应 | 本项目实现 | 稀疏性 |
 |---|---|---|---|
-| **M1** 稀疏分布式编码 | 皮层稀疏发放 + 侧抑制 WTA | `phdnet/sparse_encoder.py` k-WTA + SDR | 输出 **12.5%** 活跃 |
-| **M2** 预测编码主干 | dense representation + sparse connectivity | `phdnet/sparse_pc.py` 结构性稀疏 CSR，4 层 | **12.5%** 连接率 |
-| **M3** STDP 时序预测 | 稀疏拓扑突触迹 | `phdnet/plasticity.py` + `stdp_kernels.py`，`m_lateral=16` | **1.56%** 连接率 |
-| **M4a** 工作记忆 | WM 锚定 | `phdnet/wm.py` | — |
+| **M1** 稀疏分布式编码 | 皮层稀疏发放 + 侧抑制 WTA | `phdnet/sparse_encoder.py` k-WTA + SDR；1b 档 k_sparse = width/8 = 128（12.5% 活跃） | 12.5% 活跃 |
+| **M2** 预测编码主干 | dense representation + sparse connectivity | `phdnet/sparse_pc.py::SparsePCStack`：上行识别 ×2 + 下行生成 ×2，全部 CSR 承载，`conn_k=128` | 12.5% 连接率 |
+| **M3** STDP 时序预测 | 稀疏拓扑突触迹 | `phdnet/plasticity.py` + `stdp_kernels.py`，`m_lateral=16` | 1.56% 连接率 |
+| **M4a** 工作记忆 | WM 锚定 | `phdnet/wm.py`（`n_wm_slots=4`，内容寻址可选） | — |
 | **M4b** 大容量事件驱动稀疏表 | 长程印迹 | `phdnet/bigltm.py` + `sparse_table.py`，2²⁴ × 72 | 事件驱动，随经验生长 |
-| **M5** 神经调制 | surprise z 分数门控 / 四通道 | `phdnet/modulator.py` | — |
-| **M6** 读出 | 感知器输出层 | `phdnet/readout.py` + `backends/accel_readout.py` | 生产默认 **conn_k=128 → 4.2%**（P108/P111）|
+| **M5** 神经调制 | surprise z 分数门控（多通道可选） | `phdnet/modulator.py` | — |
+| **M6** 读出 | 感知器输出层 | `phdnet/readout.py` + `backends/accel_readout.py`，`--readout-conn-k` 默认 **128** | **4.2%** 连接率（128/3072） |
 
 **稀疏性是架构原则，不只是优化**：人脑长程连接率 ~2e-8、平均每神经元约 1744 条突触。
-本项目 M2 = 12.5%、M3 = 1.56%、M4b = 事件驱动、M1 输出 k-WTA 12.5%。
+本项目 M2 = 12.5%、M3 = 1.56%、M4b = 事件驱动、M1 k-WTA 12.5%、M6 = 4.2%。
+M6 幂律异质连接（`--readout-powlaw-alpha`，k_i ∝ freq^alpha）保留但**默认 0**：
+加速器对非均匀行宽 fail-fast（开 alpha>0 回落 numba 读出），且词频目前是代理值 `1/rank`。
 
-> **稀疏化进展与剩余欠账**：M6 读出**已稀疏化**（P108：`--readout-conn-k` 默认 128，
-> 4.2% 连接率，访存 866.7 MiB → 113.6 MB；P111：加速器已实现均匀 k gather-GEMV，
-> 读出真正跑在 NPU 上）。
->
-> **P124 起 M6 是三层稀疏化**：均匀 k（P108）→ 加速器 gather-GEMV（P111）→
-> **幂律异质连接**（`--readout-powlaw-alpha`，按词频分配行宽 `k_i ∝ freq^alpha`，
-> 对应突触巩固/修剪的"use it or lose it"）。**默认 `alpha=0` = 关闭**，
-> 此时**逐位等价于均匀 k**。实测行宽 6~39 不等而**总 nnz 恒等于预算、不膨胀**。
->
-> ⚠ **两条如实记录的局限**：(1) 加速器对非均匀行宽 **fail-fast**（行宽不等需
-> 变长 CSR + segment sum，是不同算法）→ 开 `alpha>0` 会**回落 numba 读出**，
-> NPU 加速失效，这是正确行为；(2) **词频目前是代理值** `1/rank`（构造读出时
-> 语料尚未流过，且词表是**字典序非频次序**）→ 依据不足，故默认关闭。
-> 即便开启，与人脑 2e-8 连接率仍差约 6 个数量级。详见 `docs/PHD-Net_架构设计.md` §2.7.1。
-
-### 容量账（1B 档，`--preset 1b`，width=1024）
+### 容量账（1b 档，`--preset 1b`，width=1024，词表 51,962，conn_k=128）
 
 「1B」= **总突触参数容量 ≥ 1.0×10⁹**（容量上限口径，非已用量）。启动时由
-`train/config_1b.py::capacity_report()` 打印验算表。
+`train/config_1b.py::capacity_report()` 打印验算表；词表随数据/采样变化，以实跑为准。
 
-| 组成 | 规模（`readout_conn_k=128`，生产默认） |
+| 组成 | 规模 |
 |---|---|
-| M4b 大空间事件驱动表 | 2²⁴ 神经元 × 72 出边上限 = **1,207,959,552**（占 ≈ 99.2%）|
+| M4b 大空间事件驱动表 | 2²⁴ 神经元 × 72 出边上限 = **1,207,959,552**（≈99.2%）|
 | M6 读出（稀疏 k=128） | **6,651,136**（稠密等价 159,627,264 = 51,962×3,072）|
 | M1 编码器 | 2,098,176 |
 | M2 主干 CSR / M3 STDP 核 | 524,288 / 16,384 |
 | **固定突触小计** | **9,289,984** |
 | **总容量** | **≈ 1.217e9** |
 
-⚠ **容量数字必须带 `readout_conn_k` 与词表**（`capacity_report` 实跑，V=51,962）：
-`1.217e9` = 生产配置（conn_k=128）；`1.370e9` = **同词表 + 稠密读出**；
-`1.317e9` = `big_ltm_m=60` 时代。三个都曾正确，**不可混用**。
-M4b 突触**不是构建即存在**，而是随经验生长（"fire together, wire together"）；
-`count_params` 计的是**已生长突触数**，训练初期利用率低。**每步计算量只正比于活跃神经元数**
+⚠ 容量数字必须带 `readout_conn_k` 与词表口径，不可混用。M4b 突触**不是构建即存在**，
+而是随经验生长（"fire together, wire together"）；**每步计算量只正比于活跃神经元数**
 （事件驱动），与 1B 总容量无关——这是容量与算力解耦的关键。
 
 ---
 
-## 3. 任务导向文档地图
+## 4. 快速开始
 
-**我要做什么 → 看哪份。**
-
-| 我要做的事 | 看这份 | 别看 |
-|---|---|---|
-| **跑一次训练** | `train/README.md`（快速开始 + 开关表） | — |
-| 搞懂六机制为什么这么设计、脑同构论证 | `docs/PHD-Net_架构设计.md` | 本文档 |
-| **看性能数字 / 为什么吃不满多核** | `docs/PHD-Net_性能评估与迭代方案.md`（性能唯一出处）<br>`docs/PHD-Net_并行与加速架构分析.md`（吃不满的论证） | 本文档 |
-| 加新机制 / 扩硬件后端 | `docs/PHD-Net_扩展指南.md`<br>`docs/PHD-Net_硬件后端适配报告.md` | — |
-| 与 Transformer / 大脑对比 | `docs/PHD-Net_竞争力与脑同构性评估.md` | — |
-| 查一个 bug 的症状→根因→门禁缺口 | `BUGS.md` | — |
-| 制备语料 / 数据集入口 | `tools/README.md`、`datasets/README.md` | `docs/*.md`（**不是数据集**） |
-| 对外一页式介绍 | `docs/index.html` | — |
-| 写文档要遵守的规则 | `docs/文档写作规范.md` | — |
-
-**冻结评测基准在 `eval_corpus/`**（仓库根）：`internal_corpus.txt` **27,034 字符**（实测原文长度）、
-`ood_wiki.txt` 远域探针。`docs/*.md` 不是默认基准语料；本轮按要求另做当前项目文档 PPL 探索测试，
-该结果不与冻结基准混用。协议和完整测量见《性能评估与迭代方案》§10.1。
-
-> **P192 发布边界**：Cython 默认关闭；修复首次构建死锁、跨模型开关泄漏及 force 错误传播。
-> 审计 STDP η 修正改变学习行为，当前 PPL 质量下降已如实记录，历史锚点不覆盖。
-> 本机无 NPU，不宣称昇腾端到端加速；既有 LTM 迹门禁失败仍保留，不能称全部验证/CI 全绿。
-
----
-
-## 4. 当前状态摘要（P192 发布复核）
-
-### 精度口径
-
-- 读出 `--readout-dtype` 默认 **fp8**（P189，fhz 2026-10-07）：fp8 e4m3fn **位模式（uint8 承载）存储**（1 B/元素，访存收益完整保留）+ fp16 迭代计算。代价是**学习精度**：非目标行更新 |dp|≈1e-6 被粗步长舍掉（fp16 也只剩 26.67% 保留率），这是决策而非缺陷。
-- 动机记录（历史口径，现已被 P189 覆盖）：bf16 半 ULP≈2e-4 ≫ |dp|≈1e-6 → 更新被舍 → **退化为纯 Hebbian**。
-- **910B4 无原生 fp8 算子**：实测昇腾 Ascend910B4 + CANN 8.5 + torch_npu 2.9 对 float8_e4m3fn/e5m2 的建张量/cast/matmul 全部 ERR01007，`torch.ops` 零个 fp8 算子。故 fp8 默认走「位模式存储 + fp16 前向」，需要时可每步 CPU 转 int8 码本走真实 int8 算子（`--fp8-conv`）。
-- M1 编码器：生产 CLI `--encoder-dtype` 默认 **fp32**；库 config 默认 fp64，两个入口需区分。
-  昇腾 aarch64 平台自适应走 numba 核；x86 走 BLAS。
-- 分词 onehot 缓冲 fp16（无损，1B 词表 208→104 KB/步）。
-- 检查点对低精度**存位模式**（uint16/uint8），加载侧按 `meta["ckpt_dtype"]` 无损解码。
-
-### 性能区间（1B 档，昇腾 191 核 + NPU）
-
-- **20–110 ms/tok**是历史区间（1B 档，昇腾 191 核 + NPU）；现行锚点是 P113 的 **12.09 ms/tok**。
-- 读出**不是访存受限**（旧口径已推翻）：稀疏臂每步触达 229.15 MiB，按 ~800 GB/s 算下界 0.300 ms，
-  实测 7.83 ms 是下界的 **26.1×** → 瓶颈在算子效率与 launch，不在带宽。
-- **191 核用不满是架构性的 + 配置性各半**：逐 token 语义禁止数据并行（架构性）；M2 曾跑单核 6.92 ms
-  （配置性，已由 `--m2-kernel plain` 解决 → 1.28 ms，5.41×）。
-- 完整数字与平台差异铁律见 `docs/PHD-Net_性能评估与迭代方案.md`。
-
-### 门禁与 CI
-
-- `python tests/run_tests.py fast` = **9/9**（零回归门槛）；专项 verifier 见 `ls tests/gates/gate_*.py`（**别处别再写死数字**，历史文档已出现 18/22/23/26 四个互相矛盾的值）。
-- 语法门禁：`gate_ms_stream` 会对改动文件 `py_compile` 并真跑 `train.py --help`。
-- CI **两套**：`.gitcode/workflows/ci.yml`、`.github/workflows/ci.yml`（镜像）。
-  仓库**没有 Jenkinsfile**。GitHub 侧当前仍红（无日志权限，待 traceback）。
-
-### 评测基线
-
-- 口径：256 维栈、`eta_readout=0.15`。现行锚点 **4K 段 394.4687 / 全语料 359.2603**
-  （评测语料 2026-09-28 换为中文维基条目合集）。
-- 复测入口 `python tools/eval/rebaseline.py`（**无命令行参数**）。
-- ⚠ 旧口径 78.16 / 90.2480 / 73.1166 **只存于 git 历史，不可混用**。
-
-### 已知开放项
-
-M4b 复测归因 / fp16 下 PPL 是否下降 / 数据集语种（远程分片实测中文仅 2%、unk 47% **是代码问题**，
-与旧记录矛盾）/ 检查点 `compact_csr` 向量化后仍 3.9 s/10 万行 /
-**M6 幂律的真实词频来源**（P124 已接入但用代理值，两阶段方案未实现）/
-CPU 侧与 NPU 的空转重叠（方案 A/B/C 已撤销，P122/P125；现行方向见
-`docs/PHD-Net_CPU-NPU重叠执行计划.md` §6）/ GitHub Actions 仍红。
-
----
-
-## 5. 快速开始
-
-### 最小可跑（冒烟，分钟级，只验管线）
+### 安装
 
 ```bash
 pip install -r requirements.txt
+# 必装：numpy / numba / psutil / pyarrow / Cython；torch 可选（读出加速器路径用）
+```
 
+### 冒烟训练（分钟级，只验管线）
+
+```bash
 python train/train.py --preset smoke --data sft --tokens 2000
 ```
 
-### 门禁
+### P196：cc_traces 会话中学习（远程直读，零落盘）
 
 ```bash
-python tests/run_tests.py fast
+python train/train.py --preset smoke --data cc_traces --remote-data --tokens 3000
 ```
+
+内容是英文（代码 + 推理 + 工具调用）；`--data-lang zh` 会被自动拦下改为不过滤。
+本地副本模式先转换：
+`py -3.14 tools/data/cc_traces_to_text.py --out datasets/cc_traces/cc_000.parquet`。
+
+### 英文终端（P199：`--lang en` 真正输出英文）
+
+```bash
+python train/train.py --lang en --preset smoke --data sft --tokens 2000
+```
+
+`--lang` 只影响终端文案，对训练结果零影响；语料语言过滤是另一个参数 `--data-lang`（默认 all）。
+
+### 生成与评估
+
+```bash
+# 生成（P198：top-k 截断，CLI 暴露 --topk 默认 8；库级 generate() 另支持 nucleus top-p）
+python train/infer.py --model outputs/models/phdnet1b_1b_pretrain_final.npz --prompt "…" --topk 8
+
+# 交互对话（多轮共享网络状态）
+python train/infer.py --model outputs/models/phdnet1b_1b_pretrain_final.npz --chat
+
+# A/B 判据用固定探针集 probe_PPL（冻结 eval_corpus/internal_corpus.txt + 只读前向，零污染）
+python train/train.py --preset 1b --data cc_traces --probe-every 1000 --probe-tokens 2048 --tokens 100000
+```
+
+⚠ 训练流 sliding PPL 变异系数大（实测信噪比 0.40），**任何 <20% 的差异都测不出来**；
+A/B 判定一律用 `--probe-every` 的 `probe_PPL`，且只比差值（探针与训练流 PPL 绝对值不可比）。
 
 ### 标准 1B 档训练
 
@@ -170,76 +148,175 @@ python train/train.py --preset 1b --data pretrain --tokens 1000000
 
 # ModelScope 远程流式入口（HTTP Range，零落盘）
 python train/train.py --preset 1b --data pretrain --remote-data
+
+# 零 OOV 词表 + 1M context 里程碑 + 断点续训
+python train/train.py --preset 1b --data pretrain --vocab-scan full --context-milestone 1000000 --resume
+
+# P195：fp8 影子前向 + fp32 主权重（默认关，显式开启）
+python train/train.py --preset 1b --data pretrain --readout-dtype fp8 --readout-master-weight
+
+# P198：词表预算诊断（训练前估算 exposure = tokens / vocab）
+python tools/diag_vocab_budget.py --vocab-sample-chars 300000 --tokens 400000
 ```
 
-### 推理 / 对话
+### 门禁（改动后必跑）
 
 ```bash
-python train/infer.py --model outputs/models/phdnet1b_1b_pretrain_final.npz --chat
+python tests/run_tests.py fast        # 9/9
+ls tests/gates/gate_*.py              # 47 个专项 verifier，按需跑
 ```
 
-**全部开关、默认值与「为什么是这个值」见 `train/README.md`。**
+### 只看检查点的大空间表统计
 
-### 训练数据两入口
+```bash
+python train/train.py --preset 1b --data pretrain --report
+```
+
+全部开关、默认值与「为什么是这个值」见 `train/README.md`。
+
+---
+
+## 5. 训练档位表（`train/config_1b.py::PRESETS`）
+
+| 档位 | width | conn_k | big_n | big_m | 容量 | 用途 |
+|---|---|---|---|---|---|---|
+| `smoke` | 256 | 32 | 2²⁰ | 60 | < 1B（⚠ 仅验证管线，属预期日志） | 分钟级冒烟 |
+| `1b` | 1024 | 128 | 2²⁴ | 72 | ≈1.217e9（V=51,962 口径） | 标准档 |
+| `1b_max` | 4096 | 512 | 2²⁴ | 60 | 大主干档 | 大宽度实验 |
+| `30b` | 1024 | 128 | 2²⁹ | 56 | ≈30.3B | 需在线 CSR + 大内存 + 多机预算 |
+
+关键生产默认（全部来自 `train/train.py` argparse 与 `phdnet/config.py`，已核实）：
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| `--preset` | `1b` | 档位选择 |
+| `--data` | `sft` | `sft` / `pretrain`（全量）/ `pretrain_zh`（已废弃，等价 `pretrain --data-lang zh`）/ `eval` / `cc_traces` |
+| `--lang` | `en` | 终端语言（P199 消息目录后 en 真正英文）；数据过滤用 `--data-lang` |
+| `--readout-dtype` | `fp32` | P194 Q4：精确 p−t 语义；低精度可显式指定，配 `--readout-master-weight` 解除舍入丢失 |
+| `--readout-master-weight` | off | P195：fp32 master + 低精度影子（默认 off，多付 866.7 MiB） |
+| `--readout-conn-k` | `128` | 稀疏读出（≈4.2% 连接率）；0 = 稠密 |
+| `--micro-batch` | `1` | P194 Q1：读出梯度 B 步平均提交（主干/记忆仍逐 token 保序） |
+| `--step-profiling` | **开** | P198 起默认开：日志带 `loop:` 与 `segments:` 分段用时；`--no-step-profiling` 关 |
+| `eta_oja`（config） | `0.0` | P198：>0 生产规模发散（9.1e11），默认 0 + RuntimeWarning |
+| `--cython-kernels` | `auto` | 加载已编译扩展否则就地构建，失败静默回落 numba |
+| `--m2-kernel` | `plain` | 昇腾实测比 fused 快 5.41× |
+| `--numba-threads` / `--nll-sync-every` | `8` / `8` | 线程上限 / nll 同步周期 |
+| `--csr-online` | 开 | 在线可写 CSR（内存 ~5.74× 省） |
+| `--ckpt-dtype` | `fp16` | 检查点**存储**精度（位模式存取，与计算精度无关） |
+| `--ckpt-every` | `50000` | 每 N token 存检查点（异步，SIGINT 不丢） |
+| `--seed` / `--epochs` | `11` / `1` | 状态跨 epoch 连续不重置 |
+| `--vocab-scan` / `--vocab-sample-chars` | `head` / `4,000,000` | 词表采样；预算匹配见 §9 |
+| `--remote-data` / `--remote-fraction` | 关 / `0.3` | ModelScope HTTP Range 流式，零落盘；前缀子集保序 |
+
+---
+
+## 6. 数据集
+
+### Mixture-General-Mini（通用预训练 / SFT）
 
 | 入口 | 说明 |
 |---|---|
-| 本地 `datasets/` | gitignore 的独立仓库（`fhzfhz/Mixture-General-Mini`），由 `tools/` 转换脚本生成 |
-| `--remote-data` | ModelScope HTTP Range 流式直读，**零本地落盘**（仅支持 ModelScope） |
+| 本地 `datasets/` | 独立 git 仓库（`fhzfhz/Mixture-General-Mini`），`sft/` 与 `pretrain/` parquet 分片，schema `text / lang / src` |
+| `--remote-data` | ModelScope HTTP Range 流式直读，**零本地落盘**（仅支持 ModelScope；`--remote-fraction` 是分片级前缀抽样，不是随机采样） |
+
+### cc_traces（P196，会话中学习测试集）
+
+- ModelScope `choucisan/mimo-claude-code-traces-1k`：1,017 traces / 10 任务类别 / 40.5 MB / MIT。
+- **event-stream JSONL**（非 parquet）→ 专用读取路径 `phdnet/corpus.py::iter_cc_traces`：
+  只抽语言内容、按 event 顺序还原对话，保留 `thinking` 块。
+- 远程模式两级目录 `session/<category>/*.jsonl` 由 train.py 按 10 类逐个展开。
+- 内容是**英文**；对拍门禁 `tests/gates/gate_cc_traces.py`（23 项，含远程实读）。
+
+### 冻结评测基准（仓库根 `eval_corpus/`）
+
+`internal_corpus.txt` **27,034 字符**（21,627 训练 / 5,407 评估）+ `ood_wiki.txt` **20,187 字符**（远域探针）。
+不入训练集；`--probe-every` 探针用的就是这份冻结文本。
 
 ---
 
-## 6. 目录结构
+## 7. 任务导向文档地图
+
+| 我要做的事 | 看这份 |
+|---|---|
+| **跑一次训练** | `train/README.md`（快速开始 + 开关表） |
+| 搞懂六机制为什么这么设计、脑同构论证 | `docs/PHD-Net_架构设计.md` |
+| **看性能数字 / 为什么吃不满多核** | `docs/PHD-Net_性能评估与迭代方案.md`（性能唯一出处） |
+| 快速查现状 / 已定案结论 | `docs/PHD-Net_现状速查.md` |
+| 加新机制 / 扩硬件后端 | `docs/PHD-Net_扩展指南.md`、`docs/PHD-Net_硬件后端适配报告.md` |
+| 与 Transformer / 大脑对比 | `docs/PHD-Net_竞争力与脑同构性评估.md` |
+| 查一个 bug 的症状→根因→门禁缺口 | `BUGS.md`（53 条） |
+| 制备语料 / 数据集入口 | `tools/README.md`、`datasets/README.md` |
+| 对外一页式介绍 | `docs/index.html` |
+| 写文档要遵守的规则 | `docs/文档写作规范.md` |
+
+目录速览：
 
 ```
-train/
-├── train/                   1B 生产训练子项目（唯一训练入口）
-│   ├── train.py                生产训练主入口（流式 / SFT / 续训 / 远程数据）
-│   ├── config_1b.py            1B 档预设与容量验算
-│   ├── corpus_stream.py        字符流 → token 流、SFT 掩码状态机
-│   ├── vocab_parallel.py       词表并行构建 / 全量扫描
-│   ├── tokenizer_core.py       分词核心
-│   ├── ckpt_1b.py              检查点存取（异步 / 位模式 / 词表快照）
-│   ├── infer.py                推理 / 对话
-│   └── README.md               训练目录说明（开关表在此）
-├── phdnet/                     核心包
-│   ├── config.py               PHDNetConfig（全部超参与开关；新增默认关闭）
-│   ├── sparse_encoder.py       M1 稀疏编码器（k-WTA / SDR）
-│   ├── sparse_pc.py            M2 预测编码 CSR 栈
-│   ├── stdp_kernels.py         M3 STDP 计算核（numba + numpy 回退）
-│   ├── plasticity.py           M3 时序关联核容器
-│   ├── wm.py / ltm.py          M4a 工作记忆 / M4b 长期记忆
-│   ├── bigltm.py               M4b 容量层适配器
-│   ├── sparse_table.py         1B 印迹表 + 在线可写 CSR
-│   ├── modulator.py            M5 神经调制器
-│   ├── readout.py              M6 读出头（局部感知器 + softmax + 精度码本）
-│   ├── model.py                组装与调度（PHDNet.step）
-│   ├── word_encoder.py         M7 词涌现（无词典分词）+ 词级 SDR
-│   ├── word_lm.py / lm.py      词级 / 字符级语言模型
-│   ├── ms_stream.py            ModelScope HTTP Range 流式读取
-│   ├── device.py               后端探测（cuda / cann·昇腾 / rocm / dml / cpu）
-│   ├── i18n.py                 终端文案语言切换（zh / en）
-│   ├── telemetry.py            系统 / 设备遥测
-│   └── backends/               硬件后端子包（accel_readout / multi_device / …）
-├── eval_corpus/                冻结评测基准（27,034 字符）+ OOD 探针
-├── tests/                      回归门禁（run_tests.py）+ demo + verifiers/
-├── tools/                      语料制备 / 评测审计 / 硬件诊断（索引见 tools/README.md）
-├── docs/                       架构、扩展、性能、并行、后端、竞争力评估
-├── chat/                       对话前端（TUI / OpenAI 兼容 / websearch 工具）
-├── outputs/                    产物（test/ experiments/ 入库；smoke/ models/ 不入库）
-├── datasets/                   训练语料（独立仓库，gitignore）
-├── BUGS.md                     缺陷台账
-└── requirements.txt
+train/          生产训练子项目（train.py / config_1b.py / corpus_stream.py / infer.py / README.md）
+phdnet/         核心包（config / sparse_encoder / sparse_pc / stdp_kernels / plasticity / wm /
+                ltm / bigltm / sparse_table / modulator / readout / model / word_encoder /
+                word_lm / corpus / ms_stream / i18n / device / backends/）
+eval_corpus/    冻结评测基准 + OOD 探针
+tests/          run_tests.py（fast 9 项）+ gates/（47 个 gate_*.py）
+tools/          数据制备 / 评测 / 诊断（diag_vocab_budget.py、data/cc_traces_to_text.py 等）
+docs/           架构、性能、扩展、后端、竞争力、现状速查
+chat/           对话前端（tui.py，--selftest 可无模型走通 UI）
+datasets/       训练语料（独立仓库，gitignore）
+BUGS.md         缺陷台账（症状→根因→修复→门禁缺口）
 ```
 
 ---
 
-## 7. 术语口径
+## 8. 精度与平台口径
+
+- **读出**：默认 **fp32**（P194）。P110 反证在案：低精度把感知器 p−t 非目标行更新
+  （|dp|≈1e-6）舍掉 → 学习退化为纯 Hebbian（fp16 保留率仅 26.67%）。
+  要低精度访存收益请配 `--readout-master-weight`（P195）：fp8/bf16/fp16 影子只做前向，
+  所有更新落在 fp32 master（非目标行更新 100% 保留），每 `--readout-shadow-refresh`（默认 8）步
+  重量化；检查点对 master 存 fp32 精确值逐位往返。
+- **910B4 无原生 fp8 算子**（ERR01007 实测）：fp8 走「位模式（uint8 承载）存储 +
+  CPU 转换 int8 计算」，`--fp8-conv` 选 torch/nogil 核。
+- **M1 编码器**：生产 CLI `--encoder-dtype` 默认 **fp32**；库 config 默认 fp64（两个入口需区分）。
+  昇腾 aarch64 走 numba GEMV 核，x86 走 BLAS——**x86 与昇腾的加速方向常常相反，不可混用**。
+- **M2/M3/M4a**：fp32（P173 定案）。
+- **ms/tok 必带平台与档位**：现行历史锚点是 P113 的 **12.09 ms/tok**（1b 档，昇腾 191 核 + NPU）。
+  本机（x86，无 NPU）只能冒烟验证管线；昇腾端到端数字均来自服务器实测。
+- P192 的 STDP 学习率语义修正改变了学习行为：**历史 PPL 锚点不再可比**，
+  数字一律以《性能评估与迭代方案》§10.1 的记录为准，重测前不得引用旧锚点。
+
+---
+
+## 9. 已知边界（诚实）
+
+1. **1B 档 PPL 仍高**：词表 51,962 × 少量 token = 每词曝光不足，probe_PPL 长期偏高。
+   P198 词表预算诊断给出经验阈值：`exposure = tokens / vocab`，<30 严重不足、≥100 才充足。
+2. **「正常对话」未达到**：1B 档生成 bigram 合法率仅 **24–35%**（小词表 + 小预算可到 78%，
+   但那是 3,392 词的目标空间）。要接近正常对话需要 **≥10⁸ token 量级**的曝光，
+   这不是算法问题而是数据量问题。
+3. **`eta_oja>0` 是已知危险开关**：生产规模正反馈发散（3,000 步 probe_PPL 9.1e11）。
+   库默认 0 且 `__post_init__` 发 RuntimeWarning；小规模机制测试可显式开启并自担。
+4. **低精度默认是 fp32 而不是 fp8/fp16**：P110 的舍入反证未被推翻；P195 主权重模式
+   解除了它，但要多付一份 fp32 master（1b 档 866.7 MiB）且引入 ≤N 步影子 staleness。
+5. **幂律读出未接入加速器**：`--readout-powlaw-alpha>0` 回落 numba（fail-fast 是正确行为），
+   且词频是 `1/rank` 代理值。与人脑 ~2e-8 连接率仍差约 6 个数量级。
+6. **历史评测锚点不可比**：P192/P193 修正了 STDP 学习率语义（LTD 迹缺 λ^Δt 补偿），
+   学习规则层面的语义变更 → 旧锚点只存于 git 历史；新基线待重建。
+7. **CI**：GitCode 与 GitHub 两套 workflow（`.gitcode/workflows/ci.yml` 镜像 `.github/`），
+   仓库**没有 Jenkinsfile**；GitHub 侧历史状态红，待复核。
+8. **平台诚实**：本机无 NPU，所有昇腾端到端收益均为服务器历史实测；Cython 核
+   （`--cython-kernels auto`）无昇腾端到端收益实测，且开后与 numba 有 fp32 级微小漂移
+   （fastmath vs 严格 IEEE），**不得称逐位等价**。
+
+---
+
+## 10. 术语口径
 
 - **逐 token**：一次前向 = 一个 token，状态连续演化。批处理在本架构下是语义错误。
 - **容量 vs 已用量**：容量是突触上限（`--report` / `[big-ltm]` 日志查利用率），已用量是已生长数。
 - **稠密 / 稀疏连接率**：不存在的突触**不存储、不计算**。
-- **ms/tok**：单 token 毫秒数，必带平台与档位。x86 与昇腾的加速方向常常相反，不可混用。
-- **终端语言**：`--lang` **默认英文**，`--lang zh` 输出中文（P119）。**只影响文案，不影响数据**。⚠ 语料语言过滤是另一个参数 `--data-lang`。
+- **ms/tok**：单 token 毫秒数，必带平台与档位。
+- **probe_PPL**：固定冻结探针集上的只读 PPL，A/B 判定的唯一可信口径；与训练流 PPL 绝对值不可比。
+- **终端语言**：`--lang` 默认 `en`（P199 消息目录），`--lang zh` 中文；只影响文案不影响数据。
+  语料过滤是 `--data-lang`。
 
 写作规则见 `docs/文档写作规范.md`；新增训练脚本不进 `tools/`，一律进 `train/`。

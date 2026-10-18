@@ -22,18 +22,18 @@
   PASS  A 1024x1000 nan-row k=8  [idx/indptr/val+dense 逐位]
   PASS  A _dense 空行 CSR (3 行含 0 度行)  [逐位]
   -- A 小结: 22/22 tie-heavy 对拍逐位一致
-【B】固定 seed infer/learn 输出对拍 golden（%TEMP%）
-  PASS  B1 重建输出 vs %TEMP% golden 逐数组 np.array_equal  [115 数组]
-  PASS  B2 重建 sha256 == 存档 golden sha256  [24a49ec87ae70c66...]
-  PASS  B2b 同进程重建两遍逐位一致（确定性）
-  PASS  B3 朴素版自比对：朴素重建 == 向量化重建（逐位）
-  PASS  B3b 对拍后现场恢复（未污染模块状态）
-  PASS  B4 朴素版 sha256 == 存档 golden sha256  [24a49ec87ae70c66...]
+【B】向量化 vs 朴素参考 逐位对拍（自包含 golden，P200）
+  PASS  B0 golden 生成后现场恢复（未污染模块状态）  [115 数组]
+  PASS  B1 向量化输出 vs 朴素参考 golden 逐数组 np.array_equal  [115 数组]
+  PASS  B2 同进程重建两遍逐位一致（确定性）
+  PASS  B3 向量化 sha256 == 朴素 golden sha256  [24a49ec87ae70c66...]
+  PASS  B4 朴素 golden 重建两遍逐位一致（参考自身确定）
+  PASS  B4b 第二次对拍后现场恢复
 【C】性能断言（预热 + best-of-7；阈值 = 优化后实测 × 2）
-  PASS  C _from_dense_csr 1024x1024 k=64 <= 141 ms  [实测 24.9 ms（优化后基准 70.5 ms，阈值 2×）]
-  PASS  C _from_dense_csr 2048x2048 k=128 <= 582 ms  [实测 101.9 ms（优化后基准 290.9 ms，阈值 2×）]
-  PASS  C _dense 2048x2048 k=128 <= 40 ms  [实测 8.3 ms（优化后基准 19.8 ms，阈值 2×）]
-  PASS  C _dense 4096x4096 k=256 <= 160 ms  [实测 32.1 ms（优化后基准 79.6 ms，阈值 2×）]
+  PASS  C _from_dense_csr 1024x1024 k=64 <= 141 ms  [实测 28.2 ms（优化后基准 70.5 ms，阈值 2×）]
+  PASS  C _from_dense_csr 2048x2048 k=128 <= 582 ms  [实测 115.4 ms（优化后基准 290.9 ms，阈值 2×）]
+  PASS  C _dense 2048x2048 k=128 <= 40 ms  [实测 9.4 ms（优化后基准 19.8 ms，阈值 2×）]
+  PASS  C _dense 4096x4096 k=256 <= 160 ms  [实测 40.1 ms（优化后基准 79.6 ms，阈值 2×）]
 
 == gate_csr_vectorization_perf: 32/32 PASS ==
 全部通过：逐位不变 + 无性能回归。
