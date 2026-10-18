@@ -1,57 +1,56 @@
-P202: 性能三修复 + CI 两根因 + 日志降噪（诊断驱动，逐位不等价项全过门禁）
+P204: 多卡互联（读出列并行）+ 默认值调整（replay 16 / numba 16）+ 时间预估公式
 
-## 背景（用户实测 1b 档 step 23.05ms/tok，segments 只对上 10.44）
-P201 诊断报告（docs/PHD-Net_P201_M2-PC并行瓶颈诊断.md，551 行）：
-cProfile + 14 个 micro-benchmark 系统性排查，结论按证据强度排序。
+## ① 多卡互联（fhz 指示「训练代码请支持多卡互联」）
+新增 `phdnet/backends/sharded_readout.py::ShardedAccelReadout`：
+持 N 个 AccelReadout 分片（各持 V/N 词表行、各自设备/降级链/master），
+主卡全局 softmax + dp 行分片下发 + 各分卡 rank-1。
 
-## ① PC_learn：homeostasis 融合核（12 次核调用 → 1 次，1.34×）
-P201 发现：config_1b.py:112 homeostasis=True 使 _pc_learn_fused 被整体
-旁路（sparse_pc.py L738）→ 生产 PC_learn 实为 12 次独立 numba 核调用，
-其中 4 次 _csr_clip 无 prange = learn 里唯一串行 O(nnz) 扫描。
-修复：
-- _csr_clip 加 parallel+nogil（逐元素 clamp 无归约，与融合核内已有
-  prange clip 同构；本机线程缩放 1.31× → 与 add_outer 同级）
-- 新增 _pc_learn_fused_homeo：add_outer×2 + oja×2 + clip×4 +
-  scale_rows×4 融为 1 次调用，表达式与写序逐行照抄 Python 路径
-- 验证：_p202_parity.py 四组合对拍全部逐位一致
-  （homeostasis×eta_oja = T/F × 0/0.01）；1b 尺寸 A/B 1.34×
-- gate_m2_infer_kernels C5b 期望 5→6 个 nogil 核（>=6 不写死）
+**为什么是列并行而非 DDP**（P14 已论证，本次沿用）：逐 token 事件驱动
+稀疏网络无 batch 维、无反向图、全局状态（WM/STDP/LTM）跨样本连续携带
+→ 标准 DDP/DataParallel 在此没有可分的梯度或 batch 轴。
 
-## ② NPU/CPU 拉平（replay 段）
-cProfile 定位 other 段（step 内未打点部分，smoke 实测 5.94/11.40=52%）：
-readout _apply_update（CPU-only 路径）+ sparse_table.learn + replay 里
-的完整 encoder+pc.infer+readout 链路。
-- 新增计时段：M6_replay（此前完全不可见）、M5_novelty、M6_build_h、
-  other（每步未打点余额，_prof_close_step）→ segments 与 step 总时长自洽
-- 服务器实测 replay 占 ~3ms/tok（每 4 步一次完整前向+读出更新）
-- 新 CLI：--replay-every N（默认 4；16 → 0.27ms/tok，6×）
-  --no-readout-replay（立省 ~1ms/tok，附 P197 取舍警告）
-- 实测 A/B（smoke win 合计除 other）：3.16 → 0.97/2.18 ms/tok
+**接入面**：
+- `phdnet/backends/accel_readout.py`：新增 `_accel_apply_dp`（分片 rank-1
+  原语，覆盖稠密/int8/fp8-bits/master 四种存储）；`pick_readout_backend`
+  在 `accel_readout_devices>1` 时分派到 ShardedAccelReadout
+- `phdnet/config.py`：新字段 `accel_readout_devices: int = 1`
+- `train/train.py`：新 CLI `--accel-devices N`
+- **单卡路径零变更**：devices=1 时完全走原 AccelReadout
 
-## ③ 日志降噪（用户指示「不要打印那么多」）
-- [big-ltm] 16.5万行 → 仅存档/里程碑时打（缩进修复：
-  _print_table_stats 曾在 while 内每 token 执行，占日志94%）
-- [ltm-diag] 8800 行 → 仅 rows/grown 变化时打（稳态零输出）
-- utilization 误导修复：capacity=2^24×72 是防冲突池，可寻址子空间仅
-  n_dim×k_hash=4096 → 新增 addressable 饱和度列
-  （实测 addressable 1,020/1,024=99.6% vs pool util 0.097%）
-- ltm-diag 稳态零输出（变才打），新增 grown 列
+**诚实边界（写进 docstring 与门禁文件头）**：
+- 仅**稠密读出**（`--readout-conn-k 0`）支持多卡；稀疏多卡 fail-fast 提示
+- 等价判据是 **fp32 容差 1e-6**（实测 max|d|=1.49e-08），**不是逐位**——
+  单卡 `W.add_(outer(dp,ht))` 一次写整张 W，多卡按行切片各写自己那片，
+  torch.outer 的分片 kernel 分块不同。与 P14 gate_multi_device 的
+  「同设备分片逐位」口径**不同**（那个是 cat 后整体更新），不得混淆
+- 上游 M1-M5（CPU numba）、LTM/STDP/WM（全局事件状态）不并行
+- 1B 档读出占端到端 ~20% → N 卡上限 1/(1-0.196+0.196/N)（N=4 → 1.15×）
 
-## ④ CI 两个根因（.github/.gitcode 镜像 CI 报错修复）
-- gate_eval_readonly: eval_tasks_lm 在 tests/evals/ 而非 tests/
-  → ModuleNotFoundError；sys.path 补 tests/evals
-- tools/eval/audit_precision.py: ①_ROOT=dirname(_HERE) 得 tools/ 而非
-  仓库根；②import 已删除的 fp4 符号（P191e）→ ImportError；
-  ③旧名 fp8 已更名 int8（P100）。重写为现存四档（fp32/fp16/bf16/int8），
-  本机完整跑通（L1 PASS，L2/L3 数据完整）
+**新门禁** `tests/gates/gate_multi_device_sharded.py` 14/14：
+A 单卡零回归 / B 分片均衡+行覆盖+w0行对应+单设备fail-fast /
+C 前向逐位+更新容差+nll一致 / D 稀疏fail-fast / E 工厂分派
+
+## ② 默认值调整（fhz 2026-10-18 指示）
+- `replay_every: 4 → 16`（phdnet/config.py）：实测服务器 1b 档
+  M6_replay 5.6-6.2 → 1.2-1.4 ms/tok；本机端到端 11.00 → 8.27 ms/tok
+  （−25%），final_ppl 13,975 → 14,225（1.8%，噪声内）。语义 = 巩固周期
+  拉长 4×（非关闭）。`--replay-every 4` 可复原
+- `--numba-threads: 8 → 16`：按 fhz 指示；help 里记录 P201 本机 x86
+  实测的负收益区间（16/32 的 fork/join 屏障 24.7/64.3 µs/区）与
+  「本机 ≠ 昇腾」纪律，服务器 A/B 判据写在 help 中
+
+## ③ 训练时间预估公式（README §4）
+主式 T(h) = tokens × ms_per_token / 3.6e6，ms/tok = B/(f_cpu·e_cpu) + S；
+S 分解为 readout_overlap + replay_ms/replay_every + other，逐项给实测锚点；
+附 1B 档三档配置的 ms/tok 与 1M/10M token 时长表；三条纪律
+（不用首行 cum 口径 / ms/tok 必须目标机标定 / 词表×曝光只影响能否学会）
 
 ## 验证
-- run_tests.py 9/9；run_gates.py 47/47
-- 逐位对拍：homeo 融合核 vs Python 12 次调用 4/4 组合
-- gate_m2_infer_kernels 13/13（C5b 期望随 P202 更新）
-- 诊断报告入 docs/PHD-Net_P201_M2-PC并行瓶颈诊断.md
+- run_tests.py 9/9；run_gates.py **48/48**（新增多卡门禁）
+- 门禁自捕获两个真 bug 并修复：分卡无 `main` 属性（应为 `device`）、
+  显式 devices 被 auto 过滤逻辑误吃导致同设备分片对拍失败
 
-## 服务器待办（零风险 A/B，按 P201 建议 3/6）
-- --numba-threads 8/16/32 A/B（判据 segments(win) + CS/s）
-- --nll-sync-every 1 vs 8（证实/否证 NPU 等 CPU 假设）
-- idx int64→int32（-33% 访存，最大潜力但触及 ckpt 格式，最后做）
+## 顺带修复
+- `--no-readout-replay` 重复定义（上次编辑残留）→ 合并为一份
+- argparse help 里未转义的 `%`（`47%）`/`1.8%）`）导致 `--help` 直接 ValueError
+  → 转义为 `%%`（该 bug 会让 `train.py --help` 完全不可用）

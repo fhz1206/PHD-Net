@@ -1,0 +1,27 @@
+[A] 单卡路径零回归
+  [PASS] A1 默认路径仍是原 AccelReadout（无 parts 属性）
+
+[B] 多卡构造
+  [PASS] B1 两分片 —— [(0, 259), (259, 517)]
+  [PASS] B2 行覆盖完整且连续
+  [PASS] B3 分片均衡（±1） —— [259, 258]
+  [PASS] B4 w0 行对应（分片 0 首行 = W0[0]）
+  [PASS] B5 单设备 fail-fast（诚实报错）
+
+[C] 列并行 ≡ 单卡（同设备两分片）
+  [PASS] C1 前向 y 逐位一致（行切分无归约差异） —— max|d|=0.00e+00
+  [PASS] C3 nll 一致（主卡全局 softmax，1e-9） —— 单卡 6.959224 / 多卡 6.959224
+  [PASS] C2 首步更新后权重一致（fp32 容差 1e-6，见文件头说明） —— max|d|=1.49e-08
+  [PASS] C2b 第二步（设备直通 + 缓存复用）一致 —— max|d|=1.49e-08
+
+[D] 稀疏多卡 fail-fast
+  [PASS] D1 稀疏多卡诚实报错
+
+[E] 工厂分发
+  [PASS] E1 工厂：devices=1 → 单卡路径（numba 或 AccelReadout，非多卡） —— numba-cpu
+  [PASS] E1b 工厂：auto + devices=1 → 非多卡 —— numba-cpu
+  [PASS] E2 工厂：devices=2 → 多卡或诚实回落 —— numba-cpu
+
+PASS: 14/14 项通过
+
+[stderr]

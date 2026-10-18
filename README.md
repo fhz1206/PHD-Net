@@ -166,6 +166,56 @@ python tests/run_tests.py fast        # 9/9
 ls tests/gates/gate_*.py              # 47 个专项 verifier，按需跑
 ```
 
+### 训练时间预估（P204 公式）
+
+**主公式**（串行逐 token 架构，无 batch 维）：
+
+```
+T(h) = tokens × ms_per_token / 3,600,000
+
+ms_per_token = B / (f_cpu × e_cpu)  +  S
+               └── 可并行部分 ──┘     └ 串行/固定开销
+```
+
+| 符号 | 含义 | 1B 档实测锚点（服务器 aarch64 152 核 + NPU） |
+|---|---|---|
+| `tokens` | 训练 token 预算 | `--tokens N`（默认 ∞，用 `--minutes` 限时） |
+| `B` | 单 token 的**串行**计算量（ms，单核口径） | 由 M1-M5 各段的单核耗时决定 |
+| `f_cpu` | numba/OpenMP 有效并行度 | `--numba-threads`（**P204 默认 16**） |
+| `e_cpu` | 并行效率（屏障/带宽退化） | 1 线程=1.0；**P201 本机 x86 实测**：2-8 线程 0.9–1.0，16 线程 ≈0.6，32 线程 ≈0.45（fork/join 4.7→24.7→64.3 µs/区） |
+| `S` | 每 token 的固定开销（读出头往返 + replay 摊销 + 同步） | 见下 |
+
+**`S` 的分解**（P202/P204 实测，服务器 1b 档）：
+
+```
+S = readout_npu/npu_overlap  +  replay_ms/replay_every  +  other
+    ─────── 8.5% 端到端 ────    ── 可调 ──                ── 未打点小项 ──
+
+实测（P204 默认 replay_every=16）：
+  readout  2.04 ms/tok（NPU 异步，与 CPU 重叠 → 实际贡献 ≈ 串行残差）
+  M6_replay 5.6/16 ≈ 0.35 ms/tok   （replay_every=4 时是 5.6，占 47%）
+  other     ~2.2 ms/tok            （segments 未打点的余额，见 --step-profiling）
+```
+
+**1B 档实测量级**（`--preset 1b --data pretrain --remote-data`）：
+
+| 配置 | ms/tok | 1M token 预计 | 10M token 预计 |
+|---|---|---|---|
+| `--replay-every 4`（P204 前默认） | ~12.3 | 3.4 h | 34 h |
+| **`--replay-every 16`（P204 默认）** | **~9.3** | **2.6 h** | **26 h** |
+| `--no-readout-replay` | ~8.3 | 2.3 h | 23 h |
+
+**用法**：
+1. 跑 2,000 token 热身，从日志 `METRIC` 行读 `ms_per_token`（首行含 JIT 冷编译，**必须用第二行之后**）；
+2. `T(h) = tokens × ms_per_token / 3.6e6`；
+3. 改配置后按 `S` 的分解线性外推——**只有 `S` 项随开关变化，`B/(f·e)` 不变**。
+
+⚠ **三条纪律**：
+- **不要用首行** `segments(cum)`（含 numba 冷编译 + LTM 生长期，实测把稳态 1.28 抬到 19.59 ms/tok）；看 `segments(win)` 与 `METRIC`。
+- **ms/tok 与本机无关**：本项目已有**四次 x86 ≠ 昇腾方向相反**的实测，公式里的 `f_cpu/e_cpu` 必须用目标机器实测标定。
+- **词表 × 曝光决定能否学会**，不决定时间：`--vocab-sample-chars` 只影响词表大小与 OOV，`ms/tok` 主要由 `n_out`（读出规模）与 `conn_k` 决定（见 `tools/diag_vocab_budget.py`）。
+
+
 ### 只看检查点的大空间表统计
 
 ```bash

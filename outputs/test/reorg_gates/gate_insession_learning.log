@@ -89,8 +89,8 @@ P197 会话中学习能力（新颖性驱动印迹 + 误差广播）
 
 [C] 会话中学习（读出头单对记忆）
 [p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
-  PASS C1 读出头学会映射（nll 降 > 50%）  [3.431 → 0.003]
-  PASS C2 不泛化到未见输入（防过拟合假象）  [nll=5.626]
+  PASS C1 读出头学会映射（nll 降 > 50%）  [3.431 → 0.004]
+  PASS C2 不泛化到未见输入（防过拟合假象）  [nll=5.561]
 
 [D] 配置默认值
   PASS D1a sdr_novelty 默认 True
@@ -106,5 +106,5 @@ P197 会话中学习能力（新颖性驱动印迹 + 误差广播）
 PASS: 17/17 项通过
 
 [stderr]
-<string>:147: RuntimeWarning: eta_oja=0.02 > 0：上行识别权重 Oja 学习在生产规模会正反馈发散（P198 实测：3000 步 probe_PPL 9.1e11）。小规模/短跑的机制测试可忽略本警告；生产训练请保持 0。
-<string>:147: RuntimeWarning: eta_oja=0.02 > 0：上行识别权重 Oja 学习在生产规模会正反馈发散（P198 实测：3000 步 probe_PPL 9.1e11）。小规模/短跑的机制测试可忽略本警告；生产训练请保持 0。
+<string>:148: RuntimeWarning: eta_oja=0.02 > 0：上行识别权重 Oja 学习在生产规模会正反馈发散（P198 实测：3000 步 probe_PPL 9.1e11）。小规模/短跑的机制测试可忽略本警告；生产训练请保持 0。
+<string>:148: RuntimeWarning: eta_oja=0.02 > 0：上行识别权重 Oja 学习在生产规模会正反馈发散（P198 实测：3000 步 probe_PPL 9.1e11）。小规模/短跑的机制测试可忽略本警告；生产训练请保持 0。

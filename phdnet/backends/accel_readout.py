@@ -2412,6 +2412,66 @@ def _unsupported_reason(cfg) -> str | None:
     return None
 
 
+# ════════════════════════════════════════════════════════════════════════
+# P204：多卡列并行的分片更新原语（挂在 AccelReadout 上，供
+# `ShardedAccelReadout` 调用——不改 learn_softmax 的任何既有语义）。
+# ════════════════════════════════════════════════════════════════════════
+def _accel_apply_dp(self, dp_i, h, eta: float) -> None:
+    """分片 rank-1：W_i -= η·dp_i⊗h（dp 已在主卡全局算好，**不做 softmax**）。
+
+    语义 = `_eager_step` 的更新段（softmax 之后的部分）：
+      · 稠密：W -= η·outer(dp, ht)（addmm_ rank-1，不物化大临时张量）；
+      · 稀疏：W[i, Wi[i,:]] -= η·dp[i]·ht[Wi[i,:]]（gather + 逐行）；
+      · master weight：更新落 fp32 master（P195），影子按 refresh 节奏同步。
+    ⚠ 调用方（ShardedAccelReadout）保证 dp_i 的行数 == self.n_out（本片行数）。
+    """
+    ht = self._to_dev(h)
+    if not torch.is_tensor(dp_i):
+        dp_i = np.ascontiguousarray(dp_i, dtype=np.float32)
+    # ⚠ 分卡用 `self.device`（AccelReadout 的字段名）——不是 `self.main`
+    #   （那是 ShardedAccelReadout 的字段；分卡身上没有 main）
+    dp = (dp_i.to(self.device).to(torch.float32) if torch.is_tensor(dp_i)
+          else self._to_dev(dp_i).to(torch.float32))
+    if self._sparse:
+        g = self._sp_gather(ht).to(torch.float32)
+        dp32 = dp.reshape(-1, 1)
+        if self._master_weight:
+            self._master_update(dp32, ht.to(torch.float32), eta, None)
+        else:
+            # 逐元素乘 W 再求和的逆操作：rank-1 只写本片的 (n_out_i, k) 域
+            self.W.add_(dp32.to(self.W.dtype) * g.to(self.W.dtype),
+                        alpha=-float(eta))
+            if self.w_clip > 0.0:
+                self.W.clamp_(-self.w_clip, self.w_clip)
+        return
+    if self._master_weight:
+        self._master_update(dp, ht.to(torch.float32), eta, None)
+        return
+    # 稠密各存储模式（对齐 _eager_step 的存储分支，逐行 rank-1 语义一致）
+    if self._int8:
+        # int8 存储：fp32 域更新 → 重量化写回（P105 口径）
+        w32 = self.W.to(torch.float32) * float(self._wscale)
+        w32 = w32 - eta * (dp.reshape(-1, 1)
+                           @ ht.to(torch.float32).reshape(1, -1))
+        self.W.copy_(torch.clamp(torch.round(w32 / float(self._wscale)),
+                                 -_INT8_QMAX, _INT8_QMAX).to(torch.int8))
+    elif self._fp8_bits:
+        # fp8 位模式：反量化 → fp32 域更新 → 重新编码（CPU 转换，P154）
+        _wf = self._fp8_bits_to_real().to(torch.float32)
+        _wf = _wf - eta * (dp.reshape(-1, 1)
+                           @ ht.to(torch.float32).reshape(1, -1))
+        _t8 = _wf.detach().cpu().to(torch.float8_e4m3fn)
+        self.W.copy_(_t8.view(torch.uint8).to(self.device))
+    else:
+        self.W.add_(torch.outer(dp.to(self.W.dtype),
+                                ht.to(self.W.dtype)), alpha=-float(eta))
+        if self.w_clip > 0.0:
+            self.W.clamp_(-self.w_clip, self.w_clip)
+
+
+AccelReadout.apply_dp = _accel_apply_dp
+
+
 def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
     """按 `cfg.accel_readout` 选读出后端；不可用时**回落 numba 原路径**。
 
@@ -2486,6 +2546,30 @@ def pick_readout_backend(cfg, n_h: int, n_out: int, rng):
         if not has_accel:
             return _mk_readout(), "numba-cpu"
         spec = "auto"                                       # 交给 resolve_device 择优
+
+    # ── P204：多卡列并行（accel_readout_devices>1 时启用）────────────────
+    # 单卡路径零变更；多卡走 ShardedAccelReadout（V 维行分片，主卡全局
+    # softmax + 各分卡 rank-1）。稀疏读出多卡未实现 → fail-fast 提示。
+    _n_devs = int(getattr(cfg, "accel_readout_devices", 1) or 1)
+    _rd_multi = str(getattr(cfg, "readout_dtype", "fp32"))
+    if _n_devs > 1:
+        from .sharded_readout import ShardedAccelReadout
+        try:
+            ro = ShardedAccelReadout(
+                n_h, n_out, rng,
+                devices=(None if spec == "auto" else [spec]),
+                dtype=_rd_multi,
+                w_clip=float(getattr(cfg, "readout_w_clip", 0.0)),
+                master_weight=bool(getattr(cfg, "readout_master_weight", False)),
+                shadow_refresh=int(getattr(cfg, "readout_shadow_refresh", 8)),
+                nll_sync_every=int(getattr(cfg, "nll_sync_every", 1)),
+                conn_k=int(getattr(cfg, "readout_conn_k", 0) or 0))
+            return ro, f"multi-accel:{len(ro.devices)}@{ro.main}"
+        except NotImplementedError as e:
+            return _fallback(f"多卡读出：{e}")
+        except Exception as e:                               # noqa: BLE001
+            return _fallback(f"多卡读出构造失败（{type(e).__name__}: {e}）"
+                             "→ 回落 numba CPU")
     try:
         return (AccelReadout(n_h, n_out, rng, device=spec,
                              dtype=cfg.readout_dtype,

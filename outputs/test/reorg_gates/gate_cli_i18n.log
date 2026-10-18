@@ -33,11 +33,11 @@ P199 i18n 重写：显式消息目录契约
   PASS E1a write 被翻译（词级降级路径）
   PASS E1b writelines 也被翻译
   PASS E2 install 幂等
-  PASS E3 TeeLogger 建立后重装翻译层（否则 --lang en 失效）  [tee@4268 reinstall@32787]
+  PASS E3 TeeLogger 建立后重装翻译层（否则 --lang en 失效）  [tee@4268 reinstall@33664]
 
 [F] 性能
-  PASS F1 纯 ASCII 快速通道 < 10µs  [0.56µs]
-  PASS F2 词级替换有界 < 200µs  [102.22µs]
+  PASS F1 纯 ASCII 快速通道 < 10µs  [0.48µs]
+  PASS F2 词级替换有界 < 200µs  [74.05µs]
 
 [G] 旧方案坏例回归（必须全部消失）
   PASS G '大空间表容量（事件驱动）' 无碎片  [big-space table capacity（事件驱动）]

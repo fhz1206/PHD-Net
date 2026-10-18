@@ -309,17 +309,18 @@ def main() -> None:
     ap.add_argument("--probe-tokens", type=int, default=2048,
                     help="P146：探针集 token 数（越大越稳，代价是每次多跑一遍前向）")
     ap.add_argument("--replay-every", type=int, default=0,
-                    help="P202：回放间隔（M6_replay 每 N 步重训读出头部一次；"
-                         "0 = 沿用库默认 4）。⚠ 本机实测（smoke 500 步 win）："
-                         "M6_replay **1.65 ms/tok**（e6 每 4 步一次的摊销值），"
-                         "每隔 8 步 → ~0.8 ms/tok；每 16 步 → ~0.4 ms/tok。"
-                         "它是 readout_replay 的节奏，不影响主干学习；"
-                         "只配 --readout-replay-on/off 中的 on 场景。"
-                         "⚠ 改它会改变读出头的巩固节奏 → probe_PPL A/B 后再定")
+                    help="P202/P204：回放间隔（M6_replay 每 N 步重训读出头一次；"
+                         "0 = 沿库默认 **16**，P204 起从 4 改为 16）。"
+                         "实测（服务器 1b 档）：N=4 → M6_replay 5.6-6.2 ms/tok"
+                         "（占 step 47%%）；N=16 → 1.2-1.4 ms/tok。本机端到端 A/B"
+                         "（smoke 2000 token）：11.00 → 8.27 ms/tok（−25%%），"
+                         "final_ppl 13,975 → 14,225（差 1.8%%，噪声内）。"
+                         "⚠ 回 `--replay-every 4` 可复原旧巩固节奏；判定用 "
+                         "--probe-every 的 probe_PPL（固定探针集）")
     ap.add_argument("--no-readout-replay", dest="readout_replay",
                     action="store_false",
                     help="P202：关闭 M6_replay（默认开 = P197）。"
-                         "关闭立省 ~1.65 ms/tok（本机实测），但解除读出头的"
+                         "关闭立省 ~1-1.65 ms/tok（本机实测），但解除读出头的"
                          "漂移锚定（P197 的灾难性遗忘缓解）——先跑 A/B 再关")
     ap.add_argument("--readout-int8-compute", default="auto",
                     choices=["auto", "on", "off"],
@@ -483,12 +484,17 @@ def main() -> None:
                          "核）绕开了BLAS，故与 dtype 无关。"
                          "注：库config.encoder_dtype 仍默认 fp64（形状参数默认），"
                          "生产 CLI 覆盖为 fp32，两者不一致是事实")
-    ap.add_argument("--numba-threads", type=int, default=8,
-                    help="P62：numba prange 线程上限（0=用 numba 默认=全部核）。"
+    ap.add_argument("--numba-threads", type=int, default=16,
+                    help="P204（fhz 2026-10-18）：**默认 8 → 16**。"
+                         "numba prange 线程上限（0=用 numba 默认=全部核）。"
                          "服务器实测 191 核上主循环只用 1.3 核、CS/s 250 万+"
                          "（百万级上下文切换 = 线程空转等锁）；P22 实测核内 "
-                         "1→6 线程仅 1.16×（访存带宽饱和）→ 8 线程足够，"
-                         "默认从「全部核」降到 8")
+                         "1→6 线程仅 1.16×（访存带宽饱和）→ 曾默认 8。"
+                         "⚠ P201 诊断（本机 x86）：1b 尺寸 2-8 线程即平台、"
+                         "16/32 因 fork/join 屏障（4.7→24.7→64.3 µs/区）负收益；"
+                         "但**本机 ≠ 昇腾**（项目已有四次方向相反）→ 服务器 "
+                         "A/B 定论：`--numba-threads 8/16/32`，判据是 "
+                         "`segments(win)` 的 M2_infer + 端到端 ms/tok + CS/s")
     ap.add_argument("--nll-sync-every", type=int, default=8,
                     help="读出 nll 同步周期（P34）：1=每步同步（旧行为）；N>1 时 "
                          "nll 累积到设备、每 N 步同步一次 → CPU/NPU 重叠，"
@@ -527,6 +533,13 @@ def main() -> None:
                          "对应设备」）：auto = 有加速器就用（昇腾→ROCm→CUDA→"
                          "DirectML），否则回落 numba CPU 原路径（逐位不变）；"
                          "亦可显式 cpu/npu/cuda/rocm/dml")
+    ap.add_argument("--accel-devices", type=int, default=1,
+                    help="P204：多卡列并行——读出按词表行（V 维）切到 N 个加速器"
+                         "（主卡全局 softmax + 各分卡 rank-1，行独立零通信依赖）。"
+                         "⚠ 仅稠密读出（--readout-conn-k 0）支持；稀疏多卡回落"
+                         " numba CPU 并说明原因。1b 档读出占端到端 ~20%%，"
+                         "N 卡预期上限 1/(1-0.196+0.196/N)（N=4 → 1.15×）——"
+                         "M1-M5（CPU numba）才是大头，读出非瓶颈时收益趋零")
     ap.add_argument("--big-n", type=int, default=0, help="覆盖大空间神经元数（0=用预设）")
     ap.add_argument("--csr-online", dest="csr_online",
                     action="store_true", default=True,
@@ -836,6 +849,14 @@ def main() -> None:
     cfg.fp8_refresh = max(1, int(args.fp8_refresh))   # P84：fp8 副本刷新间隔
     cfg.fp8_conv = str(args.fp8_conv)                 # P189：fp8→int8 转换核
     cfg.accel_readout = args.accel                     # P19 读出设备（默认 auto）
+    # P204：多卡列并行（--accel-devices >1 时读出 V 维切多卡）
+    cfg.accel_readout_devices = int(args.accel_devices)
+    if args.accel_devices > 1:
+        print(f"[p204] accel_readout_devices={args.accel_devices}"
+              f"（读出按词表行切 {args.accel_devices} 卡；"
+              "⚠ 仅稠密读出支持——--readout-conn-k 0；"
+              "上游 M1-M5 仍单路 CPU，预期上限见 [readout] 行的占比）",
+              flush=True)
     cfg.nll_sync_every = args.nll_sync_every           # P34 nll 同步周期（默认 1）
     cfg.step_profiling = args.step_profiling           # P35 step 分段计时（P198 起默认开）
     cfg.torch_compile = args.torch_compile             # P38 kernel 融合（默认开）

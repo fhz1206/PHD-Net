@@ -19,4 +19,4 @@ P198 generate() top-k / nucleus 截断
 PASS: 11/11 项通过
 
 [stderr]
-<string>:147: RuntimeWarning: eta_oja=0.05 > 0：上行识别权重 Oja 学习在生产规模会正反馈发散（P198 实测：3000 步 probe_PPL 9.1e11）。小规模/短跑的机制测试可忽略本警告；生产训练请保持 0。
+<string>:148: RuntimeWarning: eta_oja=0.05 > 0：上行识别权重 Oja 学习在生产规模会正反馈发散（P198 实测：3000 步 probe_PPL 9.1e11）。小规模/短跑的机制测试可忽略本警告；生产训练请保持 0。

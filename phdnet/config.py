@@ -315,7 +315,16 @@ class PHDNetConfig:
     #      以旧目标重新锚定漂移后的表征，缓解读出灾难性遗忘。
     # P197: 定义已上移（:211，默认 True）
     replay_buffer: int = 256        # 储备库容量（旧输入条数）
-    replay_every: int = 4           # 每隔多少步重演一条
+    # P204（fhz 2026-10-18 拍板）：**默认 4 → 16**。实测依据（服务器 1b 档）：
+    #   replay_every=4  → M6_replay 5.6-6.2 ms/tok（占 step 的 47%，第一大段）
+    #   replay_every=16 → M6_replay 1.2-1.4 ms/tok（≈1/4）
+    #   本机端到端 A/B（smoke 2000 token）：11.00 → 8.27 ms/tok（−25%），
+    #   而 final_ppl 13,975 → 14,225（差 1.8%，在 sliding PPL 的噪声内）。
+    # 语义：**巩固周期拉长 4×**，不是关闭——仍每 16 步从 256 条 buffer
+    #   取一条旧 (x, t) 在当前表征下重训读出头（P197 的漂移锚定保留）。
+    # ⚠ 真正判定靠 --probe-every 的 probe_PPL（固定探针集，免疫域切换）；
+    #   若 probe_PPL 显示回放频率降低导致遗忘加剧，用 --replay-every 4 回到旧值。
+    replay_every: int = 16          # 每隔多少步重演一条（P204：4 → 16，实测 −25% 耗时）
     replay_eta: float = 0.5         # 回放读出学习率倍率（防回放主导）
 
     # PC 突破③：逐神经元目标发放率（内在可塑性）——每神经元维护激活 EMA，
@@ -408,6 +417,12 @@ class PHDNetConfig:
     # numba CPU 原路径（逐位不变）；cpu/off/numba = 强制原路径；
     # npu/cuda/rocm/dml = 显式设备（不可用则回落并如实报告）。
     accel_readout: str = "auto"
+    # P204 多卡列并行：>1 时读出按词表行（V 维）切到 N 个加速器
+    # （ShardedAccelReadout：主卡全局 softmax + 各分卡 rank-1，行切分同设备
+    # 逐位/跨设备容差一致）。⚠ 仅稠密读出（readout_conn_k=0）支持多卡；
+    # 稀疏多卡 fail-fast。1b 档读出占端到端 ~20%，N 卡预期上限
+    # 1/(1-0.196+0.196/N)（N=4 → 1.15×）——读出非瓶颈时收益趋零（诚实预期）。
+    accel_readout_devices: int = 1
     # P116：稀疏读出**前向算子**选择（仅加速后端的 conn_k>0 路径生效）。
     # "mulsum"= `(W * h[Wi]).sum(1)` —— 物化一个 (n_out,k) 临时张量
     #   （1b 档25.37 MiB×2 处/步= 总流量的 22%，P115 实测口径）。
