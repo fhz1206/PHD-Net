@@ -1,52 +1,23 @@
-P205a: NPU 流水线（nll 独立流 + p2 双流 H2D）+ CANN 接线器（--cann-dispatch 从核对器变接线器）
+P205b: 精度体系总表（生成器 + 文档）
 
-## 背景（用户指示：能否通过架构提前计算让 NPU 效率更高 + 优化 Cython/CANN 对接）
-服务器 1b 档：step 12.3ms/tok，readout(NPU) 2.04ms = 8.5%，NPU 利用率
-20-50% —— 本质是「NPU 每步只有 2ms 的活，却有 12ms 的周期」，NPU 大部分
-时间在等 CPU。设计评估见 docs/P205a_NPU流水线设计.md（三层方案 + 为何
-层 3「跨步 pipeline」不做：P117 已裁决——前移学习会改变 nll→task_gate→
-主干学习率的时序，属学习规则层面的语义变更）。
+## 新增
+- tools/eval/gen_precision_table.py：生成 docs/PHD-Net_精度体系总表.md
+  （数据全部取自本仓库已有实测，脚本只做汇总与格式化，不引入新数字）
+- docs/PHD-Net_精度体系总表.md：
+  ① 一句话结论（默认 fp32 / 要低精度收益必须配 master / x86 上低精度更慢 /
+     fp4 已删 / ckpt fp16 与计算精度是两件事）
+  ② 读出精度矩阵（RO_DTYPES 现存六档 × 保留率/存储/1B 档内存/PPL/判读）
+     + fp8 位模式与 int8 码本的 master 对照表
+  ③ P195 主权重模式（组件表 + 本机 A/B + 代价 + 检查点逐位往返）
+  ④ 速度表（⚠ 平台相关，x86 实测）
+  ⑤ 硬件限制（910B 无 fp8 算子 → 位模式绕行）
+  ⑥ 默认值速查（源码核对）
+  ⑦ 选型决策树
+  ⑧ 诚实边界（int16/int32 保留率未单独实测 / 速度只测 x86 / PPL 来自固定
+     探针集而非 sliding PPL / fp4 数字已作废）
 
-## ① nll 独立流（架构级提前计算的核心）
-`learn_softmax` 的 nll `.item()`（每 nll_sync_every 步一次）是 **CPU 硬
-同步点**：它等的是**当前流**上全部 kernel（含读出更新 addmm_）。
-改法：`_nll_stream.wait_stream(当前流)` 后再 `.item()` —— CPU 只等「nll
-累积链」，同流后续 kernel 的提交不被阻塞（NPU 流水不断）。
-- 数值语义不变（同一批累积值的和）；只是等待的流变了
-- torch-CPU / 探测失败 → `_nll_stream=None` → 原路径逐位一致
-- 懒初始化 + 幂等（`_ensure_streams`，CPU 上 ok=False → 两流 None）
-
-## ② p2 双流 H2D（实现 P192 的死代码字段）
-`_staged_to_dev` 的 H2D 提交到独立 `_h2d_stream`（此前同流 FIFO，排在
-前面 kernel 之后）；消费方当前流 `wait_stream(h2d_stream)` 建立依赖
-→ pinned 拷贝与上一 kernel 真并行。
-- `_h2d_stream/_d2h_stream/_pinned_h_buffer/_async_ht_next/_async_event`
-  五个字段此前**只声明从未使用**（P192 的 p2/p3 只有配置位没有实现）
-- 数值逐位不变（ht 的值到达时点由 wait_stream 保证）
-
-## ③ CANN 接线器（--cann-dispatch 实质化）
-`cann_env.wire_dispatch()`：调 `torch_npu.npu.set_compile_mode(
-jit_compile=False)` —— 官方文档「TASK_QUEUE_ENABLE 仅二进制场景生效」，
-而 jit_compile 默认 True → **不调这句，TASK_QUEUE_ENABLE=2 一直白设**
-（P120 以来从未解除的静默失效条件 ③）。
-- train.py：`--cann-dispatch` 改为**先接线后核对**（wire → verify）
-- 幂等：已是二进制场景则跳过；老版本 CANN 抛异常则如实报告 wired=False
-- CPU/无 torch_npu → wired=None（不适用，不抛异常）
-
-## 门禁
-新增 `tests/gates/gate_npu_pipeline.py` 13/13：
-A 懒初始化（CPU 探测失败→回落原路径、幂等）
-B nll 数值协议不变（sync_every=1 即时 / =8 滞后均值 / 窗口滚动同步）
-C p2 关闭时 _staged_to_dev 逐位不变
-D wire_dispatch 不抛异常、返回结构正确、无 torch_npu → 不适用
-E beta p2 与 p0 图捕获共存
-
-## 验证
-- run_tests.py 9/9
-- gate_npu_pipeline 13/13（新）、gate_cann_dispatch 11/11、
-  gate_cpu_npu_overlap_contract 23/23、gate_accel_readout 全部 PASS
-
-## 服务器 A/B（判据见 docs/P205a_NPU流水线设计.md）
-  --beta p2 --cann-dispatch --replay-every 16
-判据：segments(win) 的 readout ms/tok、端到端 ms/tok、npu-smi 利用率
-采样均值（20-50% → 更高 = 空窗缩短）、PPL 无回归（--probe-every）
+## 数据来源（全部已有实测，逐行标注）
+- 保留率 §6.1（P110，tools/probe/probe_readout_precision.py）
+- PPL §6.2（tests/checks_p195.py --ab，固定探针集）
+- 速度 §6.3（x86 本机读出更新核）
+- RO_DTYPES / master 语义 / 默认值：源码核对
