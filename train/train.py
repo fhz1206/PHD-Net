@@ -918,10 +918,16 @@ def main() -> None:
              "（均默认 False；开启动效值与回落原因见 [pipeline]/[cann-dispatch] 行）"),
           flush=True)
     if cfg.cann_dispatch:
-        # 核对 TASK_QUEUE_ENABLE=2 / COMBINED_ENABLE=1 是否**真的生效**
-        # （官方文档列了两个静默失效条件，都不打日志 —— 见 cann_env.verify_dispatch）
+        # P205a：**先接线后核对**——wire_dispatch() 调
+        # `torch_npu.npu.set_compile_mode(jit_compile=False)` 解除
+        # 「TASK_QUEUE_ENABLE 仅二进制场景生效」的静默失效（P120 起该
+        # 条件从未被解除过，等于 TASK_QUEUE_ENABLE=2 一直白设）；随后
+        # verify_dispatch() 核对全部条件（接线是否真的生效一目了然）。
         try:
-            from phdnet.backends.cann_env import verify_dispatch
+            from phdnet.backends.cann_env import verify_dispatch, wire_dispatch
+            _w = wire_dispatch()
+            print(f"[cann-dispatch] 接线：wired={_w['wired']}（{_w['reason']}）",
+                  flush=True)
             verify_dispatch(report=True)
         except Exception as e:                               # noqa: BLE001
             print(f"[cann-dispatch] 核对未完成：{type(e).__name__}: {e}",
@@ -1209,6 +1215,11 @@ def main() -> None:
             except Exception as _e:                          # noqa: BLE001
                 print(f"[beta] npu-graph 捕获失败（回落 eager）："
                       f"{type(_e).__name__}: {str(_e)[:90]}", flush=True)
+            # P205a：p2 双流的探测结果（enable_npu_graph 内部已懒初始化）
+            if "p2" in cfg.beta:
+                print(f"[beta] p2 双流：_h2d_stream={'ON' if getattr(_ro, '_h2d_stream', None) is not None else 'OFF (fallback)'}"
+                      f" | _nll_stream={'ON' if getattr(_ro, '_nll_stream', None) is not None else 'OFF (fallback)'}",
+                      flush=True)
         else:
             print("[beta] 读出为 numba-cpu，npu-graph 不适用（CPU 路径不受影响）",
                   flush=True)

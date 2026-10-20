@@ -1,0 +1,57 @@
+﻿RUN gate_accel_readout.py
+{"gate": "gate_accel_readout.py", "exit_code": 0, "seconds": 13.8}
+RUN gate_accel_readout_p55.py
+{"gate": "gate_accel_readout_p55.py", "exit_code": 0, "seconds": 46.3}
+RUN gate_accel_sparse_readout.py
+{"gate": "gate_accel_sparse_readout.py", "exit_code": 0, "seconds": 10.9}
+RUN gate_cann_dispatch.py
+{"gate": "gate_cann_dispatch.py", "exit_code": 0, "seconds": 5.9}
+RUN gate_cann_env.py
+{"gate": "gate_cann_env.py", "exit_code": 0, "seconds": 31.5}
+RUN gate_cann_probe.py
+{"gate": "gate_cann_probe.py", "exit_code": 0, "seconds": 4.0}
+RUN gate_cc_traces.py
+{"gate": "gate_cc_traces.py", "exit_code": 0, "seconds": 10.5}
+RUN gate_checkpoint_roundtrip.py
+{"gate": "gate_checkpoint_roundtrip.py", "exit_code": 0, "seconds": 16.7}
+RUN gate_cli_help_percent.py
+{"gate": "gate_cli_help_percent.py", "exit_code": 0, "seconds": 0.8}
+RUN gate_cli_i18n.py
+{"gate": "gate_cli_i18n.py", "exit_code": 0, "seconds": 1.9}
+RUN gate_cli_lang_semantics.py
+{"gate": "gate_cli_lang_semantics.py", "exit_code": 0, "seconds": 17.9}
+RUN gate_cpu_npu_overlap_contract.py
+{"gate": "gate_cpu_npu_overlap_contract.py", "exit_code": 0, "seconds": 6.2}
+RUN gate_csr_vectorization_perf.py
+{"gate": "gate_csr_vectorization_perf.py", "exit_code": 0, "seconds": 7.2}
+RUN gate_cython_kernels.py
+{"gate": "gate_cython_kernels.py", "exit_code": 0, "seconds": 2.9}
+RUN gate_cython_loader.py
+{"gate": "gate_cython_loader.py", "exit_code": 0, "seconds": 18.1}
+RUN gate_cython_switch.py
+{"gate": "gate_cython_switch.py", "exit_code": 0, "seconds": 6.5}
+RUN gate_device_npu_probe.py
+{"gate": "gate_device_npu_probe.py", "exit_code": 0, "seconds": 5.3}
+RUN gate_encoder_gemv.py
+{"gate": "gate_encoder_gemv.py", "exit_code": 0, "seconds": 2.3}
+RUN gate_eval_readonly.py
+{"gate": "gate_eval_readonly.py", "exit_code": 0, "seconds": 10.1}
+RUN gate_generate_truncation.py
+{"gate": "gate_generate_truncation.py", "exit_code": 0, "seconds": 7.7}
+RUN gate_insession_learning.py
+{"gate": "gate_insession_learning.py", "exit_code": 0, "seconds": 6.3}
+RUN gate_ltm_csr_equivalence.py
+{"gate": "gate_ltm_csr_equivalence.py", "exit_code": 0, "seconds": 11.1}
+RUN gate_ltm_kernels.py
+{"gate": "gate_ltm_kernels.py", "exit_code": 0, "seconds": 2.3}
+RUN gate_ltm_learn_batch.py
+{"gate": "gate_ltm_learn_batch.py", "exit_code": 0, "seconds": 9.2}
+RUN gate_ltm_reverse_index.py
+{"gate": "gate_ltm_reverse_index.py", "exit_code": 0, "seconds": 8.4}
+RUN gate_ltm_trace_semantics.py
+{"gate": "gate_ltm_trace_semantics.py", "exit_code": 0, "seconds": 3.3}
+RUN gate_m2_infer_kernels.py
+{"gate": "gate_m2_infer_kernels.py", "exit_code": 0, "seconds": 2.6}
+RUN gate_m2_learn_fused.py
+{"gate": "gate_m2_learn_fused.py", "exit_code": 0, "seconds": 4.0}
+RUN gate_ms_stream.py

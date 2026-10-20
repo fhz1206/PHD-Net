@@ -30,10 +30,10 @@
   PASS  B4 朴素 golden 重建两遍逐位一致（参考自身确定）
   PASS  B4b 第二次对拍后现场恢复
 【C】性能断言（预热 + best-of-7；阈值 = 优化后实测 × 2）
-  PASS  C _from_dense_csr 1024x1024 k=64 <= 141 ms  [实测 27.2 ms（优化后基准 70.5 ms，阈值 2×）]
-  PASS  C _from_dense_csr 2048x2048 k=128 <= 582 ms  [实测 117.2 ms（优化后基准 290.9 ms，阈值 2×）]
-  PASS  C _dense 2048x2048 k=128 <= 40 ms  [实测 8.5 ms（优化后基准 19.8 ms，阈值 2×）]
-  PASS  C _dense 4096x4096 k=256 <= 160 ms  [实测 38.5 ms（优化后基准 79.6 ms，阈值 2×）]
+  PASS  C _from_dense_csr 1024x1024 k=64 <= 141 ms  [实测 29.7 ms（优化后基准 70.5 ms，阈值 2×）]
+  PASS  C _from_dense_csr 2048x2048 k=128 <= 582 ms  [实测 128.8 ms（优化后基准 290.9 ms，阈值 2×）]
+  PASS  C _dense 2048x2048 k=128 <= 40 ms  [实测 8.8 ms（优化后基准 19.8 ms，阈值 2×）]
+  PASS  C _dense 4096x4096 k=256 <= 160 ms  [实测 37.2 ms（优化后基准 79.6 ms，阈值 2×）]
 
 == gate_csr_vectorization_perf: 32/32 PASS ==
 全部通过：逐位不变 + 无性能回归。

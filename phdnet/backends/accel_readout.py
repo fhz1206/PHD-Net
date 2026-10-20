@@ -597,6 +597,13 @@ class AccelReadout:
         self._pinned_h_buffer = None
         self._async_ht_next = None
         self._async_event = None
+        # P205a：nll 独立流（--beta p2 开启时懒初始化）。
+        # 动机：`nll_sync_every>1` 时第 N 步的 `.item()` 是 CPU 硬同步点——
+        # 它等的是**当前流**上所有 kernel（含读出更新）完成。改到独立流上
+        # wait 后，CPU 只等「nll 累积链」而同流后续 kernel 的提交不被阻塞。
+        # CPU（torch-CPU）/ 未开 p2 / Stream API 不可用 → None（走原路径）。
+        self._nll_stream = None
+        self._nll_stream_ok = None          # None = 未探测；bool = 探测结果
         # P134：gather 实现（"index" = 高级索引基线 / "take" = 另一条 device kernel）
         # ⚠ P145 清理：这里原本有**三份重复赋值**（P134 那次脚本失败重试的残留，
         #   功能上无害但属死代码，且说明「重试式插入」的纪律漏洞）。
@@ -1295,6 +1302,36 @@ class AccelReadout:
     # ════════════════════════════════════════════════════════════════════
     # P192：NPU Graph Capture（--beta 实验性优化；仅稠密路径，稀疏不适用）
     # ════════════════════════════════════════════════════════════════════
+    def _ensure_streams(self, beta: set) -> None:
+        """P205a：懒初始化独立流（p2/nll 双流）。CPU 或 API 不可用 → 全 None。
+
+        - `_h2d_stream`：p2 开启时用于 H2D 的独立流（与读出 kernel 并行）；
+        - `_nll_stream`：nll `.item()` 的等待流（`nll_sync_every>1`）。
+        探测失败（torch-CPU / 老版本无 npu.Stream）→ 置 `_nll_stream_ok=False`
+        并保持 None，调用方回落原路径（逐位一致）。
+        """
+        if self._nll_stream_ok is not None:
+            return                                  # 已探测过
+        self._nll_stream_ok = False
+        if torch is None or self.device == "cpu":
+            return
+        try:
+            if self.device.startswith("cuda"):
+                make = torch.cuda.Stream
+            elif self.device.startswith("npu"):
+                make = torch.npu.Stream
+            else:
+                return
+            s1 = make()
+            s2 = make()
+            self._h2d_stream = s1
+            self._nll_stream = s2
+            self._nll_stream_ok = True
+        except Exception:                            # noqa: BLE001
+            self._h2d_stream = None
+            self._nll_stream = None
+            self._nll_stream_ok = False
+
     def enable_npu_graph(self, beta: set[str] | None = None) -> bool:
         """捕获「前向 + 学习」一体计算图（一次 replay 跑完整步）。
 
@@ -1323,6 +1360,10 @@ class AccelReadout:
         beta 阶段控制：p0 = 图捕获；p1 = 前向+学习融合单图（当前实现）。
         """
         beta = beta or set()
+        # P205a：p2 = 双流（H2D 独立流 + nll 独立流）。懒初始化（探测失败
+        # 自动回落单流，行为逐位不变）。放在图捕获之前——流与图互不影响。
+        if "p2" in beta:
+            self._ensure_streams(beta)
         if "p0" not in beta:
             return False
         # ── 排除项：稀疏 / 含主机交互的 int8 计算域 / fp8→int8 CPU 往返 ──
@@ -1600,7 +1641,25 @@ class AccelReadout:
                          else self._nll_sum + nll_dev)
         self._nll_n += 1
         if self._nll_n >= self.nll_sync_every:
-            self._last_nll = float(self._nll_sum.item()) / self._nll_n
+            # P205a：nll 独立流同步（--beta p2 时启用）。
+            # 原实现 `.item()` 在**当前流**上硬同步——CPU 等「本流全部 kernel」
+            # （含读出更新 addmm_）完成才能返回。改为：`_nll_stream` 先
+            # `wait_stream(当前流)`（保证 nll 累积链就绪），`.item()` 在
+            # `_nll_stream` 上做——CPU 等的是「nll 链」而**同流后续 kernel
+            # 的提交不被阻塞**（下一 kernel 在本流继续排队，NPU 流水不断）。
+            # 语义：nll 数值不变（同一批累积值的和）；只是等待的流变了。
+            # torch-CPU / 探测失败 → `_nll_stream` 为 None → 走原路径（逐位）。
+            if self._nll_stream is not None:
+                self._nll_stream.wait_stream(
+                    torch.cuda.current_stream()
+                    if self.device.startswith("cuda")
+                    else torch.npu.current_stream())
+                with (torch.cuda.stream(self._nll_stream)
+                      if self.device.startswith("cuda")
+                      else torch.npu.stream(self._nll_stream)):
+                    self._last_nll = float(self._nll_sum.item()) / self._nll_n
+            else:
+                self._last_nll = float(self._nll_sum.item()) / self._nll_n
             self._nll_sum = None
             self._nll_n = 0
         return self._last_nll
@@ -2344,6 +2403,23 @@ class AccelReadout:
         if ev is None:
             ev = torch.Event()
             self._pin_bufs[idx] = (buf, ev)
+        # P205a（--beta p2）：H2D 提交到**独立流**，消费方（`_matmul` 等在
+        # 当前流的 kernel）通过「当前流 wait H2D 流」建立依赖——pinned 拷贝
+        # 与上一 kernel 真并行（原实现同流 FIFO，拷贝排在前面 kernel 之后）。
+        # 语义：ht 的**值**到达设备的时点由 wait_stream 保证，数值逐位不变。
+        if self._h2d_stream is not None and not self.device.startswith("cpu"):
+            _cur = (torch.cuda.current_stream()
+                    if self.device.startswith("cuda")
+                    else torch.npu.current_stream())
+            self._h2d_stream.wait_stream(_cur)      # 上流完成后再拷（覆写保护）
+            with (torch.cuda.stream(self._h2d_stream)
+                  if self.device.startswith("cuda")
+                  else torch.npu.stream(self._h2d_stream)):
+                dev_t = buf.to(self.device, non_blocking=True).to(self._cdtype)
+            _cur.wait_stream(self._h2d_stream)      # 消费方：当前流等拷贝完成
+            ev.record()
+            self._pin_next += 1
+            return dev_t
         dev_t = buf.to(self.device, non_blocking=True).to(self._cdtype)
         ev.record()
         self._pin_next += 1

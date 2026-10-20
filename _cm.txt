@@ -1,42 +1,52 @@
-P205: M4b imprint 提速（批量 λ^Δt 补偿 + dict 局部绑定，1.6×）
+P205a: NPU 流水线（nll 独立流 + p2 双流 H2D）+ CANN 接线器（--cann-dispatch 从核对器变接线器）
 
-## 定位（cProfile + dt 分布统计）
-服务器 1b 档日志 M4b_ltm/imprint 各 ~2.3ms（占 step 18%）。
-本机复现（4096 行稳态）：table.learn 占 imprint 的 88%，
-热点 = 768 次/步的 _decay_read（每次一层 Python 帧 + 2 次 dict.get）
-→ cProfile 实测 230,400 次调用 / 300 步，dict.get 921,600 次。
-dt 分布统计（打补丁统计 20 步）：**97% 的调用 dt==0**（裸值等价）、
-3% 需补偿——大量调用在付函数帧与 dict 查找的冤枉钱。
+## 背景（用户指示：能否通过架构提前计算让 NPU 效率更高 + 优化 Cython/CANN 对接）
+服务器 1b 档：step 12.3ms/tok，readout(NPU) 2.04ms = 8.5%，NPU 利用率
+20-50% —— 本质是「NPU 每步只有 2ms 的活，却有 12ms 的周期」，NPU 大部分
+时间在等 CPU。设计评估见 docs/P205a_NPU流水线设计.md（三层方案 + 为何
+层 3「跨步 pipeline」不做：P117 已裁决——前移学习会改变 nll→task_gate→
+主干学习率的时序，属学习规则层面的语义变更）。
 
-## 优化（phdnet/sparse_table.py）
-1. `_decay_read_arr(trace, stamp, keys)`：批量取值入口——局部绑定
-   trace/stamp/step_count/lam 后单层循环，把 _learn_batch 的 3 组取值
-   （tpi/tpi_post/g_tpre）收敛为 3 次数组调用。**内部逐个调
-   _decay_read**（见下）。
-2. `_learn_batch`：3 组取值全部改走 `_decay_read_arr`；`_touch`/
-   gather/scatter 段的 dict 方法局部绑定（省属性链，语义逐位相同）。
-3. g_tpost 的裸读用 np.fromiter + 绑定后的 .get（免逐次函数帧）。
+## ① nll 独立流（架构级提前计算的核心）
+`learn_softmax` 的 nll `.item()`（每 nll_sync_every 步一次）是 **CPU 硬
+同步点**：它等的是**当前流**上全部 kernel（含读出更新 addmm_）。
+改法：`_nll_stream.wait_stream(当前流)` 后再 `.item()` —— CPU 只等「nll
+累积链」，同流后续 kernel 的提交不被阻塞（NPU 流水不断）。
+- 数值语义不变（同一批累积值的和）；只是等待的流变了
+- torch-CPU / 探测失败 → `_nll_stream=None` → 原路径逐位一致
+- 懒初始化 + 幂等（`_ensure_streams`，CPU 上 ok=False → 两流 None）
 
-## ⚠ 中途踩坑与回滚记录（防再犯）
-- **cap 收紧优化是错的**：曾把 `cap = max(m_out, max行容量)` 收紧为
-  `max(行容量)` 想省 K/V 整行宽度 —— `_ltm_learn_rows` 核内会把行
-  **生长到 m_out**，K/V 必须预留到 m_out，否则 scatter 广播失败
-  （实测 ValueError (64,)→(72,)）。已回滚并留注释。
-- **内联展开破坏门禁突变测试**：首版把 _decay_read 的逻辑直接内联进
-  _learn_batch → `gate_ltm_trace_semantics` 的负向对照
-  （patch `t._decay_read = lambda...` 注入「未补偿」）变成**空操作** →
-  (a) 组 FAIL（ratio_pre=1.0000，检出能力静默消失）。
-  **修复**：取值统一收敛到 `_decay_read_arr`，而它**内部逐个调
-  `_decay_read`**——突变注入点保留，性能靠省属性链而非省函数调用。
-  两个方法的 docstring 都写明这条契约。
+## ② p2 双流 H2D（实现 P192 的死代码字段）
+`_staged_to_dev` 的 H2D 提交到独立 `_h2d_stream`（此前同流 FIFO，排在
+前面 kernel 之后）；消费方当前流 `wait_stream(h2d_stream)` 建立依赖
+→ pinned 拷贝与上一 kernel 真并行。
+- `_h2d_stream/_d2h_stream/_pinned_h_buffer/_async_ht_next/_async_event`
+  五个字段此前**只声明从未使用**（P192 的 p2/p3 只有配置位没有实现）
+- 数值逐位不变（ht 的值到达时点由 wait_stream 保证）
 
-## 实测（同进程交叉 A/B，median-of-11，消除外部负载漂移）
-- 第 1 轮（批量取值 + _touch 局部绑定）：imprint 5.392 → 4.606 ms（1.17×）
-- 第 2 轮（+ gather/scatter 局部绑定）：3.692 → 3.365 ms
-- 相对最初基线 5.392 → 3.365：**1.60×**
-- 服务器预期：M4b_ltm/imprint 各 2.29 → ~1.6-1.9 ms/tok
+## ③ CANN 接线器（--cann-dispatch 实质化）
+`cann_env.wire_dispatch()`：调 `torch_npu.npu.set_compile_mode(
+jit_compile=False)` —— 官方文档「TASK_QUEUE_ENABLE 仅二进制场景生效」，
+而 jit_compile 默认 True → **不调这句，TASK_QUEUE_ENABLE=2 一直白设**
+（P120 以来从未解除的静默失效条件 ③）。
+- train.py：`--cann-dispatch` 改为**先接线后核对**（wire → verify）
+- 幂等：已是二进制场景则跳过；老版本 CANN 抛异常则如实报告 wired=False
+- CPU/无 torch_npu → wired=None（不适用，不抛异常）
+
+## 门禁
+新增 `tests/gates/gate_npu_pipeline.py` 13/13：
+A 懒初始化（CPU 探测失败→回落原路径、幂等）
+B nll 数值协议不变（sync_every=1 即时 / =8 滞后均值 / 窗口滚动同步）
+C p2 关闭时 _staged_to_dev 逐位不变
+D wire_dispatch 不抛异常、返回结构正确、无 torch_npu → 不适用
+E beta p2 与 p0 图捕获共存
 
 ## 验证
-- gate_ltm_learn_batch 5/5（批量 vs Python 逐位一致，4 组合 + 6 步序列）
-- gate_ltm_trace_semantics **32/32**（突变测试能力恢复）
-- run_tests.py 9/9；run_gates.py 48/48
+- run_tests.py 9/9
+- gate_npu_pipeline 13/13（新）、gate_cann_dispatch 11/11、
+  gate_cpu_npu_overlap_contract 23/23、gate_accel_readout 全部 PASS
+
+## 服务器 A/B（判据见 docs/P205a_NPU流水线设计.md）
+  --beta p2 --cann-dispatch --replay-every 16
+判据：segments(win) 的 readout ms/tok、端到端 ms/tok、npu-smi 利用率
+采样均值（20-50% → 更高 = 空窗缩短）、PPL 无回归（--probe-every）

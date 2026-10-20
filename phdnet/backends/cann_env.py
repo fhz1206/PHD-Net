@@ -310,6 +310,51 @@ def verify_dispatch(report: bool = True) -> dict:
     return {"effective": effective, "checks": checks, "notes": notes}
 
 
+def wire_dispatch() -> dict:
+    """P205a：**接线** `--cann-dispatch`——解除 task_queue 的静默失效条件。
+
+    `verify_dispatch` 是核对器（只读）；本函数做**动作**：
+      `torch_npu.npu.set_compile_mode(jit_compile=False)`——官方文档明确
+      「TASK_QUEUE_ENABLE 仅在二进制场景生效」，而 jit_compile 默认是 True
+      → **不调这一句，TASK_QUEUE_ENABLE=2 就是白设**（核对器的失效条件 ③）。
+
+    返回（不抛异常——CPU/无 torch_npu/老版本 CANN 都是「不适用」，不是错误）：
+      `{"wired": bool|None, "reason": str}`
+      · wired=True   已设置（服务器上核对器应随之变绿）
+      · wired=None   不适用（无 torch / 无 torch_npu / 非 NPU 设备）
+      · wired=False  尝试了但抛异常（老版本 CANN 等，reason 带异常）
+    """
+    try:
+        import torch  # noqa: F401
+    except Exception as e:                            # noqa: BLE001
+        return {"wired": None,
+                "reason": f"torch 不可用（{type(e).__name__}）→ 不适用"}
+    try:
+        import torch_npu  # noqa: F401
+    except Exception:                                  # noqa: BLE001
+        return {"wired": None, "reason": "非 torch_npu 环境 → 不适用"}
+    try:
+        from torch_npu.npu import npuConfig
+        # 已是二进制场景 → 幂等跳过（重复设置无害，但省一次调用）
+        try:
+            if npuConfig.is_jit_compile_false():
+                return {"wired": True,
+                        "reason": "jit_compile 已是 False（幂等跳过）"}
+        except Exception:                              # noqa: BLE001
+            pass                                       # 老版本无此 API → 直接设
+        npuConfig.set_compile_mode(jit_compile=False)
+        ok = bool(npuConfig.is_jit_compile_false())
+        return {"wired": ok,
+                "reason": ("set_compile_mode(jit_compile=False) 已生效"
+                           if ok else
+                           "set_compile_mode 已调用但 is_jit_compile_false() "
+                           "仍为 False（CANN 版本行为异常，如实报告）")}
+    except Exception as e:                             # noqa: BLE001
+        return {"wired": False,
+                "reason": f"set_compile_mode 失败（{type(e).__name__}: {e}）"
+                          "——TASK_QUEUE_ENABLE 的二进制场景条件未解除"}
+
+
 if __name__ == "__main__":  # pragma: no cover
     apply_cann_env()
     print(describe())

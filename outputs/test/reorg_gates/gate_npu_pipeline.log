@@ -1,0 +1,26 @@
+[A] 懒初始化（CPU 环境）
+  [PASS] A1 构造后 _nll_stream_ok 为 None（未探测）
+  [PASS] A2 CPU 上探测 → ok=False、两流为 None（回落原路径）
+  [PASS] A3 二次探测幂等（不重复建流）
+
+[B] nll 数值协议不变（CPU 路径逐位）
+  [PASS] B1 sync_every=1 首步 nll 即时 —— nll=6.119430
+  [PASS] B2 sync_every=8 首步返回滞后值（_last_nll 初值 0） —— ret=0.0
+  [PASS] B3 窗口滚动同步（8 步内恰触发一次后 _nll_n 回到滚动值） —— _nll_n=1 last=6.505253
+  [PASS] B4 第 8 步返回值 = 前 8 步累积均值（同步协议语义不变） —— last=6.505253
+
+[C] p2 关闭（默认）路径逐位不变
+  [PASS] C1 p2 关 + CPU：_staged_to_dev 正常返回设备张量
+  [PASS] C2 p2 关：_h2d_stream 仍为 None（未建流）
+
+[D] wire_dispatch（CANN 接线）
+  [PASS] D1 wire_dispatch 不抛异常且返回结构正确 —— wired=None (非 torch_npu 环境 → 不适用)
+  [PASS] D2 无 torch_npu 环境 → 不适用（不算失败）
+
+[E] beta p2 与图捕获共存
+  [PASS] E1 enable_npu_graph({'p0','p2'}) CPU 上安全（False=回落 eager） —— ret=False
+  [PASS] E2 探测后 _nll_stream_ok=False（CPU）
+
+PASS: 13/13 项通过
+
+[stderr]
