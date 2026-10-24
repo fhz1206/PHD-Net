@@ -1,0 +1,297 @@
+﻿ replay_every                                    窗口 PPL 序列      摆动倍数       探针末值
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+[ltm-diag] imprints=1 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=64 grown=0 k_hash=4
+[ltm-diag] imprints=2 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=128 grown=0 k_hash=4
+[ltm-diag] imprints=3 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=172 grown=0 k_hash=4
+[ltm-diag] imprints=4 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=216 grown=0 k_hash=4
+[ltm-diag] imprints=5 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=264 grown=0 k_hash=4
+[ltm-diag] imprints=6 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=300 grown=0 k_hash=4
+[ltm-diag] imprints=7 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=348 grown=0 k_hash=4
+[ltm-diag] imprints=8 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=384 grown=0 k_hash=4
+[ltm-diag] imprints=9 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=400 grown=0 k_hash=4
+[ltm-diag] imprints=10 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=428 grown=0 k_hash=4
+[ltm-diag] imprints=11 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=456 grown=0 k_hash=4
+[ltm-diag] imprints=12 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=480 grown=0 k_hash=4
+[ltm-diag] imprints=13 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=484 grown=0 k_hash=4
+[ltm-diag] imprints=14 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=504 grown=0 k_hash=4
+[ltm-diag] imprints=15 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=524 grown=0 k_hash=4
+[ltm-diag] imprints=16 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=540 grown=0 k_hash=4
+[ltm-diag] imprints=17 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=568 grown=0 k_hash=4
+[ltm-diag] imprints=18 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=584 grown=0 k_hash=4
+[ltm-diag] imprints=19 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=592 grown=0 k_hash=4
+[ltm-diag] imprints=20 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=604 grown=0 k_hash=4
+[ltm-diag] imprints=21 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=620 grown=0 k_hash=4
+[ltm-diag] imprints=22 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=636 grown=0 k_hash=4
+[ltm-diag] imprints=23 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=640 grown=0 k_hash=4
+[ltm-diag] imprints=24 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=652 grown=0 k_hash=4
+[ltm-diag] imprints=25 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=656 grown=0 k_hash=4
+[ltm-diag] imprints=26 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=668 grown=0 k_hash=4
+[ltm-diag] imprints=27 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=676 grown=0 k_hash=4
+[ltm-diag] imprints=28 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=688 grown=0 k_hash=4
+[ltm-diag] imprints=29 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=700 grown=0 k_hash=4
+[ltm-diag] imprints=30 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=704 grown=0 k_hash=4
+[ltm-diag] imprints=31 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=712 grown=0 k_hash=4
+[ltm-diag] imprints=32 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=720 grown=0 k_hash=4
+[ltm-diag] imprints=33 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=724 grown=0 k_hash=4
+[ltm-diag] imprints=34 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=732 grown=0 k_hash=4
+[ltm-diag] imprints=35 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=740 grown=0 k_hash=4
+[ltm-diag] imprints=36 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=748 grown=0 k_hash=4
+[ltm-diag] imprints=37 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=752 grown=0 k_hash=4
+[ltm-diag] imprints=38 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=756 grown=0 k_hash=4
+[ltm-diag] imprints=39 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=760 grown=0 k_hash=4
+[ltm-diag] imprints=41 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=764 grown=0 k_hash=4
+[ltm-diag] imprints=44 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=768 grown=0 k_hash=4
+[ltm-diag] imprints=45 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=776 grown=0 k_hash=4
+[ltm-diag] imprints=46 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=788 grown=0 k_hash=4
+[ltm-diag] imprints=47 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=792 grown=0 k_hash=4
+[ltm-diag] imprints=48 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=800 grown=0 k_hash=4
+[ltm-diag] imprints=49 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=804 grown=0 k_hash=4
+[ltm-diag] imprints=51 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=808 grown=0 k_hash=4
+[ltm-diag] imprints=54 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=816 grown=0 k_hash=4
+[ltm-diag] imprints=55 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=824 grown=0 k_hash=4
+[ltm-diag] imprints=59 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=832 grown=0 k_hash=4
+[ltm-diag] imprints=64 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=836 grown=0 k_hash=4
+[ltm-diag] imprints=66 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=840 grown=0 k_hash=4
+[ltm-diag] imprints=67 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=844 grown=0 k_hash=4
+[ltm-diag] imprints=72 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=848 grown=0 k_hash=4
+[ltm-diag] imprints=74 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=856 grown=0 k_hash=4
+[ltm-diag] imprints=75 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=864 grown=0 k_hash=4
+[ltm-diag] imprints=76 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=868 grown=0 k_hash=4
+[ltm-diag] imprints=77 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=872 grown=0 k_hash=4
+[ltm-diag] imprints=78 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=876 grown=0 k_hash=4
+[ltm-diag] imprints=79 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=880 grown=0 k_hash=4
+[ltm-diag] imprints=81 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=888 grown=0 k_hash=4
+[ltm-diag] imprints=83 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=892 grown=0 k_hash=4
+[ltm-diag] imprints=85 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=896 grown=0 k_hash=4
+[ltm-diag] imprints=89 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=900 grown=0 k_hash=4
+[ltm-diag] imprints=96 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=904 grown=0 k_hash=4
+[ltm-diag] imprints=101 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=920 grown=0 k_hash=4
+[ltm-diag] imprints=102 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=924 grown=0 k_hash=4
+[ltm-diag] imprints=106 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=928 grown=0 k_hash=4
+[ltm-diag] imprints=108 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=932 grown=0 k_hash=4
+[ltm-diag] imprints=113 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=936 grown=0 k_hash=4
+[ltm-diag] imprints=115 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=940 grown=0 k_hash=4
+[ltm-diag] imprints=119 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=948 grown=0 k_hash=4
+[ltm-diag] imprints=122 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=952 grown=0 k_hash=4
+[ltm-diag] imprints=137 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=956 grown=0 k_hash=4
+[ltm-diag] imprints=140 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=960 grown=0 k_hash=4
+[ltm-diag] imprints=152 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=964 grown=0 k_hash=4
+[ltm-diag] imprints=157 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=968 grown=0 k_hash=4
+[ltm-diag] imprints=166 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=972 grown=0 k_hash=4
+[ltm-diag] imprints=183 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=976 grown=0 k_hash=4
+[ltm-diag] imprints=185 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=980 grown=0 k_hash=4
+[ltm-diag] imprints=200 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=984 grown=0 k_hash=4
+[ltm-diag] imprints=281 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=988 grown=0 k_hash=4
+[ltm-diag] imprints=293 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=992 grown=0 k_hash=4
+[ltm-diag] imprints=315 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=996 grown=0 k_hash=4
+[ltm-diag] imprints=323 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,000 grown=0 k_hash=4
+[ltm-diag] imprints=328 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,004 grown=0 k_hash=4
+[ltm-diag] recalls=10 active=64 scores=220 bindings=220
+[ltm-diag] imprints=352 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,008 grown=0 k_hash=4
+[ltm-diag] imprints=409 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,012 grown=0 k_hash=4
+[ltm-diag] recalls=20 active=64 scores=440 bindings=440
+[ltm-diag] recalls=30 active=64 scores=416 bindings=416
+[ltm-diag] imprints=619 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,016 grown=0 k_hash=4
+[ltm-diag] recalls=40 active=64 scores=464 bindings=464
+[ltm-diag] imprints=825 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,020 grown=0 k_hash=4
+[ltm-diag] recalls=50 active=64 scores=456 bindings=456
+[ltm-diag] recalls=60 active=64 scores=444 bindings=444
+[ltm-diag] recalls=70 active=64 scores=416 bindings=416
+[ltm-diag] recalls=80 active=64 scores=400 bindings=400
+[ltm-diag] recalls=90 active=64 scores=448 bindings=448
+[ltm-diag] recalls=100 active=64 scores=480 bindings=480
+[ltm-diag] recalls=110 active=64 scores=392 bindings=392
+[ltm-diag] imprints=2002 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,024 grown=0 k_hash=4
+[ltm-diag] recalls=120 active=64 scores=408 bindings=408
+[ltm-diag] recalls=130 active=64 scores=440 bindings=440
+[ltm-diag] recalls=140 active=64 scores=248 bindings=248
+[ltm-diag] recalls=150 active=64 scores=504 bindings=504
+[ltm-diag] recalls=160 active=64 scores=464 bindings=464
+[ltm-diag] recalls=170 active=64 scores=452 bindings=452
+[ltm-diag] recalls=180 active=64 scores=452 bindings=452
+[ltm-diag] recalls=190 active=64 scores=480 bindings=480
+[ltm-diag] recalls=200 active=64 scores=444 bindings=444
+[ltm-diag] recalls=210 active=64 scores=416 bindings=416
+[ltm-diag] recalls=220 active=64 scores=480 bindings=480
+[ltm-diag] recalls=230 active=64 scores=452 bindings=452
+[ltm-diag] recalls=240 active=64 scores=480 bindings=480
+[ltm-diag] recalls=250 active=64 scores=428 bindings=428
+[ltm-diag] recalls=260 active=64 scores=412 bindings=412
+[ltm-diag] recalls=270 active=64 scores=364 bindings=364
+[ltm-diag] recalls=280 active=64 scores=532 bindings=532
+[ltm-diag] recalls=290 active=64 scores=396 bindings=396
+[ltm-diag] recalls=300 active=64 scores=492 bindings=492
+[ltm-diag] recalls=310 active=64 scores=460 bindings=460
+[ltm-diag] recalls=320 active=64 scores=484 bindings=484
+[ltm-diag] recalls=330 active=64 scores=452 bindings=452
+[ltm-diag] recalls=340 active=64 scores=392 bindings=392
+[ltm-diag] recalls=350 active=64 scores=388 bindings=388
+[ltm-diag] recalls=360 active=64 scores=492 bindings=492
+[ltm-diag] recalls=370 active=64 scores=456 bindings=456
+[ltm-diag] recalls=380 active=64 scores=500 bindings=500
+[ltm-diag] recalls=390 active=64 scores=396 bindings=396
+[ltm-diag] recalls=400 active=64 scores=488 bindings=488
+[ltm-diag] recalls=410 active=64 scores=428 bindings=428
+[ltm-diag] recalls=420 active=64 scores=380 bindings=380
+[ltm-diag] recalls=430 active=64 scores=440 bindings=440
+[ltm-diag] recalls=440 active=64 scores=472 bindings=472
+[ltm-diag] recalls=450 active=64 scores=468 bindings=468
+[ltm-diag] recalls=460 active=64 scores=484 bindings=484
+[ltm-diag] recalls=470 active=64 scores=420 bindings=420
+[ltm-diag] recalls=480 active=64 scores=448 bindings=448
+[ltm-diag] recalls=490 active=64 scores=452 bindings=452
+[ltm-diag] recalls=500 active=64 scores=444 bindings=444
+[ltm-diag] recalls=510 active=64 scores=380 bindings=380
+[ltm-diag] recalls=520 active=64 scores=492 bindings=492
+[ltm-diag] recalls=530 active=64 scores=444 bindings=444
+[ltm-diag] recalls=540 active=64 scores=396 bindings=396
+[ltm-diag] recalls=550 active=64 scores=440 bindings=440
+            4         4865 → 2446 → 2227 → 999 → 435 → 622     11.2x      643.9
+[p192] cython kernels: requested='auto' active=True（M2/M3 分派；⚠ fp32 级漂移，非逐位等价）
+[ltm-diag] imprints=1 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=64 grown=0 k_hash=4
+[ltm-diag] imprints=2 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=128 grown=0 k_hash=4
+[ltm-diag] imprints=3 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=172 grown=0 k_hash=4
+[ltm-diag] imprints=4 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=216 grown=0 k_hash=4
+[ltm-diag] imprints=5 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=264 grown=0 k_hash=4
+[ltm-diag] imprints=6 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=300 grown=0 k_hash=4
+[ltm-diag] imprints=7 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=348 grown=0 k_hash=4
+[ltm-diag] imprints=8 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=384 grown=0 k_hash=4
+[ltm-diag] imprints=9 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=400 grown=0 k_hash=4
+[ltm-diag] imprints=10 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=428 grown=0 k_hash=4
+[ltm-diag] imprints=11 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=456 grown=0 k_hash=4
+[ltm-diag] imprints=12 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=480 grown=0 k_hash=4
+[ltm-diag] imprints=13 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=484 grown=0 k_hash=4
+[ltm-diag] imprints=14 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=504 grown=0 k_hash=4
+[ltm-diag] imprints=15 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=524 grown=0 k_hash=4
+[ltm-diag] imprints=16 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=540 grown=0 k_hash=4
+[ltm-diag] imprints=17 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=568 grown=0 k_hash=4
+[ltm-diag] imprints=18 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=584 grown=0 k_hash=4
+[ltm-diag] imprints=19 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=592 grown=0 k_hash=4
+[ltm-diag] imprints=20 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=604 grown=0 k_hash=4
+[ltm-diag] imprints=21 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=620 grown=0 k_hash=4
+[ltm-diag] imprints=22 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=636 grown=0 k_hash=4
+[ltm-diag] imprints=23 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=640 grown=0 k_hash=4
+[ltm-diag] imprints=24 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=652 grown=0 k_hash=4
+[ltm-diag] imprints=25 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=656 grown=0 k_hash=4
+[ltm-diag] imprints=26 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=668 grown=0 k_hash=4
+[ltm-diag] imprints=27 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=676 grown=0 k_hash=4
+[ltm-diag] imprints=28 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=688 grown=0 k_hash=4
+[ltm-diag] imprints=29 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=700 grown=0 k_hash=4
+[ltm-diag] imprints=30 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=704 grown=0 k_hash=4
+[ltm-diag] imprints=31 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=712 grown=0 k_hash=4
+[ltm-diag] imprints=32 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=720 grown=0 k_hash=4
+[ltm-diag] imprints=33 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=724 grown=0 k_hash=4
+[ltm-diag] imprints=34 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=732 grown=0 k_hash=4
+[ltm-diag] imprints=35 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=740 grown=0 k_hash=4
+[ltm-diag] imprints=36 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=748 grown=0 k_hash=4
+[ltm-diag] imprints=37 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=752 grown=0 k_hash=4
+[ltm-diag] imprints=38 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=756 grown=0 k_hash=4
+[ltm-diag] imprints=39 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=760 grown=0 k_hash=4
+[ltm-diag] imprints=41 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=764 grown=0 k_hash=4
+[ltm-diag] imprints=44 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=768 grown=0 k_hash=4
+[ltm-diag] imprints=45 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=776 grown=0 k_hash=4
+[ltm-diag] imprints=46 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=788 grown=0 k_hash=4
+[ltm-diag] imprints=47 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=792 grown=0 k_hash=4
+[ltm-diag] imprints=48 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=800 grown=0 k_hash=4
+[ltm-diag] imprints=49 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=804 grown=0 k_hash=4
+[ltm-diag] imprints=51 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=808 grown=0 k_hash=4
+[ltm-diag] imprints=54 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=816 grown=0 k_hash=4
+[ltm-diag] imprints=55 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=824 grown=0 k_hash=4
+[ltm-diag] imprints=59 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=832 grown=0 k_hash=4
+[ltm-diag] imprints=64 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=836 grown=0 k_hash=4
+[ltm-diag] imprints=66 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=840 grown=0 k_hash=4
+[ltm-diag] imprints=67 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=844 grown=0 k_hash=4
+[ltm-diag] imprints=72 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=848 grown=0 k_hash=4
+[ltm-diag] imprints=74 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=856 grown=0 k_hash=4
+[ltm-diag] imprints=75 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=864 grown=0 k_hash=4
+[ltm-diag] imprints=76 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=868 grown=0 k_hash=4
+[ltm-diag] imprints=77 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=872 grown=0 k_hash=4
+[ltm-diag] imprints=78 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=876 grown=0 k_hash=4
+[ltm-diag] imprints=79 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=880 grown=0 k_hash=4
+[ltm-diag] imprints=81 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=888 grown=0 k_hash=4
+[ltm-diag] imprints=83 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=892 grown=0 k_hash=4
+[ltm-diag] imprints=85 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=896 grown=0 k_hash=4
+[ltm-diag] imprints=89 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=900 grown=0 k_hash=4
+[ltm-diag] imprints=97 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=904 grown=0 k_hash=4
+[ltm-diag] imprints=102 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=920 grown=0 k_hash=4
+[ltm-diag] imprints=103 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=924 grown=0 k_hash=4
+[ltm-diag] imprints=107 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=928 grown=0 k_hash=4
+[ltm-diag] imprints=109 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=932 grown=0 k_hash=4
+[ltm-diag] imprints=114 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=936 grown=0 k_hash=4
+[ltm-diag] imprints=116 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=940 grown=0 k_hash=4
+[ltm-diag] imprints=120 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=948 grown=0 k_hash=4
+[ltm-diag] imprints=123 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=952 grown=0 k_hash=4
+[ltm-diag] imprints=138 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=956 grown=0 k_hash=4
+[ltm-diag] imprints=141 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=960 grown=0 k_hash=4
+[ltm-diag] imprints=153 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=964 grown=0 k_hash=4
+[ltm-diag] imprints=158 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=968 grown=0 k_hash=4
+[ltm-diag] imprints=167 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=972 grown=0 k_hash=4
+[ltm-diag] imprints=183 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=976 grown=0 k_hash=4
+[ltm-diag] imprints=185 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=980 grown=0 k_hash=4
+[ltm-diag] imprints=200 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=984 grown=0 k_hash=4
+[ltm-diag] imprints=281 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=988 grown=0 k_hash=4
+[ltm-diag] imprints=293 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=992 grown=0 k_hash=4
+[ltm-diag] imprints=315 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=996 grown=0 k_hash=4
+[ltm-diag] imprints=323 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,000 grown=0 k_hash=4
+[ltm-diag] imprints=328 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,004 grown=0 k_hash=4
+[ltm-diag] recalls=10 active=64 scores=220 bindings=220
+[ltm-diag] imprints=352 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,008 grown=0 k_hash=4
+[ltm-diag] imprints=409 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,012 grown=0 k_hash=4
+[ltm-diag] recalls=20 active=64 scores=440 bindings=440
+[ltm-diag] recalls=30 active=64 scores=416 bindings=416
+[ltm-diag] imprints=623 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,016 grown=0 k_hash=4
+[ltm-diag] recalls=40 active=64 scores=464 bindings=464
+[ltm-diag] imprints=829 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,020 grown=0 k_hash=4
+[ltm-diag] recalls=50 active=64 scores=456 bindings=456
+[ltm-diag] recalls=60 active=64 scores=444 bindings=444
+[ltm-diag] recalls=70 active=64 scores=416 bindings=416
+[ltm-diag] recalls=80 active=64 scores=400 bindings=400
+[ltm-diag] recalls=90 active=64 scores=448 bindings=448
+[ltm-diag] recalls=100 active=64 scores=480 bindings=480
+[ltm-diag] recalls=110 active=64 scores=392 bindings=392
+[ltm-diag] imprints=2015 prev=64 cur=64 combos=4096 rate_dims=16/256 rows=1,024 grown=0 k_hash=4
+[ltm-diag] recalls=120 active=64 scores=408 bindings=408
+[ltm-diag] recalls=130 active=64 scores=440 bindings=440
+[ltm-diag] recalls=140 active=64 scores=248 bindings=248
+[ltm-diag] recalls=150 active=64 scores=504 bindings=504
+[ltm-diag] recalls=160 active=64 scores=464 bindings=464
+[ltm-diag] recalls=170 active=64 scores=452 bindings=452
+[ltm-diag] recalls=180 active=64 scores=452 bindings=452
+[ltm-diag] recalls=190 active=64 scores=480 bindings=480
+[ltm-diag] recalls=200 active=64 scores=444 bindings=444
+[ltm-diag] recalls=210 active=64 scores=416 bindings=416
+[ltm-diag] recalls=220 active=64 scores=480 bindings=480
+[ltm-diag] recalls=230 active=64 scores=452 bindings=452
+[ltm-diag] recalls=240 active=64 scores=480 bindings=480
+[ltm-diag] recalls=250 active=64 scores=428 bindings=428
+[ltm-diag] recalls=260 active=64 scores=412 bindings=412
+[ltm-diag] recalls=270 active=64 scores=364 bindings=364
+[ltm-diag] recalls=280 active=64 scores=532 bindings=532
+[ltm-diag] recalls=290 active=64 scores=396 bindings=396
+[ltm-diag] recalls=300 active=64 scores=492 bindings=492
+[ltm-diag] recalls=310 active=64 scores=484 bindings=484
+[ltm-diag] recalls=320 active=64 scores=412 bindings=412
+[ltm-diag] recalls=330 active=64 scores=416 bindings=416
+[ltm-diag] recalls=340 active=64 scores=392 bindings=392
+[ltm-diag] recalls=350 active=64 scores=396 bindings=396
+[ltm-diag] recalls=360 active=64 scores=492 bindings=492
+[ltm-diag] recalls=370 active=64 scores=484 bindings=484
+[ltm-diag] recalls=380 active=64 scores=444 bindings=444
+[ltm-diag] recalls=390 active=64 scores=516 bindings=516
+[ltm-diag] recalls=400 active=64 scores=288 bindings=288
+[ltm-diag] recalls=410 active=64 scores=528 bindings=528
+[ltm-diag] recalls=420 active=64 scores=360 bindings=360
+[ltm-diag] recalls=430 active=64 scores=488 bindings=488
+[ltm-diag] recalls=440 active=64 scores=460 bindings=460
+[ltm-diag] recalls=450 active=64 scores=456 bindings=456
+[ltm-diag] recalls=460 active=64 scores=404 bindings=404
+[ltm-diag] recalls=470 active=64 scores=420 bindings=420
+[ltm-diag] recalls=480 active=64 scores=508 bindings=508
+[ltm-diag] recalls=490 active=64 scores=476 bindings=476
+[ltm-diag] recalls=500 active=64 scores=440 bindings=440
+[ltm-diag] recalls=510 active=64 scores=448 bindings=448
+[ltm-diag] recalls=520 active=64 scores=492 bindings=492
+[ltm-diag] recalls=530 active=64 scores=520 bindings=520
+[ltm-diag] recalls=540 active=64 scores=508 bindings=508
+[ltm-diag] recalls=550 active=64 scores=472 bindings=472
+           16        5196 → 2635 → 2356 → 1047 → 450 → 635     11.6x      935.6

@@ -702,9 +702,12 @@ class PHDNet:
         # P202：本步收尾计时（未打点余额 → `other` 段）。必须在 return 前、
         # 所有 _prof_end 都执行完之后——否则余额会漏算已计段。
         self._prof_close_step()
+        # P206：novelty 进返回值——训练循环用它做「首见/已见」分离 PPL
+        # （sliding PPL 的 10× 摆动主要来自首见 token，nll≈ln(V)）。
         return {"seq_err": seq_err, "surprise": surprise, "gate": gate,
                 "mode": mode, "wm_written": wm_written, "recall_hit": recall_hit,
-                "nll": nll, "y": y, "r2": r2, "pred": pred, "rate": rate}
+                "nll": nll, "y": y, "r2": r2, "pred": pred, "rate": rate,
+                "novelty": novelty}
 
     def sleep(self, forget: float = 1.0, n_replay: int = 0,
               replay_ratio: float = 0.5) -> int:

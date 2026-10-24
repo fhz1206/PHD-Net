@@ -36,8 +36,8 @@ P199 i18n 重写：显式消息目录契约
   PASS E3 TeeLogger 建立后重装翻译层（否则 --lang en 失效）  [tee@4268 reinstall@33664]
 
 [F] 性能
-  PASS F1 纯 ASCII 快速通道 < 10µs  [0.58µs]
-  PASS F2 词级替换有界 < 200µs  [87.67µs]
+  PASS F1 纯 ASCII 快速通道 < 10µs  [0.47µs]
+  PASS F2 词级替换有界 < 200µs  [77.14µs]
 
 [G] 旧方案坏例回归（必须全部消失）
   PASS G '大空间表容量（事件驱动）' 无碎片  [big-space table capacity（事件驱动）]

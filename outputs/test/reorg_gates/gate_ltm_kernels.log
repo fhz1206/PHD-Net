@@ -9,9 +9,9 @@ P68/P70：M4b numba 核 —— 逐位对拍 + 计时（recall 路径全 numba；
   ✓ recall 反投影逐位一致（50 项, 越界=True）
   ✓ P70 recall 全链路逐位一致（int8=False，行满+键随机）
   ✓ P70 recall 全链路逐位一致（int8=True，行满+键随机）
-    encode(200 dims -> 799 idx): python   302.3 us（**生产走这条**；numba 版实测 0.84–1.75× 波动且 O(n²) 去重，已回滚）
-    recall(2000 scores -> 14 bindings): python   213.5 us -> numba     7.2 us | 29.65x
-    predict(active=256 rows x 72 slots): dict   7.985 ms -> predict_arr   0.292 ms | 27.39x
+    encode(200 dims -> 799 idx): python   123.6 us（**生产走这条**；numba 版实测 0.84–1.75× 波动且 O(n²) 去重，已回滚）
+    recall(2000 scores -> 14 bindings): python   230.5 us -> numba     5.4 us | 42.69x
+    predict(active=256 rows x 72 slots): dict   5.960 ms -> predict_arr   0.182 ms | 32.80x
 
 通过 10/10（另附计时）
 

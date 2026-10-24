@@ -1341,6 +1341,11 @@ def main() -> None:
 
     # ── 流式训练主循环（1M context：状态永不重置）──
     seg_nll: list[float] = []
+    # P206：「首见/已见」分离的 nll 环形缓冲（各留 2 万条）——sliding PPL
+    # 的 10× 摆动主要来自首见 token（nll≈ln(V)），分离后 seen_PPL 才是
+    # 真实学习曲线。
+    _nll_seen: list[float] = []
+    _nll_novel: list[float] = []
     # P146：最近一次**固定探针集**的 PPL（A/B 判据用这个，不是 sliding PPL）
     _probe_ppl = None
     _probe_nll_v = 0.0
@@ -1477,6 +1482,24 @@ def main() -> None:
                         _lp["step"] += time.perf_counter() - _st0
                     if trainable:
                         seg_nll.append(d["nll"])
+                        # P206：按「首见/已见」分离统计——sliding PPL 是
+                        # 几何平均，而**首见 token（novelty=1）的 nll 天然
+                        # ≈ln(V)**（模型没见过 → 均匀猜测）。实测（本机
+                        # smoke，9500 步）：22% 的步是首见（nll 13-17），
+                        # 一个 nll=17 的 token 对 500 步均值贡献 +0.034，
+                        # 22 个就抬 e^0.75 ≈ 2.1×——PPL 的 10× 摆动主要
+                        # 来自这里（「没见过」≠「退化」）。分离后：
+                        #   seen_PPL   = 真实学习曲线（应单调下降）
+                        #   novel_PPL  ≈ ln(V)（词表覆盖度的度量）
+                        _nov = float(d.get("novelty", 0.0) or 0.0)
+                        if _nov > 0.5:
+                            _nll_novel.append(d["nll"])
+                        else:
+                            _nll_seen.append(d["nll"])
+                        if len(_nll_seen) > 20000:
+                            _nll_seen.pop(0)
+                        if len(_nll_novel) > 20000:
+                            _nll_novel.pop(0)
                     else:
                         prompt_masked += 1
                 else:
@@ -1551,6 +1574,21 @@ def main() -> None:
                     _qtxt = (f"  nll[min/med/max] "
                              f"{np.exp(_q[0]):.0f}/{np.exp(_q[1]):.0f}/{np.exp(_q[2]):.0f}"
                              if _q is not None else "")
+                    # P206：首见/已见分离 PPL——seen 是真实学习曲线（应单调
+                    # 下降）；novel ≈ ln(V)（词表覆盖度）。摆动诊断看这两个，
+                    # 不看混合的 sliding PPL。
+                    _split = ""
+                    if _nll_seen:
+                        _s_ppl = float(np.exp(np.mean(_nll_seen[-2000:])))
+                        if _nll_novel:
+                            _n_ppl = float(np.exp(np.mean(_nll_novel[-2000:])))
+                            _nov_frac = (len(_nll_novel)
+                                         / max(1, len(_nll_seen) + len(_nll_novel)))
+                            _split = (f"  seen_PPL {_s_ppl:>8.1f}"
+                                      f"  novel_PPL {_n_ppl:>8.1f}"
+                                      f" ({_nov_frac:.0%} novel)")
+                        else:
+                            _split = f"  seen_PPL {_s_ppl:>8.1f}"
                     spent = time.perf_counter() - t_start
                     ms = spent / max(1, i - done) * 1000
                     # P20：读出分项（后端 + 设备 + 占比）——直接看出加速是否生效、
@@ -1562,7 +1600,7 @@ def main() -> None:
                     _probe_txt = (f"  probe_PPL {_probe_ppl:>10.4f}"
                                   if _probe_ppl is not None else "")
                     print(f"  token {i:>12,}  sliding PPL {ppl:>9.3f}{_probe_txt}"
-                          f"{_qtxt}"
+                          f"{_qtxt}{_split}"
                           f"  {ms:>8.2f} ms/tok"
                           f"  elapsed {spent / 60:.1f} min"
                           f"  | readout {_ro_ms / _ro_n:>7.3f} ms/tok"

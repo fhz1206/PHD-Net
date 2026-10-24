@@ -105,7 +105,7 @@ PASS: 23/23 项通过
 
 [stderr]
 <string>:148: RuntimeWarning: eta_oja=0.05 > 0：上行识别权重 Oja 学习在生产规模会正反馈发散（P198 实测：3000 步 probe_PPL 9.1e11）。小规模/短跑的机制测试可忽略本警告；生产训练请保持 0。
-D:\AiModel\train\phdnet\backends\accel_readout.py:1154: RuntimeWarning: fp8 原生前向在设备 cpu:0 上失败（RuntimeError: addmv input tensors must have the same dtype, but got Half, Float8_e4m3fn, and H）→ 永久转 fp8 位模式存储 + fp16 计算（P189 语义保持，训练不中断）
+D:\AiModel\train\phdnet\backends\accel_readout.py:1161: RuntimeWarning: fp8 原生前向在设备 cpu:0 上失败（RuntimeError: addmv input tensors must have the same dtype, but got Half, Float8_e4m3fn, and H）→ 永久转 fp8 位模式存储 + fp16 计算（P189 语义保持，训练不中断）
   warnings.warn(
-D:\AiModel\train\phdnet\backends\accel_readout.py:640: RuntimeWarning: [precision] 读出权重 fp16/bf16 请求 → 运行时提升为 fp32（迭代全 fp32，fhz 2026-10-06 决策；P110：fp16 写回丢失 73% 非目标行更新。检查点存储仍为 fp16）
+D:\AiModel\train\phdnet\backends\accel_readout.py:647: RuntimeWarning: [precision] 读出权重 fp16/bf16 请求 → 运行时提升为 fp32（迭代全 fp32，fhz 2026-10-06 决策；P110：fp16 写回丢失 73% 非目标行更新。检查点存储仍为 fp16）
   _w187.warn(
