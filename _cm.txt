@@ -1,33 +1,10 @@
-P206: PPL 摆动根因定位（非退化）+ 首见/已见分离 PPL
+P207: 性能文档更新（P202-P206 三轮优化的实录章节 + 重测数据）
 
-## 结论：PPL「大幅上升」不是 bug，是 sliding PPL 的统计形态
-三层实证（本机 smoke，9500 步，cc_traces 单域语料）：
-1. 单域语料下摆动依旧（104 → 1413 → 22.7），排除「域切换」单一成因
-2. **固定探针 PPL 平稳**（346~1172，无 10× 摆动）→ 模型没退化
-3. nll>10 的 token 分析：**22.1% 的步是「首见 token」**（训练流出现 0 次），
-   nll 13-17（≈模型对没见过的词均匀猜测）——一个 nll=17 对 500 步几何
-   平均贡献 +0.034，22 个就抬 e^0.75 ≈ 2.1×
-
-机制：逐 token 流式学习 + 长尾词表 → 每篇文档的新 token 首见时 nll 极高，
-几何平均把「学得极好的 78%（median 78→1）」和「没见过的 22%」混在一起。
-**判据**：真退化 = median 与 max 同步抬升且不回落；首见效应 = min/med 低、
-max 高、seen_PPL 单调下降。
-
-## 修复（不是改模型，是改观测）
-1. model.py：step 返回值加 `novelty`（P197 已算，此前没透出）
-2. train.py：训练循环按 novelty 分离统计 seen/novel nll（各留 2 万条环形
-   缓冲），progress 行新增：
-     seen_PPL 8905  novel_PPL 18565 (62% novel)
-   seen_PPL = 真实学习曲线（应单调下降）；novel_PPL ≈ ln(V)（词表覆盖度）
-3. 探针契约修正（P206 脚本）：探针必须传 target_idx（词表索引）而非只有
-   target onehot——onehot 维度是 n_input 拼接域，argmax 恒指向活跃位 →
-   探针 nll 恒 1.0（假读数）
-
-## replay 拉锯假设已排除
-replay_every 4 vs 16 的摆动倍数几乎相同（11.2× vs 11.6×），探针末值
-643 vs 936（replay 少反而略差 → P197 锚定有效）。摆动与 replay 无关。
-
-## 验证
-- run_tests.py 9/9；run_gates.py 49/49
-- gate_insession_learning 17/17（novelty 返回值不破坏 P197 契约）
-- 本机 smoke 实测输出：seen_PPL 8988 / novel_PPL 18807 / 63% novel
+- docs/PHD-Net_性能评估与迭代方案.md 新增 §6.5：
+  P202（M2/PC 融合核 1.34× + replay CLI）/ P205（M4b imprint 1.60× +
+  两个踩坑记录）/ P204（多卡列并行 + 默认值 16）/ P205a（NPU 流水线 +
+  CANN 接线）/ P206（PPL 摆动根因：非退化，首见 token 几何平均杠杆）
+- P207 重测（本机 x86，负载高于 P202 时段）：融合核 5.334ms（同量级）、
+  imprint 3.490ms（复现）、replay 4/16 端到端 15.66/14.04（比值 −10.3%
+  复现，同方向）
+- 全部数字标注平台纪律（本机=回归对照，服务器须复测）

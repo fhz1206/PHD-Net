@@ -698,6 +698,70 @@ fp8 影子只做前向。本机 A/B：fp8 无 master PPL 2.84 → 有 master 2.1
 **bigram 合法率 78%**（对比旧配置 5–13%），distinct 76.5%。
 **PPL 从 3403 → 389（约 11×）**——读出头真的学会了语言的局部统计。
 
+### 6.5 P202–P206：M2/PC、M4b、replay 的三轮优化实录（2026-10-17~24）
+
+> 三轮优化的**完整方法论与踩坑记录**在各自文档：M2/PC 并行瓶颈 →
+> `docs/PHD-Net_P201_M2-PC并行瓶颈诊断.md`（551 行）；本轮只记数字与结论。
+
+#### P202：M2/PC learn 融合核（homeostasis 变体）+ replay/观测
+
+| 项 | 优化前 | 优化后 | 依据 |
+|---|---|---|---|
+| PC_learn 路径 | 12 次独立核调用（`homeostasis=True` 旁路融合核） | **1 次** `_pc_learn_fused_homeo` | 本机 A/B **1.34×**；逐位对拍 4/4 |
+| `_csr_clip` | 无 prange（learn 里唯一串行 O(nnz)） | parallel+nogil | 逐位不变 |
+| M6_replay 计时段 | **不存在**（segments 缺 12.6ms/tok 查无源头） | 显式段 + `other` 余额段 | segments 与 step 总时长自洽 |
+| `--replay-every` | 固定 4 | **CLI 可调**（默认 16，见 P204） | 本机端到端 11.00 → 8.27 ms/tok（−25%） |
+
+#### P205：M4b imprint 批量化
+
+| 项 | 优化前 | 优化后 | 依据 |
+|---|---|---|---|
+| `_decay_read` 调用 | 768 次/步（每次一帧 + 2 次 dict.get） | 批量入口 `_decay_read_arr`（3 次数组调用） | 本机交叉 A/B **1.17×**（第一轮） |
+| dict 属性链 | `self.t_pre.get` 全循环 | 局部绑定 | **1.60× 累计**（5.392 → 3.365 ms） |
+
+⚠ 两个踩坑记录（详见 sparse_table.py 注释）：① cap 收紧会炸 scatter（核内
+生长到 m_out）；② 内联展开会**静默破坏** `gate_ltm_trace_semantics` 的突变
+测试（patch 注入点必须保留在 `_decay_read`）。
+
+#### P204：多卡列并行（读出 V 维切分）+ 默认值
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| `--accel-devices N` | 1（默认） | N>1 时读出按词表行切 N 卡（ShardedAccelReadout） |
+| 等价判据 | **fp32 容差 1e-6**（max\|d\|=1.49e-08） | **非逐位**——分片 rank-1 的 kernel 分块与整张不同 |
+| 预期上限 | 1/(1−0.196+0.196/N)（N=4 → 1.15×） | 读出占端到端 ~20%，非瓶颈时收益趋零 |
+| `replay_every` 默认 | **4 → 16** | 服务器实测 M6_replay 5.6→1.4 ms/tok |
+| `--numba-threads` 默认 | **8 → 16** | fhz 指示；本机 x86 实测 16/32 是 fork/join 负收益区，**服务器须 A/B** |
+
+#### P205a：NPU 流水线（nll 独立流 + p2 双流）+ CANN 接线
+
+| 项 | 内容 | 收益定位 |
+|---|---|---|
+| `_nll_stream` | nll `.item()` 的等待流独立——CPU 只等 nll 链不等全流 | 每 N 步省一次全流排空 |
+| `_h2d_stream`（p2） | H2D 提交独立流，与上一步 kernel 并行 | H2D ~µs 级，收益小但零风险 |
+| `wire_dispatch()` | `set_compile_mode(jit_compile=False)` —— 解除「TASK_QUEUE_ENABLE 仅二进制场景生效」的静默失效（P120 以来未接线） | 服务器 A/B：`--cann-dispatch` |
+| 层 3 跨步 pipeline | **不做**（P117 裁决：改变 nll→task_gate→主干学习率时序） | — |
+
+#### P206：PPL「大幅上升」根因定位（**非退化**）
+
+三层实证（单域语料 9500 步）：① 摆动在无域切换时依旧（104→1413→22.7）；
+② **固定探针 PPL 平稳**（346~1172）→ 模型没退化；③ **22.1% 的步是首见
+token**（训练流出现 0 次，nll 13-17 ≈ 均匀猜测）——几何平均的杠杆：
+22 个 nll=17 就把 500 步 PPL 抬 2.1×。
+
+**修复**（观测层）：progress 行新增 `seen_PPL`（真实学习曲线，应单调降）/
+`novel_PPL`（≈ln(V)，词表覆盖度）/ novel 占比——step 返回值透出 `novelty`。
+**replay 拉锯假设已排除**（replay_every 4/16 摆动 11.2×/11.6×，探针末值
+643/936——replay 少反而略差，P197 锚定有效）。
+
+#### P207 重测（2026-10-24，本机 x86，负载高于 P202 时段——看比值不看绝对值）
+
+| 项 | P202/P205 记录 | P207 重测 | 结论 |
+|---|---|---|---|
+| `_pc_learn_fused_homeo` | 3.668 ms | 5.334 ms | 同量级（负载漂移）；融合核语义未回归 |
+| M4b imprint | 3.365-4.606 ms | 3.490 ms | **复现** |
+| replay 4 vs 16 端到端 | 11.00 / 8.27 | 15.66 / 14.04 | **比值复现**（−10.3%，同方向） |
+
 ---
 
 ## 六点五、CPU 侧优化实录（P178–P183，2026-10-06）

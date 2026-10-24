@@ -1,0 +1,22 @@
+# P207 性能重测（P202-P206 优化后，本机 x86 8 核，Python 3.14）
+# 时间：2026-10-24 13:42
+# ⚠ 平台纪律：本机数字只用于回归对照，服务器（昇腾）必须复测
+
+## ① M2/PC learn 融合核（homeostasis=True 生产路径）
+  _pc_learn_fused_homeo: 5.334 ms/call（P202 记录 3.668）
+
+## ② M4b imprint（4096 行稳态）
+  imprint(): 3.490 ms（P205 记录 3.365-4.606，负载相关）
+  rows=4095 grown=294840
+
+## ③④ 端到端（smoke 2000 token，cc_traces，--lang en）
+  replay_every= 4: 15.66 ms/tok
+      segments(top5): 
+  replay_every=16: 14.04 ms/tok
+      segments(top5): 
+
+# 服务器复测清单（昇腾，须另跑）
+#  --numba-threads 8/16/32 A/B（P201 建议 3）
+#  --nll-sync-every 1 vs 8（P201 建议 6）
+#  --beta p2 --cann-dispatch（P205a）
+#  多卡 --accel-devices N（P204，需 ≥2 NPU）
