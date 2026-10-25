@@ -1,10 +1,28 @@
-P207: 性能文档更新（P202-P206 三轮优化的实录章节 + 重测数据）
+P208: 远程语料读批的网络超时自动重试（长跑防崩）
 
-- docs/PHD-Net_性能评估与迭代方案.md 新增 §6.5：
-  P202（M2/PC 融合核 1.34× + replay CLI）/ P205（M4b imprint 1.60× +
-  两个踩坑记录）/ P204（多卡列并行 + 默认值 16）/ P205a（NPU 流水线 +
-  CANN 接线）/ P206（PPL 摆动根因：非退化，首见 token 几何平均杠杆）
-- P207 重测（本机 x86，负载高于 P202 时段）：融合核 5.334ms（同量级）、
-  imprint 3.490ms（复现）、replay 4/16 端到端 15.66/14.04（比值 −10.3%
-  复现，同方向）
-- 全部数字标注平台纪律（本机=回归对照，服务器须复测）
+## 事故（服务器 train_1b_1b_pretrain_20261025-083154.log）
+训练 5000 token 完成（METRIC 已打）后，**下一段语料读取时**崩：
+  fsspec FSTimeoutError @ aiohttp SocketTimeoutError
+  ← pf.iter_batches 中途的 HTTP Range 读 socket 超时
+
+## 根因
+`open_parquet_source` 的重试只覆盖**打开**阶段（审计 C1）；长跑中
+iter_batches 中途的网络抖动**没有重试** → 一次 socket 超时 = 训练崩 =
+5000 token 白跑（且无 --resume 时状态全丢）。
+
+## 修复（phdnet/corpus.py::_iter_one）
+parquet 分支加**批级重试**：
+- 崩溃后重建 ParquetFile，按 `rows_seen` 计数**跳过已成功 yield 的批次**
+- parquet 批边界由 row group 决定、同一文件同一 batch_size 重建后顺序
+  确定 → 跳过的行与已 yield 的行一一对应，**不重不漏，逐位等价**
+- 最多 5 次，指数退避 2/4/8/16/32s；本地路径不受影响（is_remote 判据）
+- 每次重试打一行日志（可见性：跳过行数 + 退避秒数）
+
+## 验证
+- 本地 parquet 冒烟（_iter_one 前 5 条 OK，非远程路径零变更）
+- gate_cc_traces 23/23；gate_ms_stream 44/44；run_tests.py 9/9
+
+## 顺带发现（不改，记录）
+服务器日志同时暴露：--numba-threads 32 被 numba 拒绝（「must be between
+1 and 16」——服务器 numba 上限 16，不是本机的 32）；A/B 的 8/32 两臂
+实际跑的是 8/16。32 线程的结论本机 x86 数据（负收益）仍成立。

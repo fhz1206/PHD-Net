@@ -107,14 +107,58 @@ def expand_paths(path: str | Path | list) -> list[Path]:
 def _iter_one(p, column: str, batch_size: int):
     suffix = p.suffix.lower()
     if suffix == ".parquet":
+        # P208：**批级重试**（远程流的网络抖动恢复）。
+        # `open_parquet_source` 的重试只覆盖**打开**阶段；长跑中
+        # `iter_batches` 中途的 HTTP Range 读会因 socket 超时炸掉
+        # （服务器实测：fsspec FSTimeoutError @ aiohttp SocketTimeoutError，
+        # train_1b_1b_pretrain_20261025-083154.log）→ 训练直接崩，
+        # 5000 token 白跑。重试策略：重建 ParquetFile、**跳过已成功
+        # yield 的批次**（rows_seen 计数）——parquet 的批边界由 row group
+        # 决定、重建后顺序确定 → 跳过的行与已 yield 的行一一对应，
+        # **不重不漏，逐位等价**（同一文件同一 batch_size）。
+        import time as _time
+        from phdnet.ms_stream import is_remote
+        max_batch_retries = 5
+        rows_seen = 0
+        attempt = 0
         pf = open_parquet_source(p)
-        cols = [c for c in (column,) if c in pf.schema_arrow.names] or None
-        for batch in pf.iter_batches(batch_size=batch_size, columns=cols):
-            col = batch.column(column if cols else 0)
-            for i in range(batch.num_rows):
-                v = col[i].as_py()
-                if v:
-                    yield v
+        while True:
+            try:
+                cols = [c for c in (column,) if c in pf.schema_arrow.names] or None
+                skipped = 0
+                for batch in pf.iter_batches(batch_size=batch_size, columns=cols):
+                    if skipped + batch.num_rows <= rows_seen:
+                        skipped += batch.num_rows          # 已 yield 过 → 跳过
+                        continue
+                    if skipped < rows_seen:
+                        # 部分重叠（理论上不会发生，防御性处理）
+                        skip_in_batch = rows_seen - skipped
+                        col = batch.column(column if cols else 0)
+                        for i in range(skip_in_batch, batch.num_rows):
+                            v = col[i].as_py()
+                            if v:
+                                yield v
+                        skipped += batch.num_rows
+                        rows_seen += batch.num_rows - skip_in_batch
+                        continue
+                    col = batch.column(column if cols else 0)
+                    for i in range(batch.num_rows):
+                        v = col[i].as_py()
+                        if v:
+                            yield v
+                    skipped += batch.num_rows
+                    rows_seen += batch.num_rows
+                break                                        # 正常读完
+            except Exception as e:                           # noqa: BLE001
+                if not is_remote(p) or attempt + 1 >= max_batch_retries:
+                    raise
+                attempt += 1
+                _back = 2.0 ** attempt
+                print(f"[corpus] 读批网络超时（{type(e).__name__}），"
+                      f"重试 {attempt}/{max_batch_retries}（跳过前 {rows_seen} 行，"
+                      f"退避 {_back:.0f}s）: {p}", flush=True)
+                _time.sleep(_back)
+                pf = open_parquet_source(p)                  # 重建流再续读
     elif suffix in (".jsonl", ".json"):
         # P196：远程 .jsonl 直读（ms:// 经 HTTP Range 流式，零落盘）。
         # 用途：Claude Code traces（choucisan/mimo-claude-code-traces-1k，
