@@ -1,28 +1,27 @@
-P208: 远程语料读批的网络超时自动重试（长跑防崩）
+P209: novelty 表扩容 2²⁰ + LRU 批量过期（修 M5_novelty 9ms/tok 飙升）
 
-## 事故（服务器 train_1b_1b_pretrain_20261025-083154.log）
-训练 5000 token 完成（METRIC 已打）后，**下一段语料读取时**崩：
-  fsspec FSTimeoutError @ aiohttp SocketTimeoutError
-  ← pf.iter_batches 中途的 HTTP Range 读 socket 超时
+## 服务器 125K-token 实测暴露（train_1b_1b_pretrain_20261025-160415.log）
+- M5_novelty 段从早期 ~0 涨到 **9.04 ms/tok（占 step 45%）**
+- 根因：cap=65536 表满后，长尾语料的 novel 占比**稳定在 50%**（不随
+  训练后期衰减）→ 每个新模式触发一次 O(cap) 的 min() 全表扫描
+- P197 注释「训练后期新模式稀疏」的假设被实测推翻
 
-## 根因
-`open_parquet_source` 的重试只覆盖**打开**阶段（审计 C1）；长跑中
-iter_batches 中途的网络抖动**没有重试** → 一次 socket 超时 = 训练崩 =
-5000 token 白跑（且无 --resume 时状态全丢）。
-
-## 修复（phdnet/corpus.py::_iter_one）
-parquet 分支加**批级重试**：
-- 崩溃后重建 ParquetFile，按 `rows_seen` 计数**跳过已成功 yield 的批次**
-- parquet 批边界由 row group 决定、同一文件同一 batch_size 重建后顺序
-  确定 → 跳过的行与已 yield 的行一一对应，**不重不漏，逐位等价**
-- 最多 5 次，指数退避 2/4/8/16/32s；本地路径不受影响（is_remote 判据）
-- 每次重试打一行日志（可见性：跳过行数 + 退避秒数）
+## 修复（phdnet/config.py + model.py）
+1. `sdr_novelty_cap`: **65536 → 1,048,576（2²⁰）**——fhz 问「能否无上限」，
+   量化后折中：novelty 表进 ckpt（16 B/条）+ RAM（~100 B/条），1M 模式 =
+   ckpt +16 MB / RAM +100 MB（1B 档 900 MB 的 1.8%，可忽略）；2²⁰ 覆盖
+   ~200 万 token 无淘汰（当前长跑量 16×），扫描频率降至几乎不触发
+2. LRU 淘汰按 cap 规模分派：
+   - 大表（≥2¹⁶）：**批量过期**——淘汰 stamp 落在最旧 1/8 时间窗的键
+     （一次扫描删一批，O(cap) 扫描摊薄 ~cap/8 倍），删不够再 min() 裁到 cap
+   - 小表（<2¹⁶，门禁/测试用）：**逐次 min()**（原语义精确 LRU；
+     批量过期在 stamp 全新时会删过头——实测 table=2/4 抓到）
+3. cap ≤ 0 = 无上限（保留语义，文档化，默认不用）
 
 ## 验证
-- 本地 parquet 冒烟（_iter_one 前 5 条 OK，非远程路径零变更）
-- gate_cc_traces 23/23；gate_ms_stream 44/44；run_tests.py 9/9
+- gate_insession_learning 17/17（A3 小表逐次 min() 语义保持）
+- run_tests.py 9/9；run_gates.py 49/49
 
-## 顺带发现（不改，记录）
-服务器日志同时暴露：--numba-threads 32 被 numba 拒绝（「must be between
-1 and 16」——服务器 numba 上限 16，不是本机的 32）；A/B 的 8/32 两臂
-实际跑的是 8/16。32 线程的结论本机 x86 数据（负收益）仍成立。
+## 服务器预期
+M5_novelty 从 9.04 → ~0.1-0.3 ms/tok（2²⁰ 内不触发淘汰），
+step 12.3 → ~10.3 ms/tok（−16%）。2²⁰ 满后批量过期把扫描摊薄 8192×。

@@ -2,246 +2,246 @@
   {
     "gate": "gate_accel_readout.py",
     "exit_code": 0,
-    "seconds": 7.6
+    "seconds": 5.0
   },
   {
     "gate": "gate_accel_readout_p55.py",
     "exit_code": 0,
-    "seconds": 44.2
+    "seconds": 33.4
   },
   {
     "gate": "gate_accel_sparse_readout.py",
     "exit_code": 0,
-    "seconds": 9.4
+    "seconds": 8.1
   },
   {
     "gate": "gate_cann_dispatch.py",
     "exit_code": 0,
-    "seconds": 4.7
+    "seconds": 3.9
   },
   {
     "gate": "gate_cann_env.py",
     "exit_code": 0,
-    "seconds": 24.1
+    "seconds": 19.7
   },
   {
     "gate": "gate_cann_probe.py",
     "exit_code": 0,
-    "seconds": 3.7
+    "seconds": 2.7
   },
   {
     "gate": "gate_cc_traces.py",
     "exit_code": 0,
-    "seconds": 10.4
+    "seconds": 7.9
   },
   {
     "gate": "gate_checkpoint_roundtrip.py",
     "exit_code": 0,
-    "seconds": 12.1
+    "seconds": 11.2
   },
   {
     "gate": "gate_cli_help_percent.py",
     "exit_code": 0,
-    "seconds": 0.6
+    "seconds": 0.7
   },
   {
     "gate": "gate_cli_i18n.py",
     "exit_code": 0,
-    "seconds": 1.5
+    "seconds": 1.4
   },
   {
     "gate": "gate_cli_lang_semantics.py",
     "exit_code": 0,
-    "seconds": 17.4
+    "seconds": 12.0
   },
   {
     "gate": "gate_cpu_npu_overlap_contract.py",
     "exit_code": 0,
-    "seconds": 4.4
+    "seconds": 3.6
   },
   {
     "gate": "gate_csr_vectorization_perf.py",
     "exit_code": 0,
-    "seconds": 5.9
+    "seconds": 5.3
   },
   {
     "gate": "gate_cython_kernels.py",
     "exit_code": 0,
-    "seconds": 2.7
+    "seconds": 2.3
   },
   {
     "gate": "gate_cython_loader.py",
     "exit_code": 0,
-    "seconds": 14.0
+    "seconds": 12.1
   },
   {
     "gate": "gate_cython_switch.py",
     "exit_code": 0,
-    "seconds": 5.1
+    "seconds": 4.1
   },
   {
     "gate": "gate_device_npu_probe.py",
     "exit_code": 0,
-    "seconds": 5.7
+    "seconds": 3.5
   },
   {
     "gate": "gate_encoder_gemv.py",
     "exit_code": 0,
-    "seconds": 2.2
+    "seconds": 1.4
   },
   {
     "gate": "gate_eval_readonly.py",
     "exit_code": 0,
-    "seconds": 7.4
+    "seconds": 6.2
   },
   {
     "gate": "gate_generate_truncation.py",
     "exit_code": 0,
-    "seconds": 7.8
+    "seconds": 4.6
   },
   {
     "gate": "gate_insession_learning.py",
     "exit_code": 0,
-    "seconds": 7.3
+    "seconds": 4.4
   },
   {
     "gate": "gate_ltm_csr_equivalence.py",
     "exit_code": 0,
-    "seconds": 11.4
+    "seconds": 7.6
   },
   {
     "gate": "gate_ltm_kernels.py",
     "exit_code": 0,
-    "seconds": 2.2
+    "seconds": 1.6
   },
   {
     "gate": "gate_ltm_learn_batch.py",
     "exit_code": 0,
-    "seconds": 8.5
+    "seconds": 5.7
   },
   {
     "gate": "gate_ltm_reverse_index.py",
     "exit_code": 0,
-    "seconds": 8.7
+    "seconds": 5.3
   },
   {
     "gate": "gate_ltm_trace_semantics.py",
     "exit_code": 0,
-    "seconds": 3.1
+    "seconds": 1.8
   },
   {
     "gate": "gate_m2_infer_kernels.py",
     "exit_code": 0,
-    "seconds": 2.3
+    "seconds": 1.5
   },
   {
     "gate": "gate_m2_learn_fused.py",
     "exit_code": 0,
-    "seconds": 4.4
+    "seconds": 2.8
   },
   {
     "gate": "gate_ms_stream.py",
     "exit_code": 0,
-    "seconds": 81.7
+    "seconds": 49.0
   },
   {
     "gate": "gate_multi_device.py",
     "exit_code": 0,
-    "seconds": 6.6
+    "seconds": 3.7
   },
   {
     "gate": "gate_multi_device_sharded.py",
     "exit_code": 0,
-    "seconds": 5.8
+    "seconds": 3.7
   },
   {
     "gate": "gate_npu_pipeline.py",
     "exit_code": 0,
-    "seconds": 6.3
+    "seconds": 3.6
   },
   {
     "gate": "gate_p116_schedule.py",
     "exit_code": 0,
-    "seconds": 15.4
+    "seconds": 9.6
   },
   {
     "gate": "gate_parallel_consistency.py",
     "exit_code": 0,
-    "seconds": 6.8
+    "seconds": 4.4
   },
   {
     "gate": "gate_precision_policy.py",
     "exit_code": 0,
-    "seconds": 7.3
+    "seconds": 3.6
   },
   {
     "gate": "gate_process_reproducibility.py",
     "exit_code": 0,
-    "seconds": 15.0
+    "seconds": 8.6
   },
   {
     "gate": "gate_readout_device_probe.py",
     "exit_code": 0,
-    "seconds": 6.0
+    "seconds": 3.8
   },
   {
     "gate": "gate_readout_fused.py",
     "exit_code": 0,
-    "seconds": 16.0
+    "seconds": 10.6
   },
   {
     "gate": "gate_readout_int_dtypes.py",
     "exit_code": 0,
-    "seconds": 2.7
+    "seconds": 1.8
   },
   {
     "gate": "gate_readout_master_weight.py",
     "exit_code": 0,
-    "seconds": 6.1
+    "seconds": 4.0
   },
   {
     "gate": "gate_readout_powlaw.py",
     "exit_code": 0,
-    "seconds": 6.6
+    "seconds": 3.8
   },
   {
     "gate": "gate_readout_sparse.py",
     "exit_code": 0,
-    "seconds": 46.7
+    "seconds": 30.6
   },
   {
     "gate": "gate_readout_sparse_structure.py",
     "exit_code": 0,
-    "seconds": 1.9
+    "seconds": 1.7
   },
   {
     "gate": "gate_rl_loop.py",
     "exit_code": 0,
-    "seconds": 11.7
+    "seconds": 9.8
   },
   {
     "gate": "gate_stdp_parity.py",
     "exit_code": 0,
-    "seconds": 1.7
+    "seconds": 1.3
   },
   {
     "gate": "gate_stream_tokenize.py",
     "exit_code": 0,
-    "seconds": 2.0
+    "seconds": 1.5
   },
   {
     "gate": "gate_vocab_parallel.py",
     "exit_code": 0,
-    "seconds": 2.9
+    "seconds": 2.2
   },
   {
     "gate": "gate_wm_modulator.py",
     "exit_code": 0,
-    "seconds": 1.8
+    "seconds": 1.2
   },
   {
     "gate": "gate_word_segmenter_equivalence.py",
     "exit_code": 0,
-    "seconds": 7.6
+    "seconds": 6.8
   }
 ]

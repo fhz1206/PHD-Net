@@ -181,12 +181,27 @@ class PHDNet:
             self._seen_sdr[h] = t                 # LRU：刷新命中时间
             return 0.0
         self._nov_miss += 1
-        if len(self._seen_sdr) >= self._seen_cap:
-            # 淘汰最旧命中（LRU）。_seen_cap 默认 65536 → 这一步是
-            # O(cap) 扫描；仅在**装满后**每次新模式触发一次。
-            # ⚠ 不用 heapq：命中刷新要改堆（O(log n) 但常数更大），
-            #   而 65536 的 min() 扫描实测 ~1 ms，与新模式的出现频率
-            #   （训练早期密集、后期稀疏）相比可忽略。
+        # P209：`_seen_cap <= 0` = **无上限**——直接登记，无淘汰、无扫描。
+        if self._seen_cap <= 0 or len(self._seen_sdr) < self._seen_cap:
+            self._seen_sdr[h] = t
+            return 1.0
+        # 表满 → 淘汰。两种策略按 cap 规模分派：
+        #   · 大表（≥2¹⁶）：**批量过期**——淘汰「stamp 落在最旧 1/8 时间窗」
+        #     的键（一次扫描删一批，摊薄 O(cap) 扫描到 ~每 cap/8 次新模式
+        #     一次）。服务器 125K 实测：cap=65536 + 长尾语料 novel 占比
+        #     稳定 50% → 逐次 min() 扫描 = M5_novelty 9.04 ms/tok（45%）。
+        #   · 小表（<2¹⁶，门禁/测试用）：**逐次 min()**（原语义，精确 LRU；
+        #     表小扫描便宜，批量过期在 stamp 全新时会删过头）。
+        if self._seen_cap >= (1 << 16):
+            _cut = t - max(1, self._seen_cap // 8)
+            stale = [k for k, ts in self._seen_sdr.items() if ts < _cut]
+            for k in stale:
+                del self._seen_sdr[k]
+            # 批量过期可能删不够（stamp 全新）→ 裁到 cap
+            while len(self._seen_sdr) >= self._seen_cap:
+                oldest = min(self._seen_sdr, key=self._seen_sdr.get)
+                del self._seen_sdr[oldest]
+        else:
             oldest = min(self._seen_sdr, key=self._seen_sdr.get)
             del self._seen_sdr[oldest]
         self._seen_sdr[h] = t

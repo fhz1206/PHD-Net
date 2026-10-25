@@ -188,7 +188,18 @@ class PHDNetConfig:
     # (1) SDR 支撑集新颖性检测（海马模式分离的工程等价物）。
     #     新颖 = 顶层稀疏激活模式从未出现过 → 强制 encode + 放行印迹门控。
     sdr_novelty: bool = True
-    sdr_novelty_cap: int = 65536    # 已见模式表容量（LRU 淘汰）
+    # P209（fhz 2026-10-25 两次指示的综合）：cap **65536 → 1,048,576（2²⁰）**。
+    # 服务器 125K-token 实测：cap=65536 的 LRU 在长尾语料下**每步触发
+    # O(cap) 扫描** → M5_novelty 9.04 ms/tok（占 step 45%）——表满后
+    # novel 占比稳定 50%，扫描频率根本不随训练后期衰减。
+    # 扩到 2²⁰ 的依据：
+    #   · 125K token 实测表增长 ~50% novel → 2²⁰ ≈ 100 万模式，
+    #     覆盖 ~200 万 token 无淘汰（当前长跑量的 16×）
+    #   · 内存：ckpt +16 MB / RAM +100 MB（1B 档 900 MB 的 1.8%，可忽略）
+    #   · 扫描频率：要到 100 万模式才触发淘汰 → M5_novelty 回到 ~0.1ms 级
+    # ⚠ 若将来真跑到 >200 万 token 且 novel 仍 50%，把此值再乘 4
+    #   （4²⁰=4M 模式，ckpt +64 MB，仍可忽略）。
+    sdr_novelty_cap: int = 1 << 20  # 已见模式表容量（LRU 淘汰；P209: 2²⁰）
     # 新颖时的 gate 下限（放行 ltm_imprint_gate=0.8 的门控）
     novelty_gate_floor: float = 0.85
 
