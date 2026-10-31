@@ -36,31 +36,10 @@ except ImportError:                                     # pragma: no cover
     NUMBA_LTM = True
 
 
-@njit(cache=True, nogil=True, fastmath=False)
-def _encode_hash_uniq(dims, idx, k_hash, n_slots):
-    """激活维度 → k_hash 哈希索引去重（保持首次出现顺序，与 Python 版一致）。
-
-    dims : (D,) 激活维度下标（升序，来自 np.nonzero）
-    idx  : (n_dim, k_hash) 预计算的大空间索引表
-    返回 (out, n)：去重后的索引与个数（写入 out[:n]）。
-    """
-    out = np.empty(n_slots, dtype=np.int64)
-    n = 0
-    D = dims.shape[0]
-    for a in range(D):
-        j = dims[a]
-        for b in range(k_hash):
-            i = idx[j, b]
-            dup = False
-            for t in range(n):
-                if out[t] == i:
-                    dup = True
-                    break
-            if not dup:
-                out[n] = i
-                n += 1
-    return out, n
-
+# ⚠ P212：原此处有 `_encode_hash_uniq`（numba 化的哈希去重核）——
+#   P68 实测 **0.84× 负收益**已回滚到 Python `dict.fromkeys`
+#   （见 `phdnet/bigltm.py::SparseLTM.encode` 的逐项实测分解），
+#   该核遂成零引用的死代码 → 删除（顺带省一次 numba JIT 编译）。
 
 @njit(cache=True, nogil=True, fastmath=False)
 def _recall_project(big_ids, weights, out, rev_indptr, rev_indices):

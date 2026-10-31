@@ -172,14 +172,13 @@ class PHDNet:
                 n_out=n_out, n_layers=(cfg.n_mid, cfg.n_sdr),
                 seed=(cfg.seed + _fwd_seed) if _fwd_seed else cfg.seed,
                 gain=float(getattr(cfg, "forward_only_gain", 1.0)))
-        # P211 性能：固定随机投影目标的**按标签缓存**。
-        # 同一标签在同一 token 上可能反复出现（语料里 zipf 分布的头部词尤其
-        # 频繁），而 `hash_codes` 每步都要跑一遍 splitmix64 + tanh。
-        # 缓存把这一步降为「字典查找 + 一次 tanh」（tanh 也不能省——它是
-        # 值域映射的一部分，且 tanh 后的结果要参与后续递推）。
-        # ⚠ 缓存**不改变数值**：同一 (label, layer) 恒得同一码（投影是固定
-        #   的），缓存只是把「重算」换成「重取」。LRU 上限防止长跑内存增长。
-        self._fwd_cache: dict[tuple[int, int], np.ndarray] = {}
+        # ⚠ P212：原此处有一个 `self._fwd_cache` 字段 + 一整段描述「按标签
+        #   缓存固定随机投影目标」的注释 —— 但**该字段从未被读写**（全仓库
+        #   只有这一处出现），真正生效的缓存在
+        #   `phdnet/forward_only.py::ForwardTargetProjector._cache`
+        #   （由其 `project()` 使用）。那段注释描述的是一个**不存在于本类**
+        #   的实现，属误导性技术债 → 连字段带注释一并删除。
+        #   （缓存本身仍在 `forward_only.py` 里，见其 `_cache_size` 上限说明。）
 
         # P35：step 分段计时（诊断 CPU 侧耗时分布；默认关，零开销）
         self._prof_on = bool(getattr(cfg, "step_profiling", False))
@@ -759,13 +758,36 @@ class PHDNet:
                 # ⚠ 学习率乘以与 PC 相同的调制缩放 pc_scale（与发育窗口一致）。
                 # ⚠ P211：eta=0 时**完全跳过**——这正是「旧路径」（不注入层
                 #   目标）的等价形态，故旧的非 forward-only 分支已删去。
+                #
+                # ⚠⚠ **P212：强度同时接受 `learn_scale` 调制**（与读出同口径）。
+                #   起因：RL（`phdnet/rl.py`）把**策略梯度**灌进读出感知器，
+                #   用 `learn_scale = lr·advantage` 缩放**读出**学习率
+                #   （advantage>0 强化、<0 弱化、≈0 跳过）；
+                #   而 forward-only 此前只用 `pc_scale`（**固定强度**）→
+                #   在 RL 里它以**与奖励无关**的强度持续往主干注入
+                #   「标签→随机码」目标，advantage=0 的样本也在注入噪声
+                #   → 主干被无关信号持续扰动 → RL 策略学不动
+                #   （实测 `tests/gates/gate_rl_loop.py` D 组：奖励
+                #     0.375 → **0.308**（不升），而 forward-only 关闭时
+                #     0.375 → 0.425（升））。
+                #   → 现在 forward-only 与读出**同口径**接受 `learn_scale`：
+                #     ① 普通训练 `learn_scale=1.0` → **逐位不变**；
+                #     ② RL 的 advantage 直接调制层目标注入强度。
                 if (self._fwd_only and self._fwd_projector is not None
                         and target is not None and learn):
                     _lbl = (int(target_idx) if target_idx is not None
                             else int(np.argmax(target)))
                     _p = self._prof_t('FO_learn')
-                    _eta_fo = float(getattr(cfg, "forward_only_eta", 0.01)) * pc_scale
-                    if _eta_fo > 0.0:
+                    _eta_fo = (float(getattr(cfg, "forward_only_eta", 0.01))
+                               * pc_scale * float(learn_scale))
+                    # ⚠ P212：判据用 `!= 0.0` 而非 `> 0.0` —— RL 的
+                    #   `learn_scale = lr·advantage` **可以是负的**（advantage<0
+                    #   的样本应当**反向**更新：远离该动作的层目标）。
+                    #   用 `> 0.0` 会把负 advantage 的样本**整段跳过**
+                    #   （既不强化也不弱化）→ 丢掉一半的策略梯度信号。
+                    #   故此处只跳过「完全为零」的情形（RL 里 advantage≈0
+                    #   的样本本就不该产生更新）。
+                    if _eta_fo != 0.0:
                         # FP 内核：标签 → 固定随机投影目标（r1 空间）
                         # ⚠ P211：投影器内部按 (label, layer) 缓存 → 同一标签
                         #   反复出现时省掉 splitmix64 + tanh（语料 zipf 头部

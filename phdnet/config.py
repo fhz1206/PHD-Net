@@ -222,8 +222,10 @@ class PHDNetConfig:
     #     读出——缓解「表征漂移 × 恒定读出率」的灾难性遗忘。
     plateau_sleep: bool = True
     readout_replay: bool = True
-    readout_master_weight: bool = False   # True = fp32 主权重 + 低精度影子（P195）
-    readout_shadow_refresh: int = 8       # 影子重量化间隔（步；DeepSeek refresh）
+    # ⚠ P212：原此处**重复定义**了 `readout_master_weight` / `readout_shadow_refresh`
+    #   （已在上面的「P194 四件套 · 读出精度」一节定义，值相同）——
+    #   dataclass 里后定义者覆盖先定义者，虽无数值影响，但属明确的重复定义债务，
+    #   且会让「改哪一处生效」变得含糊 → 删除此处重复项，只保留上面那一份。
 
     # ───────────────────────────────────────────────────────────────────────
     # 路线图第二轮全量优化（2026-09-19，M9）：补齐剩余轨道
@@ -431,8 +433,13 @@ class PHDNetConfig:
     #   → 判定只能靠**PPL**（P146：训练流 PPL 波动 ±20% 不可用，
     #     必须用新加的 `--probe-every` 固定探针集做 A/B）。
     #   → `tools/probe/probe_readout_precision.py` 可复核这条反证。
-    # fp8 的算子可用性由 `phdnet/backends/fp8_capability.py` **运行时探测**
-    #   （原生 fp8 / 只有 int8→自动转 / 都无→报错），不再硬编码禁用（P86 解除）。
+    # fp8 的算子可用性由 `phdnet/backends/accel_readout.py` 内的**运行时探测**
+    #   （`_probe` + 降级链 `resolve_precision_cached`：原生 fp8 / 只有
+    #   int8→自动转 / 都无→报错），不再硬编码禁用（P86 解除）。
+    #   ⚠ P212：原注释指向 `phdnet/backends/fp8_capability.py` —— 该模块
+    #   **零 import**（从未被调用），且其能力探测逻辑已被上面的降级链取代
+    #   → 已删除。P147 指令的「转化效率」需求改由
+    #   `fp8_int8_convert.py::fp8_to_int8_codes(report=...)` 兑现。
     #   P194：readout_dtype 定义已上移到「P194 四件套」一节（:174，默认 fp32），
     #   fp8 仍可显式指定（--readout-dtype fp8）。
     # M1 稀疏编码器权重的**存储** dtype。

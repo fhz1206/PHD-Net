@@ -6,19 +6,19 @@ Python + numba + Cython（可选）+ PyTorch/昇腾 NPU（读出加速）。
 
 **唯一生产训练入口是 `train/train.py`。**
 
-适用范围：仓库根入口文档。数据截止 **2026-10-31（P211）**。
+适用范围：仓库根入口文档。数据截止 **2026-10-31（P212）**。
 文档分工见 `docs/文档写作规范.md`；详细性能数字与迭代历史见
 `docs/PHD-Net_性能评估与迭代方案.md`（性能唯一出处）。
 
 ---
 
-## 1. 当前状态（P211，2026-10-31）
+## 1. 当前状态（P212，2026-10-31）
 
 | 项 | 状态 |
 |---|---|
 | fast 回归 | `python tests/run_tests.py fast` = **9/9**（零回归门槛） |
-| 专项门禁 | `tests/gates/gate_*.py` = **51 个，当前全绿**（数量用 `ls tests/gates/gate_*.py` 现查，别写死） |
-| 生产默认 | 读出 fp32（P194）/ `eta_oja=0`（P198）/ SDR 新颖性印迹开（P197）/ `--step-profiling` 默认开（P198）/ `--lang en`（P199 消息目录）/ **前向only 路径开**（P211）/ 稀疏读出 `conn_k=128`（P108）/ 在线 CSR 大空间表（P50） |
+| 专项门禁 | `tests/gates/gate_*.py` = **52 个**，**49 通过 / 3 个失败**（`gate_cli_lang_semantics` / `gate_encoder_gemv` / `gate_ltm_reverse_index` —— 经 `git stash` 对拍确认为**改动前既有**的环境路径问题）；数量用 `ls tests/gates/gate_*.py` 现查，别写死 |
+| 生产默认 | 读出 fp32（P194）/ `eta_oja=0`（P198）/ SDR 新颖性印迹开（P197）/ `--step-profiling` 默认开（P198）/ `--lang en`（P199 消息目录）/ **前向only 路径开**（P211）/ 稀疏读出 `conn_k=128`（P108）/ 在线 CSR 大空间表（P50）/ **M2 推理核按平台自动择优**（P212：x86→fused、昇腾→plain） |
 | 已知红线 | `eta_oja>0` 生产规模正反馈发散（已默认 0 + RuntimeWarning）；1B 档大词表 × 少 token 曝光不足（见 §9） |
 
 近期迭代主线（均已在本仓库实测验证）：
@@ -325,6 +325,7 @@ python train/train.py --preset 1b --data pretrain --report
 | 加新机制 / 扩硬件后端 | `docs/PHD-Net_扩展指南.md`、`docs/PHD-Net_硬件后端适配报告.md` |
 | 了解 forward-only（无反向传播）训练路径 | `docs/PHD-Net_前向only训练路径.md`（FF/FP/FTP/NoProp/Sigprop 调研 + P210/P211 实现 + A/B） |
 | 查 CPU 侧提速的实测与边界 | `docs/PHD-Net_CPU性能优化实录_P211.md`（P211：int32 索引 / 融合核 / LTM 内联 / 计时口径 + **访存下界的诚实边界**） |
+| 查技术债清理与默认值的变更 | `docs/PHD-Net_技术债清理与性能默认优化_P212.md`（P212：2 个真 bug / **RL 场景 forward-only 与策略梯度不对齐的根因** / 死代码清单 / fp8 查表 3.06× / M2 核按平台择优） |
 | 与 Transformer / 大脑对比 | `docs/PHD-Net_竞争力与脑同构性评估.md` |
 | 查一个 bug 的症状→根因→门禁缺口 | `BUGS.md`（53 条） |
 | 制备语料 / 数据集入口 | `tools/README.md`、`datasets/README.md` |

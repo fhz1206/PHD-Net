@@ -831,7 +831,22 @@ class AccelReadout:
         _conv = str(getattr(self, "_fp8_conv", "torch"))
         if _conv == "rust":
             _conv = "torch"
-        _codes, _sc = fp8_to_int8_codes(_host, conv=_conv)
+        # ⚠ P212：兑现 P147 指令「记得提供转化效率，转化放在 cpu 上」——
+        #   报告本次 fp8 → int8 转换的耗时/吞吐/相对纯拷贝的倍数。
+        _conv_report: dict = {}
+        _codes, _sc = fp8_to_int8_codes(_host, conv=_conv, report=_conv_report)
+        if _conv_report:
+            self._fp8_conv_report = dict(_conv_report)
+            import warnings as _w
+            _w.warn(
+                f"[fp8→int8] 转化效率：{_conv_report.get('ms', 0):.2f} ms "
+                f"（{_conv_report.get('MiB_in', 0):.1f} MiB → "
+                f"{_conv_report.get('MiB_out', 0):.1f} MiB，"
+                f"{_conv_report.get('MiB_per_s', 0):.1f} MiB/s，"
+                f"路径={_conv_report.get('conv', '?')}，"
+                f"相对 fp32 纯拷贝 {_conv_report.get('ratio_vs_fp32_copy', 0):.2f}×）"
+                f"——转换在 **CPU** 上做，不占 NPU 算力。",
+                RuntimeWarning, stacklevel=2)
         self._last_int8_scales = (_sc, 1.0)
         return torch.from_numpy(_codes).to(self.device).reshape(
             w_fp8.shape)
@@ -2457,11 +2472,16 @@ def _unsupported_reason(cfg) -> str | None:
     #   (ERR01007)」→ 一度硬编码禁用。但**驱动/算子库会升级**，「这台机器不
     #   支持」≠「昇腾都不支持」，硬编码会在支持 fp8 的机器上白白浪费2 倍
     #   存储与带宽。
-    #   → 改为**运行时探测**（`phdnet/backends/fp8_capability.py`）：
+    #   → 改为**运行时探测**（本文件 `AccelReadout.__init__` 内的 `_probe`
+    #     + 降级链 `resolve_precision_cached`）：
     #     原生 fp8 → 直接用（**不告警**）；只有 int8 → **告警 + 自动转 int8**
     #     （转换在 CPU，效率已实测并记录）；两者都无 → **报错**并给可选方案。
     #   ⚠ 探测**不在这里**做（那是运行期的事，见 `AccelReadout.__init__`），
     #     能力表只负责「不能静态判定」的配置。
+    #   ⚠ P212：原注释指向 `phdnet/backends/fp8_capability.py` —— 该模块
+    #     **零 import**（从未被调用）、其能力探测逻辑已被上述降级链取代
+    #     → 已删除；P147 指令的「转化效率」需求改由
+    #     `fp8_int8_convert.py::fp8_to_int8_codes(report=...)` 兑现。
     _rd = str(getattr(cfg, "readout_dtype", "fp32"))
     # P191e（fhz 2026-10-07「int4/fp4 计算代码整体删除」）：加速臂与 numba
     #   侧的 4-bit 核都已删除（P152 定案），显式请求在此拦截并如实告知。

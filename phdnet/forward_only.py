@@ -73,7 +73,7 @@ from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["ForwardTargetProjector", "hash_codes", "forward_target_delta"]
+__all__ = ["ForwardTargetProjector", "hash_codes"]
 
 
 # ---------------------------------------------------------------------------
@@ -211,54 +211,3 @@ class ForwardTargetProjector:
         out = np.asarray(weight_mv(np.asarray(tau, dtype=np.float64)),
                          dtype=np.float64)
         return np.tanh(out)
-
-
-# ---------------------------------------------------------------------------
-# 局部目标匹配更新
-# ---------------------------------------------------------------------------
-def forward_target_delta(h: np.ndarray, tau: np.ndarray, pre: np.ndarray,
-                         eta: float, w_max: float = 0.0) -> np.ndarray:
-    """逐层**局部**目标匹配更新：Δw = η·(τ − h) ⊗ pre。
-
-    这是 forward-only 家族在 PHD-Net 里的落点：每层只用自己的激活 h、自己的
-    目标 τ、自己的输入 pre 做一次更新——**没有跨层的梯度回传**，也没有全局
-    误差信号。
-
-    语义
-    ----
-    Δw = η·(τ − h) ⊗ pre
-    - 若 τ > h（激活低于目标）→ 该行权重沿 pre 增大 → 下次激活朝目标靠；
-    - 若 τ < h → 权重减小。
-    这就是「目标匹配（target matching）」的赫布型实现：等价于对本层做一次
-    「让输出朝目标走」的局部梯度上升，但**梯度只在层内计算**，不跨层回传。
-
-    参数
-    ----
-    h : ndarray
-        本层当前的**生成预测**（即该层权重作用在上一层激活上的输出）。
-    tau : ndarray
-        本层目标（长度同上）。
-    pre : ndarray
-        本层输入（上一层激活）。
-    eta : float
-        学习率。
-    w_max : float
-        单步权重增量上限（<= 0 = 不限）。
-
-    返回
-    ----
-    ndarray
-        权重增量矩阵（形状 = (len(h), len(pre))）。**纯函数，不改入参**。
-    """
-    h = np.asarray(h, dtype=np.float64)
-    tau = np.asarray(tau, dtype=np.float64)
-    pre = np.asarray(pre, dtype=np.float64)
-    if h.shape != tau.shape:
-        raise ValueError(
-            f"forward_target_delta：h 与 tau 维度不符："
-            f"h={h.shape} tau={tau.shape}")
-    delta = tau - h
-    dw = np.outer(delta, pre)
-    if w_max > 0.0:
-        np.clip(dw, -w_max, w_max, out=dw)
-    return dw

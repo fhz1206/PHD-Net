@@ -114,7 +114,15 @@ if _HAVE_NUMBA:
             elif exp == 0x0F and man == 0x07:
                 continue# NaN，跳过
             else:
-                v = (1.0 + man / 8.0) * (2.0 ** (exp - _E4M3_BIAS))
+                # ⚠ P212：改用**查表**而非 `2.0 ** (exp - _E4M3_BIAS)`。
+                #   变量指数的 `**` 被 numba 编译成 `powf` 调用 → **逐元素
+                #   powf 无法被向量化**（P154 实测 1b 档 120.6 ms，
+                #   而查表版 105.4 ms）。`_E4M3_POW2` 这张 16 项表**早已定义**
+                #   （本文件 :65）却**从未被索引** → 注释宣称的优化从未落地。
+                #   → 现接线。**数值逐位相同**：表里全是 2 的幂（精确可表示），
+                #   `np.array_equal(2.0**(exp-7), _E4M3_POW2[exp])` = True
+                #   （偏差 0.0）。
+                v = (1.0 + man / 8.0) * _E4M3_POW2[exp]
             if sign:
                 v = -v
             if v < 0.0:
@@ -147,7 +155,8 @@ if _HAVE_NUMBA:
                 out_i8[i] = 0
                 continue
             else:
-                v = (1.0 + man / 8.0) * (2.0 ** (exp - _E4M3_BIAS))
+                # ⚠ P212：查表版（数值逐位相同，见 `_amax_fp8` 的同款注释）。
+                v = (1.0 + man / 8.0) * _E4M3_POW2[exp]
             if sign:
                 v = -v
             q = round(v * inv)
@@ -250,7 +259,8 @@ def fp8_to_int8_codes_nogil(codes_u8, out_i8=None):
     return out_i8, float(scale)
 
 
-def fp8_to_int8_codes(codes_u8, out_i8=None, conv: str = "torch"):
+def fp8_to_int8_codes(codes_u8, out_i8=None, conv: str = "torch",
+                      report: dict | None = None):
     """统一入口。
 
     `conv` = "torch"（**默认**，快 5.6×，多 76 MiB 中间张量）
@@ -258,10 +268,45 @@ def fp8_to_int8_codes(codes_u8, out_i8=None, conv: str = "torch"):
     两条 Python 路径都在 **CPU** 上执行（fhz 指令）。
     ⚠ 2026-10-07：原 "rust" 选项已随 rust 版本删除（fhz 指令）——传入它
     落到下面的兜底分支，按 torch 路径执行（两条 Python 实现数值逐位一致）。
+
+    ⚠ **P212：`report` 参数 —— 兑现 P147 指令的「转化效率」需求**。
+    P147 原文：「记得提供转化效率，转化放在 cpu 上」。此前该需求只存在于
+    孤立模块 `fp8_capability.py`（零 import → 从未兑现）。
+    P212 删除该模块，把「转化效率」的报告接到**实际在用的**本函数上：
+    传入 `report` dict 时写入
+      · `ms`        —— 本次转换耗时（ms）
+      · `MiB_in` / `MiB_out` —— 输入/输出字节数
+      · `MiB_per_s` —— 吞吐（MiB/s，按输入计）
+      · `ratio_vs_fp32_copy` —— 相对「同尺寸 fp32 纯拷贝」的倍数
+        （>1 表示比纯拷贝还慢，是转换代价的直观指标）
+      · `conv`      —— 实际走的路径（torch / nogil）
     """
+    import time as _time
+    _t0 = _time.perf_counter()
     if str(conv).lower() in ("nogil", "numba", "jit"):
-        return fp8_to_int8_codes_nogil(codes_u8, out_i8)
-    return fp8_bits_to_int8_torch(codes_u8, out_i8)
+        _out, _scale = fp8_to_int8_codes_nogil(codes_u8, out_i8)
+        _used = "nogil"
+    else:
+        _out, _scale = fp8_bits_to_int8_torch(codes_u8, out_i8)
+        _used = "torch"
+    if report is not None:
+        _ms = (_time.perf_counter() - _t0) * 1e3
+        _n = int(np.asarray(codes_u8).size)
+        _mib_in = _n / 2 ** 20
+        _mib_out = int(np.asarray(_out).size) / 2 ** 20
+        # 基线：同尺寸 fp32 纯拷贝耗时（实测比，不是估计）
+        _t1 = _time.perf_counter()
+        _ = np.empty(_n, dtype=np.float32).copy()
+        _base = (_time.perf_counter() - _t1) * 1e3
+        report.update({
+            "conv": _used,
+            "ms": _ms,
+            "MiB_in": _mib_in,
+            "MiB_out": _mib_out,
+            "MiB_per_s": (_mib_in / (_ms / 1e3)) if _ms > 0 else float("inf"),
+            "ratio_vs_fp32_copy": (_ms / _base) if _base > 1e-9 else float("nan"),
+        })
+    return _out, _scale
 
 
 # ── P189：fp8 位模式 → 实值 的 256 项查表────────────────────────────────

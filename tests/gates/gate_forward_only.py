@@ -39,7 +39,7 @@ import numpy as np                                        # noqa: E402
 
 from phdnet.config import PHDNetConfig                    # noqa: E402
 from phdnet.forward_only import (ForwardTargetProjector,  # noqa: E402
-                                 forward_target_delta, hash_codes)
+                                 hash_codes)
 from phdnet.model import PHDNet                           # noqa: E402
 
 CASES: list = []
@@ -75,6 +75,26 @@ def _train(net: PHDNet, steps: int = 20) -> None:
         tgt = np.zeros(50)
         tgt[i % 50] = 1.0
         net.step(x, target=tgt)
+
+
+def _mk_pc(n0: int = 3, n1: int = 4, n2: int = 5, conn_k: int = 2):
+    """构造一个**受控**的稀疏 PC 栈，供 B4 的目标匹配方向断言使用。
+
+    维度选择让断言可精确解读：
+      · `dn1` 的行数 = **n1**（dn1 = up1 的转置），行内边数由转置决定
+        （不均匀）→ 用 `indptr` 逐行取，不用 reshape。
+      · 每行取**第一条**边做断言 → 该边的 pre 分量是 `r2[idx]`，与
+        「增量 ∝ pre」的语义直接可比。
+      · `r2` 设为 `[1.0, 2.0]` → 若第一条边的 idx 指向 r2[0]=1.0，
+        则 Δw 与 Δw×2 的比例关系可直接验证「增量 ∝ pre」。
+    """
+    from phdnet.sparse_pc import SparsePCStack
+    # ⚠ `w_max` 要**足够大**（默认 2.0 会把 η·τ·pre 的较大分量裁掉 →
+    #   「增量 ∝ pre」的比例关系被裁剪破坏 → 断言测到的不是语义而是裁剪）。
+    #   此处 pre 最大 16.0、η=1、|τ|=1 → 需要 w_max ≥ 16。
+    return SparsePCStack(n0, n1, n2, eta_pc=0.02, eta_oja=0.0,
+                         rng=np.random.default_rng(1), conn_k=conn_k,
+                         w_max=64.0)
 
 
 # ── A 组：固定随机投影 ─────────────────────────────────────────────────────
@@ -173,14 +193,48 @@ def group_b() -> None:
           f"{widths_before} → {widths_after}")
 
     # B4：目标匹配方向 —— τ > h 时该行权重沿 pre 增大
-    h = np.zeros(3)
-    tau = np.array([1.0, -1.0, 0.0])
-    pre = np.array([1.0, 2.0])
-    dw = forward_target_delta(h, tau, pre, eta=1.0)
-    check(dw[0, 0] > 0, "B4a τ>h → 权重沿 pre 增大（激活朝目标靠）")
-    check(dw[1, 0] < 0, "B4b τ<h → 权重沿 pre 减小")
-    check(np.allclose(dw[:, 1], dw[:, 0] * 2.0),
-          "B4c 增量 ∝ pre（外积语义）")
+    # ⚠ P212：原实现用 `forward_target_delta`（**稠密** np.outer 实现）做
+    #   这三条断言。该函数是 P210 的旧版本，已被生产路径的**稀疏融合核**
+    #   （`phdnet/sparse_pc.py::_pc_fo_fused`）取代 —— 且稠密外积与项目
+    #   铁律②「结构性稀疏」冲突。P212 删除该函数（连同其在
+    #   `forward_only.py` 的导出），并把断言**改写到真实生产路径**上：
+    #   语义（τ>h → 沿 pre 增大；τ<h → 沿 pre 减小；增量 ∝ pre）不变，
+    #   但测的是真正跑的代码。
+    _pc = _mk_pc()
+    _n2 = _pc.n2
+    # r2 = [1.0, 2.0, 4.0, 8.0, 16.0]（等比数列 → 各边的 pre 分量互不相同，
+    # 「增量 ∝ pre」可直接用比值验证）
+    _pre = np.array([1.0, 2.0, 4.0, 8.0, 16.0], dtype=np.float32)
+    _tau = np.array([1.0, -1.0, 0.0, 0.0], dtype=np.float64)   # 对应 dn1 的 4 行
+    # ⚠ **把 dn1 的权重清零** → 生成预测 pred_r1 = dn1·r2 = 0
+    #   ⇒ 目标匹配残差 d = τ − pred = τ（纯目标方向，可精确解读）。
+    #   （不清零的话 pred ≠ 0，残差是「τ − 预测」，方向断言不再直观。）
+    _pc.dn1[2][:] = 0.0
+    _w_before = _pc.dn1[2].copy()
+    _pc.learn_forward_target({"r1": np.zeros(_pc.n1, dtype=np.float32),
+                               "r2": _pre,
+                               "s0": np.zeros(_pc.n0, dtype=np.float32)},
+                              _tau, np.zeros(_pc.n0, dtype=np.float64),
+                              eta=1.0, homeostasis=False)
+    # ⚠ CSR 的 `val` 是**一维扁平数组**（按行拼接，行内边数不均匀）→
+    #   用 `indptr` 逐行取，不用 reshape。
+    _dw = _pc.dn1[2] - _w_before
+    _ip, _ix = _pc.dn1[0], _pc.dn1[1]
+
+    def _row(i):
+        p0, p1 = int(_ip[i]), int(_ip[i + 1])
+        return _dw[p0:p1], _ix[p0:p1]
+
+    _d0, _i0 = _row(0)
+    _d1, _i1 = _row(1)
+    check(_d0[0] > 0, "B4a τ>h → 权重沿 pre 增大（激活朝目标靠）")
+    check(_d1[0] < 0, "B4b τ<h → 权重沿 pre 减小")
+    # B4c：同一行内，不同边的增量比 = 对应 pre 分量之比
+    #   （残差 d = τ 逐行恒定 ⇒ Δw = η·d·pre ⇒ 增量/pre = η·d 逐边相等）
+    _r0 = _d0 / _pre[_i0]                      # 每条边的「增量 / pre」
+    check(np.allclose(_r0, _r0[0]),
+          "B4c 增量 ∝ pre（外积语义）",
+          f"比例={np.round(_r0, 6).tolist()}")
 
     # B5：eta=0 → 逐位不变
     net5 = _mk_net(forward_only=True, eta=0.0)

@@ -468,19 +468,22 @@ def main() -> None:
                          "⚠ **P131 起默认 einsum**（省掉 25.37 MiB "
                          "中间张量；**昇腾速度收益待实测**——本机 x86 无法稳定"
                          "区分两者）；要回逐位基线用 --sparse-fwd-kernel mulsum")
-    ap.add_argument("--m2-kernel", default="plain",
-                    choices=["serial", "fused", "plain"],
-                    help="P76/P99/P113：M2 推理核。**默认 plain**——"
-                         "P113 服务器实测（1b 档，昇腾 191 核 + NPU）："
-                         "M2_infer **6.92 → 1.28 ms/tok（5.41×）**，"
-                         "端到端 **17.63 → 12.09 ms/tok（1.46×）**；"
-                         "四个采样点 sliding PPL 与 serial 运行**逐位相同**"
-                         "（纯调度变化、零语义变化）。"
+    ap.add_argument("--m2-kernel", default="auto",
+                    choices=["auto", "serial", "fused", "plain"],
+                    help="P76/P99/P113/P212：M2 推理核。**默认 auto**——"
+                         "按**平台**择优（`phdnet/sparse_pc.py::default_m2_kernel`）："
+                         "x86 → `fused`（实测快 1.34–2.05×）、昇腾 aarch64 → `plain`"
+                         "（P113 服务器实测：M2_infer **6.92 → 1.28 ms/tok（5.41×）**，"
+                         "端到端 **17.63 → 12.09 ms/tok（1.46×）**；prange 屏障在"
+                         "191 核上成本主导，融合核反而慢 3-4×）。"
                          "  · plain：走 _csr_matvec（**有**行级 prange）"
                          "  · serial：单核融合核（P99，昇腾上prange 屏障主导开销）"
-                         "  · fused：prange 融合核（昇腾实测慢 3-4×，已否决）"
-                         "⚠ **x86 结论不构成昇腾证据**：本机上fused 比 plain 快，"
-                         "跨平台训练请按机器选择；对拍见 "
+                         "  · fused：prange 融合核"
+                         "⚠ **x86 结论不构成昇腾证据**，故按平台分而非硬编码；"
+                         "本机 x86 实测（2026-10-31）：n=256 fused 快 **2.05×**、"
+                         "n=1024 快 **1.34×**。"
+                         "⚠ 三态**数值等价**（P113：sliding PPL 逐位相同，纯调度变化）"
+                         "→ 切换默认不改任何数值；对拍见 "
                          "tests/gates/gate_m2_infer_kernels.py（11 例）")
     ap.add_argument("--encoder-dtype", default="fp32",
                     choices=["fp32", "fp64", "fp16", "bf16"],
@@ -875,9 +878,21 @@ def main() -> None:
     cfg.readout_powlaw_kmax = max(0, int(args.readout_powlaw_kmax))
     cfg.readout_powlaw_density = None      # 由 alpha + conn_k 自然决定
     cfg.encoder_dtype = args.encoder_dtype            # P75：M1 权重精度（平台相关）
-    # P99：三态（serial=单核融合 / fused=并行融合 / plain=原始多核调用）
-    cfg.pc_fused_kernel = (False if args.m2_kernel == "plain"
-                           else args.m2_kernel)        # P75/P99：M2 核选择
+    # P99/P212：三态（serial=单核融合 / fused=并行融合 / plain=原始多核调用）
+    # ⚠ P212：`--m2-kernel` 默认改为 `auto` → **按平台择优**（x86 用 fused，
+    #   昇腾 aarch64 用 plain）—— 理由与实测见
+    #   `phdnet/sparse_pc.py::default_m2_kernel` 的 docstring。
+    #   三态数值等价（P113：sliding PPL 逐位相同，纯调度变化）→ 不改任何数值。
+    if str(args.m2_kernel).lower() == "auto":
+        from phdnet.sparse_pc import default_m2_kernel
+        _m2 = default_m2_kernel()
+        cfg.pc_fused_kernel = (False if _m2 == "plain" else _m2)
+        print(f"[p212] M2 推理核：auto → {_m2}（按平台择优："
+              f"x86 用 fused、昇腾 aarch64 用 plain；数值等价，纯调度变化）",
+              flush=True)
+    else:
+        cfg.pc_fused_kernel = (False if args.m2_kernel == "plain"
+                               else args.m2_kernel)    # P75/P99：M2 核选择
     cfg.fp8_refresh = max(1, int(args.fp8_refresh))   # P84：fp8 副本刷新间隔
     cfg.fp8_conv = str(args.fp8_conv)                 # P189：fp8→int8 转换核
     cfg.accel_readout = args.accel                     # P19 读出设备（默认 auto）
@@ -927,11 +942,22 @@ def main() -> None:
         print("[p211] 前向only 路径已启用但 eta=0 → **等价于旧行为**"
               "（不注入层目标）", flush=True)
     # P202：回放节奏与开关（M6_replay 是「other 之外的第三大段」）
-    if args.replay_every > 0 and args.replay_every != 4:
-        cfg.replay_every = int(args.replay_every)   # 覆库默认 4
-        print(f"[p202] replay_every = {args.replay_every}（库默认 4；"
-              f"M6_replay 摊销 ≈ 1.65×4/{args.replay_every} ms/tok）",
-              flush=True)
+    #
+    # ⚠⚠ **P212 修复（真 bug）**：原判断是
+    #     `if args.replay_every > 0 and args.replay_every != 4:`
+    #   那个 `4` 是**过时的库默认值**（P204 已把 `cfg.replay_every` 从 4
+    #   改成 16）→ 用户传 `--replay-every 4`（help 文案明确说「回 4 可
+    #   复原旧巩固节奏」）时，`4 > 0` 为真而 `4 != 4` 为假 → **条件不成立
+    #   → 该值被静默丢弃**，仍用库默认 16。**与 help 文案直接矛盾。**
+    #   修法：argparse 的 `default=0` 已经表达了「0 = 沿库默认」的语义，
+    #   故只需判 `> 0`（不必再拿任何库默认值当哨兵——那种写法在库默认
+    #   变更时必然再次失效）。
+    if args.replay_every > 0:
+        _ro_lib_default = cfg.replay_every      # 覆盖前的库默认值（打印用）
+        cfg.replay_every = int(args.replay_every)
+        print(f"[p212] replay_every = {args.replay_every}（库默认 "
+              f"{_ro_lib_default}；M6_replay 摊销 ≈ 1.65×{_ro_lib_default}/"
+              f"{args.replay_every} ms/tok）", flush=True)
     if not args.readout_replay:
         cfg.readout_replay = False
         print("[p202] readout_replay=off（M6_replay 段 ~1.65 ms/tok 立省；"

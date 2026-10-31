@@ -231,7 +231,3 @@ def ms_total_size(files: list[MsFile]) -> int:
             total += f.size
     return total
 
-
-def local_name_of(p) -> str:
-    """远程/本地对象的纯文件名（日志与分派用）。"""
-    return p.name if isinstance(p, MsFile) else _Path(str(p)).name

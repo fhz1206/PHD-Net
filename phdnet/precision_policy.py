@@ -82,7 +82,7 @@ INT_FAMILY_ENABLED = False
 
 # 「默认走 fp16」——**P163**：模型本体与迭代统一 fp16（刚刚验证通过的那一版）
 DEFAULT_MODEL_DTYPE = "fp16"
-DEFAULT_ITER_DTYPE = "fp16"
+# ⚠ P212：原此处还有 `DEFAULT_ITER_DTYPE`（零引用的孤立常量）→ 已删。
 
 
 def candidate_order(requested: str) -> list[str]:

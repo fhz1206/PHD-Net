@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -95,6 +96,26 @@ def group_a() -> None:
           "A4 真实稀疏读出的 CSR 索引为 int32", str(ro._csr[1].dtype))
 
 
+def _ref_learn(pc, cache, tau_r1, tau_s0, eta, homeostasis=True) -> None:
+    """forward-only 学习的多核参考实现（原子核逐条调用）。
+
+    用途：对拍融合核 `_pc_fo_fused` 的**逐位等价性**。
+    ⚠ 这是**参考基准**，不是生产路径 —— 生产走融合核（1 次调用，2.4×）。
+    """
+    r1, r2 = cache["r1"], cache["r2"]
+    pred_r1 = pc._mv(pc.dn1, r2)
+    pred_s0 = pc._mv(pc.dn0, r1)
+    d_r1 = np.asarray(tau_r1, dtype=np.float64) - pred_r1
+    d_s0 = np.asarray(tau_s0, dtype=np.float64) - pred_s0
+    pc._add_outer(pc.dn1, d_r1, r2, eta)
+    pc._add_outer(pc.dn0, d_s0, r1, eta)
+    pc._clip(pc.dn0[2], pc.w_max)
+    pc._clip(pc.dn1[2], pc.w_max)
+    if homeostasis:
+        pc._scale_rows(pc.dn0, pc._hn_dn0)
+        pc._scale_rows(pc.dn1, pc._hn_dn1)
+
+
 # ── B 组：forward-only 融合核 ───────────────────────────────────────────────
 def group_b() -> None:
     print("\n[B] forward-only 融合核（_pc_fo_fused）")
@@ -111,27 +132,107 @@ def group_b() -> None:
     tau_r1 = np.tanh(rng.standard_normal(n1))
     tau_s0 = np.tanh(rng.standard_normal(n0))
 
-    # B1：融合核 vs 多核参考实现
+    # B1：融合核 vs 多核参考实现（homeostasis=True）
     pc_a.learn_forward_target(cache, tau_r1, tau_s0, 0.01, homeostasis=True)
-
-    r1, r2 = cache["r1"], cache["r2"]
-    pred_r1 = pc_b._mv(pc_b.dn1, r2)
-    pred_s0 = pc_b._mv(pc_b.dn0, r1)
-    d_r1 = np.asarray(tau_r1, dtype=np.float64) - pred_r1
-    d_s0 = np.asarray(tau_s0, dtype=np.float64) - pred_s0
-    pc_b._add_outer(pc_b.dn1, d_r1, r2, 0.01)
-    pc_b._add_outer(pc_b.dn0, d_s0, r1, 0.01)
-    pc_b._clip(pc_b.dn0[2], pc_b.w_max)
-    pc_b._clip(pc_b.dn1[2], pc_b.w_max)
-    pc_b._scale_rows(pc_b.dn0, pc_b._hn_dn0)
-    pc_b._scale_rows(pc_b.dn1, pc_b._hn_dn1)
+    _ref_learn(pc_b, cache, tau_r1, tau_s0, 0.01, homeostasis=True)
 
     for name in ("dn0", "dn1"):
         a = getattr(pc_a, name)[2]
         b = getattr(pc_b, name)[2]
         check(np.array_equal(a, b),
-              f"B1 {name}：融合核与多核参考实现逐位相同",
+              f"B1 {name}：融合核与多核参考实现逐位相同（homeostasis=True）",
               f"max|Δ|={float(np.abs(a.astype(np.float64) - b.astype(np.float64)).max()):.3e}")
+
+    # B1b（P212 新增）：**homeostasis=False 时也必须逐位相同**。
+    # ⚠ 这条锁住 P211 首版的真实回归：融合核的 ⑥ 行范数缩放曾写成
+    #   **无条件执行** → 忽略 `homeostasis` 参数语义（生产恒为 True 故
+    #   未暴露，但库默认 `PHDNetConfig().homeostasis=False` → 直用库
+    #   配置者会拿到静默不同的数值）。
+    pc_c = SparsePCStack(n0, n1, n2, eta_pc=0.02, eta_oja=0.0,
+                         rng=np.random.default_rng(11), conn_k=32)
+    pc_d = SparsePCStack(n0, n1, n2, eta_pc=0.02, eta_oja=0.0,
+                         rng=np.random.default_rng(11), conn_k=32)
+    cache_c = pc_c.infer(s0, 2)
+    pc_c.learn_forward_target(cache_c, tau_r1, tau_s0, 0.01, homeostasis=False)
+    _ref_learn(pc_d, cache_c, tau_r1, tau_s0, 0.01, homeostasis=False)
+    ok_b1b = True
+    det_b1b = []
+    for name in ("dn0", "dn1"):
+        a = getattr(pc_c, name)[2]
+        b = getattr(pc_d, name)[2]
+        same = np.array_equal(a, b)
+        ok_b1b = ok_b1b and same
+        det_b1b.append(f"{name}:{same}")
+    check(ok_b1b,
+          "B1b homeostasis=False：融合核与参考实现同样逐位相同"
+          "（P212：修复了融合核无条件缩放的语义回归）",
+          " ".join(det_b1b))
+
+    # B1c（P212 新增）：homeostasis=False 与 True 的结果**必须不同**
+    # （否则说明标志根本没生效 —— 即 B1 之前的 bug 形态）。
+    nrm_false = float(np.sqrt((pc_c.dn1[2] ** 2).sum()))
+    nrm_true = float(np.sqrt((pc_a.dn1[2] ** 2).sum()))
+    check(nrm_false != nrm_true,
+          "B1c homeostasis=False 与 True 结果不同（标志确实生效）",
+          f"Σ‖dn1‖：False={nrm_false:.6f} True={nrm_true:.6f}")
+
+    # B1d（P212 新增）：**`learn_scale` 调制**（与读出同口径）。
+    # 起因：RL 把策略梯度灌进读出，用 `learn_scale = lr·advantage` 缩放
+    # 读出学习率；而 forward-only 此前只用固定强度 `pc_scale` → 在 RL 里
+    # 它以**与奖励无关**的强度持续注入噪声 → RL 学不动
+    # （实测 `gate_rl_loop` D 组：0.375 → 0.308 不升）。
+    # → forward-only 现在同口径接受 `learn_scale`。
+    # 本组断言：① learn_scale=1.0 与不调制**逐位相同**（普通训练不受影响）；
+    #          ② learn_scale=0 → 该步**不产生任何** forward-only 更新。
+    from phdnet.config import PHDNetConfig
+    from phdnet.model import PHDNet
+
+    def _net_and_digest(ls: float):
+        cfg = PHDNetConfig(n_input=32, n_sdr=64, n_mid=64, n_top=32,
+                           k_sparse=16, n_readout=50, readout_softmax=True,
+                           eta_readout=0.15, seed=11, step_profiling=False,
+                           accel_readout="cpu:0", forward_only=True)
+        net = PHDNet(cfg)
+        rng2 = np.random.default_rng(0)
+        for i in range(20):
+            x = rng2.standard_normal(32).astype(np.float32)
+            t = np.zeros(50)
+            t[i % 50] = 1.0
+            net.step(x, target=t, learn_scale=ls)
+        h = hashlib.sha256()
+        for arr in (net.pc.dn0[2], net.pc.dn1[2], net.pc.up0[2],
+                    net.pc.up1[2], net.readout.W):
+            h.update(np.ascontiguousarray(arr, dtype=np.float64).tobytes())
+        return h.hexdigest()
+
+    d_ls1 = _net_and_digest(1.0)
+    d_ls0 = _net_and_digest(0.0)
+    check(d_ls1 != d_ls0,
+          "B1d learn_scale=1.0 与 0 的训练轨迹不同（forward-only 确实受它调制）",
+          f"ls=1:{d_ls1[:12]} ls=0:{d_ls0[:12]}")
+
+    # learn_scale=0 时 forward-only 不注入 → 与「关掉 forward-only」等价
+    def _net_no_fo(ls: float):
+        cfg = PHDNetConfig(n_input=32, n_sdr=64, n_mid=64, n_top=32,
+                           k_sparse=16, n_readout=50, readout_softmax=True,
+                           eta_readout=0.15, seed=11, step_profiling=False,
+                           accel_readout="cpu:0", forward_only=False)
+        net = PHDNet(cfg)
+        rng2 = np.random.default_rng(0)
+        for i in range(20):
+            x = rng2.standard_normal(32).astype(np.float32)
+            t = np.zeros(50)
+            t[i % 50] = 1.0
+            net.step(x, target=t, learn_scale=ls)
+        h = hashlib.sha256()
+        for arr in (net.pc.dn0[2], net.pc.dn1[2], net.pc.up0[2],
+                    net.pc.up1[2], net.readout.W):
+            h.update(np.ascontiguousarray(arr, dtype=np.float64).tobytes())
+        return h.hexdigest()
+
+    check(d_ls0 == _net_no_fo(0.0),
+          "B1e learn_scale=0 的 forward-only 轨迹 == 关闭 forward-only 的轨迹",
+          f"ls0={d_ls0[:12]}")
 
     # B2：不触碰上行（P198）
     up0_before = pc_a.up0[2].copy()

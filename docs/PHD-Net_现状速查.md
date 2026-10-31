@@ -1,4 +1,4 @@
-# PHD-Net 现状速查（一页式，2026-10-31 P211）
+# PHD-Net 现状速查（一页式，2026-10-31 P212）
 
 > 本文是**当前事实基线**：数字、命令、开关默认值、已知问题、文档索引。
 > 开关默认值全部从源码核实（`phdnet/config.py` / `train/train.py` / `train/config_1b.py`）；
@@ -11,9 +11,9 @@
 | 项 | 值 | 来源 |
 |---|---|---|
 | `python tests/run_tests.py fast` | **9/9**（<1 分钟，零回归门槛） | `[历史锚点]`，持续门禁 |
-| `tests/gates/gate_*.py` 专项门禁 | **51 个**（`ls` 现查，勿写死）；P211 时点 **49/51 通过**，3 个失败（`gate_cli_lang_semantics` / `gate_encoder_gemv` / `gate_ltm_reverse_index`）经 `git stash` 对拍确认为**改动前既有**的环境路径问题 | `[本会话实测]` `outputs/test/reorg_gates/summary.json`；`gate_csr_vectorization_perf` 曾 26/27 属 golden 基准缺失，后续已绿 |
+| `tests/gates/gate_*.py` 专项门禁 | **52 个**（`ls` 现查，勿写死）；P212 时点 **49/52 通过**，3 个失败（`gate_cli_lang_semantics` / `gate_encoder_gemv` / `gate_ltm_reverse_index`）经 `git stash` 对拍确认为**改动前既有**的环境路径问题 | `[本会话实测]` `outputs/test/reorg_gates/summary.json`；`gate_csr_vectorization_perf` 曾 26/27 属 golden 基准缺失，后续已绿 |
 | P194–P199 新增门禁 | `gate_insession_learning` / `gate_readout_master_weight` / `gate_generate_truncation` / `gate_cc_traces` / `gate_cli_i18n`（30 项显式契约） | `[源码]` tests/gates/ |
-| P210/P211 新增门禁 | `gate_forward_only`（**30 项**：固定随机投影 / 层目标学习 / 接线与**「eta=0 ≡ 旧路径」逐位判据**）、`gate_cpu_opt_p211`（**15 项**：int32 索引 / FO 融合核 / LTM 内联逐位等价） | `[源码]` tests/gates/ |
+| P210–P212 新增门禁 | `gate_forward_only`（**30 项**：固定随机投影 / 层目标学习 / 接线与**「eta=0 ≡ 旧路径」逐位判据**）、`gate_cpu_opt_p211`（**19 项**：int32 索引 / FO 融合核逐位等价 / **`learn_scale` 调制契约** / LTM 内联）、`gate_fp8_int8_convert`（**17 项**：fp8→int8 查表等价性 / 转化效率报告） | `[源码]` tests/gates/ |
 | P192 发布验证 | fast 9/9 + 40/41 verifier（唯一失败即 `gate_ltm_trace_semantics` (a) 组，**P193 已修 → 32/32**） | `[历史锚点]` `outputs/test/p192_publication/summary.json` |
 | CI | 两套 workflow（`.gitcode/` + `.github/`），无 Jenkinsfile；远端状态未核验，**不宣称全绿** | `[源码]` |
 

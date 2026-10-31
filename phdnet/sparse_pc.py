@@ -32,6 +32,8 @@
 
 from __future__ import annotations
 
+import platform as _platform
+
 import numpy as np
 
 from .plasticity import NUMBA_OK
@@ -688,10 +690,18 @@ else:                                                   # numba 缺失回退
 if NUMBA_OK:                                        # pragma: no cover
     @njit(cache=True, nogil=True, parallel=True, fastmath=False)
     def _pc_fo_fused(dn0, dn1, r1, r2, tau_r1, tau_s0, eta, w_max,
-                     hn_dn0, hn_dn1):
+                     hn_dn0, hn_dn1, homeostasis=True):
         """前向only 层目标匹配（融合核，只动下行生成权重）。
 
         与 `learn_forward_target` 的多核路径**逐位等价**。
+
+        ⚠ P212：`homeostasis` **必须**真正生效 —— P211 首版把本核的
+        ⑥ 行范数缩放写成**无条件执行**，导致 `homeostasis=False` 时
+        仍会缩放（与参数语义不符，且与多核参考实现逐位不同）。
+        生产配置恒为 True 故当时未暴露，但库默认 `PHDNetConfig()
+        .homeostasis=False` → 任何直用库配置的路径会得到静默不同的数值。
+        → 现按标志条件化，且门禁 `gate_cpu_opt_p211` 补 `homeostasis=False`
+        的对拍用例锁住这条契约。
         """
         # ① ② 预测（fp64 累加，与 `_csr_matvec` 同序）
         n1 = dn1[0].shape[0] - 1
@@ -738,29 +748,31 @@ if NUMBA_OK:                                        # pragma: no cover
             elif v < -w_max:
                 dn0[2][p] = -w_max
         # ⑥ 行范数稳态缩放（照抄 `_csr_scale_rows`；只缩下行）
-        for i in prange(n1):
-            s = 0.0
-            for p in range(dn1[0][i], dn1[0][i + 1]):
-                s += dn1[2][p] * dn1[2][p]
-            nrm = s ** 0.5
-            if nrm < 1e-12:
-                nrm = 1e-12
-            f = hn_dn1[i] / nrm
-            for p in range(dn1[0][i], dn1[0][i + 1]):
-                dn1[2][p] *= f
-        for i in prange(n0):
-            s = 0.0
-            for p in range(dn0[0][i], dn0[0][i + 1]):
-                s += dn0[2][p] * dn0[2][p]
-            nrm = s ** 0.5
-            if nrm < 1e-12:
-                nrm = 1e-12
-            f = hn_dn0[i] / nrm
-            for p in range(dn0[0][i], dn0[0][i + 1]):
-                dn0[2][p] *= f
+        # ⚠ P212：受 `homeostasis` 标志控制（此前无条件执行 → 忽略参数语义）。
+        if homeostasis:
+            for i in prange(n1):
+                s = 0.0
+                for p in range(dn1[0][i], dn1[0][i + 1]):
+                    s += dn1[2][p] * dn1[2][p]
+                nrm = s ** 0.5
+                if nrm < 1e-12:
+                    nrm = 1e-12
+                f = hn_dn1[i] / nrm
+                for p in range(dn1[0][i], dn1[0][i + 1]):
+                    dn1[2][p] *= f
+            for i in prange(n0):
+                s = 0.0
+                for p in range(dn0[0][i], dn0[0][i + 1]):
+                    s += dn0[2][p] * dn0[2][p]
+                nrm = s ** 0.5
+                if nrm < 1e-12:
+                    nrm = 1e-12
+                f = hn_dn0[i] / nrm
+                for p in range(dn0[0][i], dn0[0][i + 1]):
+                    dn0[2][p] *= f
 else:                                                   # pragma: no cover
     def _pc_fo_fused(dn0, dn1, r1, r2, tau_r1, tau_s0, eta, w_max,
-                     hn_dn0, hn_dn1):
+                     hn_dn0, hn_dn1, homeostasis=True):
         """numba 缺失回退：走原子核（语义相同，性能较低）。"""
         pred_r1 = _csr_matvec(*dn1, r2)
         pred_s0 = _csr_matvec(*dn0, r1)
@@ -770,8 +782,46 @@ else:                                                   # pragma: no cover
         _csr_add_outer(*dn0, d_s0, r1, eta)
         _csr_clip(dn0[2], w_max)
         _csr_clip(dn1[2], w_max)
-        _csr_scale_rows(*dn0, hn_dn0)
-        _csr_scale_rows(*dn1, hn_dn1)
+        if homeostasis:
+            _csr_scale_rows(*dn0, hn_dn0)
+            _csr_scale_rows(*dn1, hn_dn1)
+
+
+def default_m2_kernel() -> str:
+    """**按平台**给出 M2 推理核的默认选择（"fused" / "plain"）。
+
+    P212（fhz「默认采用性能更优的实现方案」）。背景与实测依据：
+
+    | 平台 | plain（非融合，5 次独立 `_csr_matvec`） | fused（prange 融合核） | 取舍 |
+    |---|---|---|---|
+    | **昇腾 aarch64**（191 核 + NPU） | M2_infer **1.28 ms/tok**（P113） | 段 2.4 → **20-27 ms/tok**（P76/P99：prange 屏障成本主导） | **plain** |
+    | **x86 本机**（8 核） | 见下方实测 | **快 1.34–2.05×** | **fused** |
+
+    x86 实测（本机，2026-10-31，`tools/bench/bench_cpu_local.py` 同款口径）：
+
+        n=256  conn_k=32   plain 0.2236 ms | fused 0.1089 ms → **2.05×**
+        n=1024 conn_k=128  plain 0.6961 ms | fused 0.5193 ms → **1.34×**
+
+    ⚠ **为什么可以按平台分**（与 P165 的教训不冲突）：P165 说「BLAS 快慢不是
+      架构的必然属性」，那是**数值库**的性质；而这里的差异来自 **prange 屏障
+      的线程数**（昇腾 191 核时 fork/join 成本被放大到远超计算本身，x86 8 核
+      则相反）—— 核数越多屏障越贵，是**可预期的系统性规律**。
+    ⚠ 但**仍然是启发式**：真正的判据是「核数多 + 单次计算量小」。故：
+      ① 用户可用 `--m2-kernel` 显式覆盖（优先级最高）；
+      ② 本函数只在**未显式指定**时作为默认值；
+      ③ `serial` 永不作为默认（实测在 x86 上比 plain 慢 2.5×、在昇腾上也不快）。
+
+    ⚠ **数值等价性**：三态在 P113 实测下「四个采样点 sliding PPL 与 serial
+      运行**逐位相同**」（纯调度变化、零语义变化），门禁
+      `tests/gates/gate_m2_infer_kernels.py` 对拍三态 → 切换默认**不改数值**。
+    """
+    try:
+        machine = _platform.machine().lower()
+    except Exception:                                       # noqa: BLE001
+        machine = ""
+    if machine.startswith(("aarch64", "arm64")):
+        return "plain"          # 昇腾：prange 屏障主导 → 非融合路径
+    return "fused"              # x86 / 其它：融合核更快（见上表实测）
 
 
 class SparsePCStack:
@@ -1136,31 +1186,21 @@ class SparsePCStack:
         # 原路径 = 6 次独立核调用：2×_mv + 2×_add_outer + 2×_clip
         #          + 2×_scale_rows（稳态缩放）。
         # 融合核 = **1 次调用**，核内完成全部 6 步，**表达式与累加顺序
-        # 逐字照抄各原子核** → 逐位等价（门禁 C2a/C3b 的摘要判据持续验证）。
+        # 逐字照抄各原子核** → 逐位等价（门禁 `gate_cpu_opt_p211` 的 B1
+        # 对拍持续验证；`gate_forward_only` 的 C2a/C3b 摘要判据亦然）。
         # 实测（smoke 档 n=256）：0.110 → 0.045 ms（**2.4×**）。
+        #
+        # ⚠ P212：`homeostasis` **必须传进核内** —— P211 首版未传，核内
+        #   无条件缩放 → `homeostasis=False` 时仍缩放（忽略参数语义，
+        #   且与多核参考实现逐位不同）。生产恒为 True 故未暴露，但库默认
+        #   `PHDNetConfig().homeostasis=False` → 直用库配置者会拿到
+        #   静默不同的数值。已修 + 门禁补 `homeostasis=False` 对拍。
         _tau_r1 = np.asarray(tau_r1, dtype=np.float64)
         _tau_s0 = np.asarray(tau_s0, dtype=np.float64)
         _pc_fo_fused(self.dn0, self.dn1, r1, r2, _tau_r1, _tau_s0,
                      float(eta), float(self.w_max),
-                     self._hn_dn0, self._hn_dn1)
-        return
-        # ── 下面是**多核参考实现**（保留作 A/B 对照与门禁的负向对照臂）──
-        # 生成侧的当前预测（下行权重作用在上一层激活上的输出）。
-        # ⚠ 用 **cache 里的 r1/r2 之外**的量：预测 = 上层激活经下行权重的
-        #   matvec，与 PC 误差 e1 = r1 − dn1·r2 同源但符号相反。
-        pred_r1 = self._mv(self.dn1, r2)          # dn1·r2 → r1 空间
-        pred_s0 = self._mv(self.dn0, r1)          # dn0·r1 → s0 空间
-        # 目标匹配残差（局部：只看本层预测与本层目标，无跨层梯度）。
-        d_r1 = np.asarray(tau_r1, dtype=np.float64) - pred_r1
-        d_s0 = np.asarray(tau_s0, dtype=np.float64) - pred_s0
-        # 稀疏外积：只更新存在边（与 _pc_learn_fused 的 dn 更新同构）。
-        self._add_outer(self.dn1, d_r1, r2, eta)
-        self._add_outer(self.dn0, d_s0, r1, eta)
-        self._clip(self.dn0[2], self.w_max)
-        self._clip(self.dn1[2], self.w_max)
-        if homeostasis:
-            # P211：只缩放下行（本路径只改下行；上行已由 pc.learn 缩放过一次）。
-            self._homeostatic_scale(down_only=True)
+                     self._hn_dn0, self._hn_dn1, bool(homeostasis))
+
     def homeostatic_rate(self, r2: np.ndarray, target: float,
                          eta_h: float) -> None:
         """逐神经元目标发放率（内在可塑性）：按增益缩放该神经元存在的入边。"""

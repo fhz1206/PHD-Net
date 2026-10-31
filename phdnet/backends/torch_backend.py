@@ -61,25 +61,11 @@ def _resolve_dtype(dtype):
         f"{sorted(_DTYPE_ALIASES)}（亦接受 torch.float16 这类带前缀写法）。"
         f"注意：fp8/fp4 无 torch 原生类型，不在支持范围。")
 
-
-def _resolve_device(device: str) -> str:
-    """校验设备可用性：不可用则回退 cpu 并发出告警（避免静默在 CPU 上训练）。
-
-    A1 修复：此前异常被完全吞掉，请求 npu/cuda 却无硬件时静默跑 CPU 且无提示；
-    现改为回退时至少告警一次，便于发现「误配后端」而非得到一个慢且无提示的结果。
-    """
-    if device == "cpu":
-        return "cpu"
-    try:
-        probe_t = torch.zeros(1, device=device)
-        del probe_t
-        return device
-    except Exception as e:  # noqa: BLE001
-        import warnings
-        warnings.warn(
-            f"设备 '{device}' 不可用（{type(e).__name__}: {e}），已回退 CPU。",
-            RuntimeWarning)
-        return "cpu"
+# ⚠ P212：原此处有一个 `_resolve_device`（零引用的孤立函数），其 docstring
+#   声称的「A1 修复：回退时至少告警一次」**从未接线**（无任何调用点）。
+#   设备解析的真实现是 `phdnet/backends/torch_lm.py::resolve_device`
+#   （同一优先级、同一诚实报错口径），且 `accel_readout.py` 走的就是它。
+#   → 删除，避免后人误以为这里才是设备解析入口。
 
 
 def probe_devices() -> dict:
