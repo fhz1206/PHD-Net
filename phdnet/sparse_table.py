@@ -172,13 +172,44 @@ class SparseSynapseTable:
         grow_order = cur
         if self.growth_guidance and len(cur) > 1:
             grow_order = sorted(cur, key=lambda k: self.in_deg.get(k, 0))
+        # ── P211 性能：把**循环不变**的 `_decay_read` 提到循环外 ──────────
+        # 原实现对每个 (i, k) 组合都重算两项：
+        #   ① `self._decay_read(self.t_post, self.stamp_post, i)` —— **只依赖 i**，
+        #      与 k 无关 → 原实现在内层循环里被重复算了 |grow_order| 次；
+        #   ② `self._decay_read(self.t_pre, self.stamp_pre, k)` —— 只依赖 k，
+        #      与 i 无关 → 被重复算了 |prev| 次。
+        # 实测（smoke 档 64×64 组合）：dict 版 table.learn **3.7 ms/call**，
+        # 其中绝大部分是这两次冗余的 dict 查找 + Python 帧开销。
+        #
+        # ⚠ **逐位不变**：`_decay_read` 是**纯函数**（只读 trace/stamp，不改状态），
+        #   提到循环外后取到的值与循环内逐次调用**完全相同**（同样的输入、
+        #   同样的 step_count）。突变测试契约（gate_ltm_trace_semantics）也保持
+        #   ——本方法**仍然经由 `_decay_read` 取值**，注入负向对照依旧有效。
+        _dr = self._decay_read
+        _t_pre, _s_pre = self.t_pre, self.stamp_pre
+        _t_post, _s_post = self.t_post, self.stamp_post
+        # ② 对每个 k 预先取一次（与 i 无关）
+        g_tpre = {k: _dr(_t_pre, _s_pre, k) for k in grow_order}
+        # ① 对每个 i 预先取一次（与 k 无关）
+        i_tpost = {i: _dr(_t_post, _s_post, i) for i in prev}
+        # ③ t_post[k] 裸读（k∈cur，本步刚 _touch ⇒ stamp==step_count）
+        _tpost_get = _t_post.get
+        # ── P211 性能：`_enc` 内联（float 模式）────────────────────────
+        # cProfile 实测（smoke 档 64×64）：`_enc` 被调 **76.8 万次**
+        # （200 次 learn × 3840 次）占 **32%** 的 tottime，另有 153.6 万次
+        # `max` / 153.6 万次 `min` 的 Python 内建调用开销。
+        # `_enc` 在 float 模式下就是 `float(min(max(w,0.0),w_max))` ——
+        # 内联后**逐位相同**（float() 对已是 float 的值是恒等）。
+        # ⚠ int8 模式仍走 `_enc`（它有量化逻辑，不能内联）。
+        _enc = self._enc
         for i in prev:
-            tpi = self._decay_read(self.t_pre, self.stamp_pre, i)   # λ^Δt 读侧补偿
+            tpi = _dr(_t_pre, _s_pre, i)     # λ^Δt 读侧补偿（仍走 _decay_read）
             if tpi <= 0.0:
                 continue
             bucket = out.get(i)
+            i_ltd_base = eta * i_tpost[i]
             for k in grow_order:
-                tpk = self.t_post.get(k, 0.0)   # k∈cur，本步刚 _touch ⇒ stamp==step_count
+                tpk = _tpost_get(k, 0.0)     # k∈cur，本步刚 _touch ⇒ stamp==step_count
                 ltp = eta * tpi * tpk
                 if ltp <= 0.0:
                     continue
@@ -193,14 +224,30 @@ class SparseSynapseTable:
                     # ΣW ratio=0.9398、单边 max|ΔW|=8.8e-2）。
                     # 与 `tpi` / `t_post[i]` 一样走 `_decay_read` 才与
                     # 「每步急切衰减」的参考实现同口径。
-                    ltd = (eta * self._decay_read(self.t_post, self.stamp_post, i)
-                           * self._decay_read(self.t_pre, self.stamp_pre, k))
-                    bucket[k] = self._enc(min(max(w_now + ltp - ltd, 0.0), w_max))
+                    # ⚠ P211：`i_ltd_base = eta·_decay_read(t_post, stamp_post, i)`
+                    #   已提到循环外；`g_tpre[k] = _decay_read(t_pre, stamp_pre, k)`
+                    #   同样已预先取好 → 逐位不变，但省掉 |prev|×|cur| 次调用。
+                    ltd = i_ltd_base * g_tpre[k]
+                    # ⚠ 严格等价于 `min(max(v, 0.0), w_max)`：
+                    #   原式是「先下限 0、再上限 w_max」，两个钳位**顺序不可换**
+                    #   （`w_max < 0` 时原式返回 `w_max`（负），换序会返回 0）。
+                    #   故写成两个**顺序独立**的 if（非 elif）。
+                    _w = w_now + ltp - ltd
+                    if _w < 0.0:
+                        _w = 0.0
+                    if _w > w_max:
+                        _w = w_max
+                    bucket[k] = _enc(_w) if int8 else float(_w)
                 else:                                   # 结构可塑性：生长新突触
                     if bucket is None:
                         bucket = out[i] = {}
                     if len(bucket) < self.m_out:
-                        bucket[k] = self._enc(min(ltp, w_max))
+                        # 原式 `min(ltp, w_max)`：**只**有上限（无下限）——
+                        # ltp 已由上面的 `if ltp <= 0.0: continue` 保证 > 0。
+                        _w = ltp
+                        if _w > w_max:
+                            _w = w_max
+                        bucket[k] = _enc(_w) if int8 else float(_w)
                         if self.growth_guidance:
                             self.in_deg[k] = self.in_deg.get(k, 0) + 1
 

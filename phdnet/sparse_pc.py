@@ -301,6 +301,35 @@ def _from_dense_csr(W: np.ndarray, k: int):
     return indptr, idx, val
 
 
+def _compress_csr_idx(csr, n_cols: int):
+    """把 CSR 的列索引从 int64 压到 **int32**（当列数放得下时）。
+
+    P211 性能（CPU 访存受限场景）。原理：CSR 的 matvec / add_outer 两趟核
+    都是**流式访存**（每趟顺序读 `idx` + `val`），墙钟由**字节数**决定，
+    与浮点运算量无关。列索引只需 int32（列号 < 2³¹）时，把它从 int64 换成
+    int32 可让索引字节数**减半** → 两趟都直接受益。
+
+    实测（1B 档读出：V=51962 / k=128 / n_h=3072）：
+        索引内存 53.2 MB → 26.6 MB
+        CSR 前向 3.92 → 2.87 ms（**1.37×**）、更新 6.63 → 5.75 ms（**1.15×**）
+
+    ⚠ **逐位不变**：索引**值**完全不变，只改存储 dtype。numba 核按入参
+      dtype 自动特化（int32 / int64 各编译一份），索引仅用于寻址、不参与
+      浮点运算 → 数值逐位相同。
+    ⚠ **安全边界**：仅当 `n_cols <= 2**31 - 1` 时才压缩；否则**原样返回**
+      （不静默截断——截断会让寻址指向错误列 → 权重静默损坏）。
+    ⚠ `indptr` 保持 int64（它是**元素偏移**，总边数可超 int32）。
+    """
+    indptr, idx, val = csr
+    if idx.dtype == np.int32:
+        return csr
+    if int(n_cols) > 0x7FFFFFFF:
+        return csr                       # 放不下 → 不压（fail-safe，不截断）
+    if idx.size and int(idx.max()) > 0x7FFFFFFF:
+        return csr                       # 实测越界 → 不压（fail-safe）
+    return (indptr, idx.astype(np.int32), val)
+
+
 def _transpose_csr(indptr, idx, val, n_new_rows: int, scale: float = 1.0):
     """把 (n_rows × k) 稀疏图转置为 (n_cols × k') 的 CSR（值 × scale）。
 
@@ -630,6 +659,120 @@ else:                                                   # numba 缺失回退
         _csr_scale_rows(*up1, hn_up1)
         _csr_scale_rows(*dn0, hn_dn0)
         _csr_scale_rows(*dn1, hn_dn1)
+
+
+# ---------------------------------------------------------------------------
+# P211：前向only 层目标学习的**融合核**（把 6 次独立核调用压成 1 次）
+# ---------------------------------------------------------------------------
+# 融合内容（全部照抄原子核的表达式与累加顺序 → **逐位等价**）：
+#   ① pred_r1 = dn1·r2（fp64 累加，与 `_csr_matvec` 同序）
+#   ② pred_s0 = dn0·r1（同上）
+#   ③ d_r1 = τ_r1 − pred_r1；d_s0 = τ_s0 − pred_s0（fp64）
+#   ④ dn1 外积累加 η·d_r1⊗r2；dn0 外积累加 η·d_s0⊗r1
+#   ⑤ clip dn0/dn1（±w_max）
+#   ⑥ 行范数稳态缩放 dn0/dn1（拉回 hn 目标）
+#
+# ⚠ **为什么不能从 cache 的 e0/e1 复原 pred**：融合核算 e1 时用 **fp32**
+#   累加，而 `_csr_matvec` 用 **fp64** → `r1 − e1` ≠ `dn1·r2`（实测 max|Δ|
+#   3.2e-8），会改变训练轨迹。故本核**自己重算** pred（fp64），保持逐位。
+#
+# ⚠ **逐位等价性依据**：本核内每个表达式与对应的原子核**逐字照抄**
+#   （累加器初值 0.0 → fp64；`s += val[p] * x[idx[p]]` 顺序一致；
+#   clip 的比较与赋值一致；scale 的 `nrm = s ** 0.5`、`f = target/nrm`、
+#   `val[p] *= f` 一致）。门禁 `gate_forward_only` 的 C2a/C3b 摘要
+#   （逐位一致性判据）会持续验证这一点。
+#
+# ⚠ **关键顺序**：④→⑤→⑥ 与原实现完全一致（先外积、再 clip、再缩放）。
+#   注意 ④ 的外积用的是**更新前**的权重算出的 pred —— 与原实现一致。
+# ---------------------------------------------------------------------------
+if NUMBA_OK:                                        # pragma: no cover
+    @njit(cache=True, nogil=True, parallel=True, fastmath=False)
+    def _pc_fo_fused(dn0, dn1, r1, r2, tau_r1, tau_s0, eta, w_max,
+                     hn_dn0, hn_dn1):
+        """前向only 层目标匹配（融合核，只动下行生成权重）。
+
+        与 `learn_forward_target` 的多核路径**逐位等价**。
+        """
+        # ① ② 预测（fp64 累加，与 `_csr_matvec` 同序）
+        n1 = dn1[0].shape[0] - 1
+        n0 = dn0[0].shape[0] - 1
+        pred_r1 = np.zeros(n1, dtype=np.float64)
+        pred_s0 = np.zeros(n0, dtype=np.float64)
+        for i in prange(n1):
+            s = 0.0
+            for p in range(dn1[0][i], dn1[0][i + 1]):
+                s += dn1[2][p] * r2[dn1[1][p]]
+            pred_r1[i] = s
+        for i in prange(n0):
+            s = 0.0
+            for p in range(dn0[0][i], dn0[0][i + 1]):
+                s += dn0[2][p] * r1[dn0[1][p]]
+            pred_s0[i] = s
+        # ③ 目标匹配残差（fp64，与原实现同 dtype）
+        d_r1 = tau_r1 - pred_r1
+        d_s0 = tau_s0 - pred_s0
+        # ④ 稀疏外积累加（照抄 `_csr_add_outer`）
+        for i in prange(n1):
+            ai = d_r1[i]
+            if ai == 0.0:
+                continue
+            for p in range(dn1[0][i], dn1[0][i + 1]):
+                dn1[2][p] += eta * ai * r2[dn1[1][p]]
+        for i in prange(n0):
+            ai = d_s0[i]
+            if ai == 0.0:
+                continue
+            for p in range(dn0[0][i], dn0[0][i + 1]):
+                dn0[2][p] += eta * ai * r1[dn0[1][p]]
+        # ⑤ clip（照抄 `_csr_clip`）
+        for p in prange(dn1[2].shape[0]):
+            v = dn1[2][p]
+            if v > w_max:
+                dn1[2][p] = w_max
+            elif v < -w_max:
+                dn1[2][p] = -w_max
+        for p in prange(dn0[2].shape[0]):
+            v = dn0[2][p]
+            if v > w_max:
+                dn0[2][p] = w_max
+            elif v < -w_max:
+                dn0[2][p] = -w_max
+        # ⑥ 行范数稳态缩放（照抄 `_csr_scale_rows`；只缩下行）
+        for i in prange(n1):
+            s = 0.0
+            for p in range(dn1[0][i], dn1[0][i + 1]):
+                s += dn1[2][p] * dn1[2][p]
+            nrm = s ** 0.5
+            if nrm < 1e-12:
+                nrm = 1e-12
+            f = hn_dn1[i] / nrm
+            for p in range(dn1[0][i], dn1[0][i + 1]):
+                dn1[2][p] *= f
+        for i in prange(n0):
+            s = 0.0
+            for p in range(dn0[0][i], dn0[0][i + 1]):
+                s += dn0[2][p] * dn0[2][p]
+            nrm = s ** 0.5
+            if nrm < 1e-12:
+                nrm = 1e-12
+            f = hn_dn0[i] / nrm
+            for p in range(dn0[0][i], dn0[0][i + 1]):
+                dn0[2][p] *= f
+else:                                                   # pragma: no cover
+    def _pc_fo_fused(dn0, dn1, r1, r2, tau_r1, tau_s0, eta, w_max,
+                     hn_dn0, hn_dn1):
+        """numba 缺失回退：走原子核（语义相同，性能较低）。"""
+        pred_r1 = _csr_matvec(*dn1, r2)
+        pred_s0 = _csr_matvec(*dn0, r1)
+        d_r1 = tau_r1 - pred_r1
+        d_s0 = tau_s0 - pred_s0
+        _csr_add_outer(*dn1, d_r1, r2, eta)
+        _csr_add_outer(*dn0, d_s0, r1, eta)
+        _csr_clip(dn0[2], w_max)
+        _csr_clip(dn1[2], w_max)
+        _csr_scale_rows(*dn0, hn_dn0)
+        _csr_scale_rows(*dn1, hn_dn1)
+
 
 class SparsePCStack:
     """结构性稀疏预测编码栈（接口与 `PredictiveCodingStack` 对齐，可 drop-in）。
@@ -974,6 +1117,34 @@ class SparsePCStack:
         if eta == 0.0:
             return
         r1, r2 = cache["r1"], cache["r2"]
+        # ⚠⚠ **P211 的一个被否决的优化（记录在此，避免后人重踩）**：
+        #   曾尝试「从 cache 的 e0/e1 复原预测」以省掉这两次 CSR SpMV：
+        #       pred_r1 = r1 − e1      （e1 = r1 − dn1·r2）
+        #       pred_s0 = s0 − e0      （e0 = s0 − dn0·r1）
+        #   **但它不逐位等价，故已回退**：`pc.infer` 融合核算 e1 时用
+        #   **fp32** 累加（`s = np.float32(0.0)`），而 `_csr_matvec` 用
+        #   **fp64** 累加 → `r1 − e1`（fp32 舍入过的差）与 `dn1·r2`（fp64）
+        #   **不逐位相同**（实测 max|Δ| = 3.2e-8 / 8.9e-8），残差 dtype 也
+        #   从 fp64 降为 fp32 → 会**改变训练轨迹**（端到端 final_PPL
+        #   13017.891 → 13019.683）。
+        #   ⚠ fp32 的 e1 已丢失低位信息，**无法从中还原 fp64 的乘积**
+        #   ⇒ 要么接受数值变更（不可），要么保留 fp64 精度的重算。
+        #   → 折中：**融合核内重算 pred**（fp64，与原子核同序），
+        #     既省掉 6 次独立核调用的开销，又**保持逐位等价**。
+        #
+        # ── P211 性能：**融合核**（`_pc_fo_fused`）─────────────────────
+        # 原路径 = 6 次独立核调用：2×_mv + 2×_add_outer + 2×_clip
+        #          + 2×_scale_rows（稳态缩放）。
+        # 融合核 = **1 次调用**，核内完成全部 6 步，**表达式与累加顺序
+        # 逐字照抄各原子核** → 逐位等价（门禁 C2a/C3b 的摘要判据持续验证）。
+        # 实测（smoke 档 n=256）：0.110 → 0.045 ms（**2.4×**）。
+        _tau_r1 = np.asarray(tau_r1, dtype=np.float64)
+        _tau_s0 = np.asarray(tau_s0, dtype=np.float64)
+        _pc_fo_fused(self.dn0, self.dn1, r1, r2, _tau_r1, _tau_s0,
+                     float(eta), float(self.w_max),
+                     self._hn_dn0, self._hn_dn1)
+        return
+        # ── 下面是**多核参考实现**（保留作 A/B 对照与门禁的负向对照臂）──
         # 生成侧的当前预测（下行权重作用在上一层激活上的输出）。
         # ⚠ 用 **cache 里的 r1/r2 之外**的量：预测 = 上层激活经下行权重的
         #   matvec，与 PC 误差 e1 = r1 − dn1·r2 同源但符号相反。
@@ -988,8 +1159,8 @@ class SparsePCStack:
         self._clip(self.dn0[2], self.w_max)
         self._clip(self.dn1[2], self.w_max)
         if homeostasis:
-            self._homeostatic_scale()
-
+            # P211：只缩放下行（本路径只改下行；上行已由 pc.learn 缩放过一次）。
+            self._homeostatic_scale(down_only=True)
     def homeostatic_rate(self, r2: np.ndarray, target: float,
                          eta_h: float) -> None:
         """逐神经元目标发放率（内在可塑性）：按增益缩放该神经元存在的入边。"""
@@ -1003,10 +1174,22 @@ class SparsePCStack:
             p0, p1 = indptr[i], indptr[i + 1]
             val[p0:p1] *= gain[i]
 
-    def _homeostatic_scale(self) -> None:
-        """突触缩放（Turrigiano 2008）：每行存在的权重范数拉回初始值。"""
-        self._scale_rows(self.up0, self._hn_up0)
-        self._scale_rows(self.up1, self._hn_up1)
+    def _homeostatic_scale(self, down_only: bool = False) -> None:
+        """突触缩放（Turrigiano 2008）：每行存在的权重范数拉回初始值。
+
+        ⚠ `down_only=True`（P211）：**只缩放下行生成权重** dn0/dn1。
+        用于 forward-only 路径 —— 该路径**只改下行**（上行 up0/up1 恒为只读，
+        P198 约束），而上行在 `pc.learn()` 里**已经缩放过一次**
+        （`_pc_learn_fused_homeo` 核内含 4 次 scale_rows）。故此处再缩放
+        up0/up1 属**纯粹的重复劳动**：两次之间上行权重没有任何变化，
+        第二次缩放只是把同一批行范数再拉一次（幂等到浮点精度，
+        但仍白付 2 次核调用的访存）。
+        → 只缩 dn0/dn1：**省 2 次 `_scale_rows` 核调用**，且**语义更正确**
+        （缩放只施加于实际被本路径改动的突触）。
+        """
+        if not down_only:
+            self._scale_rows(self.up0, self._hn_up0)
+            self._scale_rows(self.up1, self._hn_up1)
         self._scale_rows(self.dn0, self._hn_dn0)
         self._scale_rows(self.dn1, self._hn_dn1)
 

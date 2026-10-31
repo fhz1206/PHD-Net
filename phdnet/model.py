@@ -147,7 +147,7 @@ class PHDNet:
         self._mb_accum: dict | None = None
         self._mb_count = 0
 
-        # ── P210：前向only 训练路径（forward-only）──────────────────────
+        # ── P211：前向only 训练路径（forward-only）——**默认开启**──────────
         # 任务信号此前**只到 M6 读出**，主干 M2 拿不到任何任务信号。forward-only
         # 家族（FF/FP/FTP/NoProp/Sigprop）解决的是「无反向传播下如何把任务
         # 信号送到中间层」。本实现取 FP（标签 → 固定随机投影目标）+ FTP（沿
@@ -157,7 +157,13 @@ class PHDNet:
         #   必须由 probe_PPL A/B 判定，不得先验断言更好。
         # ⚠ 只更新**下行生成权重** dn0/dn1（不碰 up0/up1）——P198 实测
         #   eta_oja>0 正反馈发散，上行必须保持只读。
-        self._fwd_only = bool(getattr(cfg, "forward_only", False))
+        #
+        # P211（fhz「默认采用 forward-only，旧的非 forward-only 路径删去」）：
+        #   forward-only 不再是「可选附加路径」，而是**主干唯一的任务信号
+        #   注入通道**。旧路径（纯无监督重构、不注入层目标）不再是并列模式，
+        #   而是 forward-only 的一个**特例**——把 `forward_only_eta` 设为 0
+        #   即完全等价于旧行为（`learn_forward_target` 首行 eta==0 直接返回）。
+        self._fwd_only = bool(getattr(cfg, "forward_only", True))
         self._fwd_projector = None
         if self._fwd_only:
             from .forward_only import ForwardTargetProjector
@@ -166,6 +172,14 @@ class PHDNet:
                 n_out=n_out, n_layers=(cfg.n_mid, cfg.n_sdr),
                 seed=(cfg.seed + _fwd_seed) if _fwd_seed else cfg.seed,
                 gain=float(getattr(cfg, "forward_only_gain", 1.0)))
+        # P211 性能：固定随机投影目标的**按标签缓存**。
+        # 同一标签在同一 token 上可能反复出现（语料里 zipf 分布的头部词尤其
+        # 频繁），而 `hash_codes` 每步都要跑一遍 splitmix64 + tanh。
+        # 缓存把这一步降为「字典查找 + 一次 tanh」（tanh 也不能省——它是
+        # 值域映射的一部分，且 tanh 后的结果要参与后续递推）。
+        # ⚠ 缓存**不改变数值**：同一 (label, layer) 恒得同一码（投影是固定
+        #   的），缓存只是把「重算」换成「重取」。LRU 上限防止长跑内存增长。
+        self._fwd_cache: dict[tuple[int, int], np.ndarray] = {}
 
         # P35：step 分段计时（诊断 CPU 侧耗时分布；默认关，零开销）
         self._prof_on = bool(getattr(cfg, "step_profiling", False))
@@ -173,6 +187,8 @@ class PHDNet:
         # P115：滑窗计时（与 _prof 并行；_prof 是全程累计、从不清零）
         self._prof_win: dict = {}
         self._prof_win_n = 0
+        # P211：嵌套段标记（内层段照常打印，但不重复计入「本步已计」）
+        self._prof_nested = False
 
     # ---------- P197：SDR 支撑集新颖性（海马模式分离）----------
     def _sdr_novelty(self, rate: np.ndarray) -> float:
@@ -301,8 +317,32 @@ class PHDNet:
             self._prof[name] = self._prof.get(name, 0.0) + d
             self._prof_win[name] = self._prof_win.get(name, 0.0) + d
             # P202：同步累计「本步已计」，供 _prof_close_step 算未打点余额
-            self._prof_step_accounted = (
-                getattr(self, "_prof_step_accounted", 0.0) + d)
+            # ⚠⚠ **P211：嵌套段不重复计入** —— `M4b_imprint` 的计时区间被
+            #   `M4b_ltm` **完全包含**（imprint 就在 ltm 的计时窗内）。
+            #   两者都被累加进 `_prof_step_accounted` ⇒ 「本步已计」比真实
+            #   已计时间**多出内层段** ⇒ `other`（残差）被**低估**，
+            #   且打印出的 `M4b_ltm` 数值本身已含 imprint → 读者把各段
+            #   相加会**重复计算** ltm（实测 smoke 档差 0.88 ms/tok）。
+            #   修法：内层段照常累计（保留细分可见性），但**不**计入
+            #   `_prof_step_accounted`（只让外层段计一次）。
+            #   `_prof_nested` 由 `_prof_nested_begin()` 置位、在**下一个**
+            #   `_prof_end`（即内层段结束）自动清零。
+            if not self._prof_nested:
+                self._prof_step_accounted = (
+                    getattr(self, "_prof_step_accounted", 0.0) + d)
+            else:
+                self._prof_nested = False
+
+    def _prof_nested_begin(self) -> None:
+        """标记「接下来这段是**嵌套**在已计段内的细分段」。
+
+        P211：嵌套段照常打印（读者要看细分），但**不重复计入**本步已计
+        时间基准——否则 `other` 残差会被低估、且各段数值相加会重复计算。
+        用法：在内层段的 `_prof_t` 之前调用一次即可（`_prof_end` 会自动
+        消费该标记）。
+        """
+        if self._prof_on:
+            self._prof_nested = True
 
     def reset_prof_window(self) -> None:
         """清空**滑窗**计时（`_prof_win` / `_prof_win_n`）。
@@ -515,11 +555,15 @@ class PHDNet:
                 # 大容量表按**稀疏率**印迹：±1 稠密码会激活全部维度，破坏事件驱动稀疏性
                 _p = self._prof_t('M4b_ltm')
                 _pi = self._prof_t('M4b_imprint')   # P77：imprint 与 recall 分开计时
+                # P211：imprint 的计时窗**嵌套在** ltm 的计时窗内 → 标记为
+                # 嵌套段（照常打印细分，但不重复计入「本步已计」，
+                # 否则 other 残差被低估、各段相加会重复计算 ltm）。
+                self._prof_nested_begin()
                 # P116：imprint 摊销（方案 B）。默认 1 = 每步写入（旧行为逐位不变）；
                 # N>1 是**语义变更**（中间 N-1 步表状态不同），须显式开启。
                 self.ltm.imprint(rate if cfg.big_ltm else p,
                                  amortize=int(getattr(cfg, "ltm_imprint_amortize", 1)))
-                self._prof_end('M4b_imprint', _pi)
+                self._prof_end('M4b_imprint', _pi)   # 消费嵌套标记
                 self._prof_end('M4b_ltm', _p)
             elif retrieve_now:
                 cue = np.sign(rate); cue[cue == 0] = 1.0
@@ -707,12 +751,14 @@ class PHDNet:
                     if cfg.learnable_encoder:
                         self.encoder.learn(x, s0, cfg.eta_enc * pc_scale)
                     self._prof_end('PC_learn', _p)
-                # P210：前向only 层目标学习（forward-only target learning）。
+                # P211：前向only 层目标学习（forward-only target learning）。
                 # 放在 PC 学习**之后**、同一份 cache 之上：层目标由「标签 → 固定
                 # 随机投影」生成，再沿模型自己的下行权重 dn0 递推到 s0 空间
                 # （FTP 内核），每层做局部目标匹配（无跨层梯度回传）。
                 # ⚠ 只在**有监督信号**时执行（无标签就没有层目标）。
                 # ⚠ 学习率乘以与 PC 相同的调制缩放 pc_scale（与发育窗口一致）。
+                # ⚠ P211：eta=0 时**完全跳过**——这正是「旧路径」（不注入层
+                #   目标）的等价形态，故旧的非 forward-only 分支已删去。
                 if (self._fwd_only and self._fwd_projector is not None
                         and target is not None and learn):
                     _lbl = (int(target_idx) if target_idx is not None
@@ -721,10 +767,17 @@ class PHDNet:
                     _eta_fo = float(getattr(cfg, "forward_only_eta", 0.01)) * pc_scale
                     if _eta_fo > 0.0:
                         # FP 内核：标签 → 固定随机投影目标（r1 空间）
+                        # ⚠ P211：投影器内部按 (label, layer) 缓存 → 同一标签
+                        #   反复出现时省掉 splitmix64 + tanh（语料 zipf 头部
+                        #   词命中率可观）。**数值不变**（固定投影恒定）。
                         _tau_r1 = self._fwd_projector.project(_lbl, 0)
                         # FTP 内核：沿模型自己的 dn0 把目标递推到 s0 空间
+                        # ⚠ P211：`lambda v: self.pc._mv(...)` 每次调用都要新建
+                        #   闭包对象 + 多一层属性链 → 改为绑定局部变量。
+                        _pc_dn0 = self.pc.dn0
+                        _pc_mv = self.pc._mv
                         _tau_s0 = self._fwd_projector.recurse(
-                            _tau_r1, lambda v: self.pc._mv(self.pc.dn0, v))
+                            _tau_r1, lambda v: _pc_mv(_pc_dn0, v))
                         self.pc.learn_forward_target(
                             cache, _tau_r1, _tau_s0, _eta_fo,
                             homeostasis=cfg.homeostasis)

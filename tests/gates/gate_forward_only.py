@@ -201,11 +201,22 @@ def group_b() -> None:
 
 # ── C 组：接线与零回归 ────────────────────────────────────────────────────
 def group_c() -> None:
-    print("\n[C] 接线与零回归（铁律④）")
+    print("\n[C] 接线与零回归（P211：默认开启 + 旧路径已删）")
+
+    # C1（P211 语义反转）：**默认开启** → 默认就构造投影器。
+    net_def = PHDNetConfig(n_input=32, n_sdr=64, n_mid=64, n_top=32,
+                           k_sparse=16, n_readout=50, readout_softmax=True,
+                           eta_readout=0.15, seed=11, step_profiling=False,
+                           accel_readout="cpu:0")
+    check(net_def.forward_only is True,
+          "C1a 默认配置 forward_only=True（P211 起默认开启）")
+    net_def_net = PHDNet(net_def)
+    check(net_def_net._fwd_projector is not None,
+          "C1b 默认配置即构造投影器（forward-only 已是默认路径）")
 
     net_off = _mk_net(forward_only=False)
     check(net_off._fwd_projector is None,
-          "C1 默认关闭 → 不构造投影器（零开销）")
+          "C1c 显式关闭 → 不构造投影器（零开销，门禁/实验用）")
 
     net_a = _mk_net(forward_only=False)
     _train(net_a)
@@ -221,6 +232,15 @@ def group_c() -> None:
     check(d_on != d_a, "C3 开启时训练轨迹确实改变（机制真的生效）",
           f"off={d_a[:12]} on={d_on[:12]}")
 
+    # C3b（P211 新契约）：**eta=0 等价于旧行为** —— 旧路径已不再是并列模式，
+    # 而是 forward-only 的特例。这条断言锁住「删旧路径」的实现方式。
+    net_eta0 = _mk_net(forward_only=True, eta=0.0)
+    _train(net_eta0)
+    d_eta0 = _digest(net_eta0)
+    check(d_eta0 == d_a,
+          "C3b eta=0 的 forward-only 轨迹 == 旧路径轨迹（逐位相同）",
+          f"eta0={d_eta0[:12]} old={d_a[:12]}")
+
     # C4：配置 fail-fast
     try:
         PHDNetConfig(forward_only=True, forward_only_eta=-0.1)
@@ -233,12 +253,15 @@ def group_c() -> None:
     except ValueError:
         check(True, "C4b 非法 gain → 立即报错")
 
-    # C5：CLI 开关存在且默认关闭
+    # C5：CLI 开关（P211：默认开，旧开关删除 → 只剩 --no-forward-only）
     r = subprocess.run([sys.executable, str(_ROOT / "train" / "train.py"),
                         "--help"], capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
-    check("--forward-only" in r.stdout, "C5a CLI 存在 --forward-only 开关")
+    check("--no-forward-only" in r.stdout,
+          "C5a CLI 存在 --no-forward-only（默认开启，故只保留关闭开关）")
     check("--forward-only-eta" in r.stdout, "C5b CLI 存在 --forward-only-eta")
+    check("--forward-only " not in r.stdout,
+          "C5c 旧的 --forward-only 开关已删除（旧路径不再是并列模式）")
 
 
 def main() -> None:

@@ -6,19 +6,19 @@ Python + numba + Cython（可选）+ PyTorch/昇腾 NPU（读出加速）。
 
 **唯一生产训练入口是 `train/train.py`。**
 
-适用范围：仓库根入口文档。数据截止 **2026-10-31（P210）**。
+适用范围：仓库根入口文档。数据截止 **2026-10-31（P211）**。
 文档分工见 `docs/文档写作规范.md`；详细性能数字与迭代历史见
 `docs/PHD-Net_性能评估与迭代方案.md`（性能唯一出处）。
 
 ---
 
-## 1. 当前状态（P210，2026-10-31）
+## 1. 当前状态（P211，2026-10-31）
 
 | 项 | 状态 |
 |---|---|
 | fast 回归 | `python tests/run_tests.py fast` = **9/9**（零回归门槛） |
-| 专项门禁 | `tests/gates/gate_*.py` = **48 个，当前全绿**（数量用 `ls tests/gates/gate_*.py` 现查，别写死） |
-| 生产默认 | 读出 fp32（P194）/ `eta_oja=0`（P198）/ SDR 新颖性印迹开（P197）/ `--step-profiling` 默认开（P198）/ `--lang en`（P199 消息目录）/ 前向only 路径**关**（P210） |
+| 专项门禁 | `tests/gates/gate_*.py` = **51 个，当前全绿**（数量用 `ls tests/gates/gate_*.py` 现查，别写死） |
+| 生产默认 | 读出 fp32（P194）/ `eta_oja=0`（P198）/ SDR 新颖性印迹开（P197）/ `--step-profiling` 默认开（P198）/ `--lang en`（P199 消息目录）/ **前向only 路径开**（P211）/ 稀疏读出 `conn_k=128`（P108）/ 在线 CSR 大空间表（P50） |
 | 已知红线 | `eta_oja>0` 生产规模正反馈发散（已默认 0 + RuntimeWarning）；1B 档大词表 × 少 token 曝光不足（见 §9） |
 
 近期迭代主线（均已在本仓库实测验证）：
@@ -48,6 +48,26 @@ Python + numba + Cython（可选）+ PyTorch/昇腾 NPU（读出加速）。
   1b 档 A/B」的候选。详见 `docs/PHD-Net_前向only训练路径.md`。
   同批修复了一个**既有缺陷**：`--probe-every` 因 `tools/eval/` 不在 `sys.path`
   而从未真正跑通（README §4 规定的 A/B 判据失效）。
+- **P211**：**前向only 改为默认路径**（fhz 指示「默认采用 forward-only，旧的非
+  forward-only 可以删去」）+ **四类 CPU 优化**（全部逐位不变，final_PPL 恒为
+  13,017.891）：
+  - **语义反转**：`cfg.forward_only` 默认 True；CLI `--forward-only` 删去，只剩
+    `--no-forward-only`。旧路径不再是并列模式，而是 **forward-only 的特例**
+    （`--forward-only-eta 0`）—— 门禁 C3b 用训练轨迹摘要**逐位**验证二者等价。
+    smoke 档 PPL 13017.891 vs 13355.328（**改善 2.53%**，方向明确为正，但仍
+    **低于项目 <20% 判据** → 生产档判据仍需服务器 1b 档 probe_PPL A/B）。
+  - **读出访存**：稀疏读出 CSR 列索引 int64 → **int32**（索引流量减半）→
+    1B 档形态 CSR 前向 1.29×、更新 1.30×、`learn_softmax` 1.18×。
+  - **forward-only 融合核**：6 次独立核调用 → **1 次**（0.110 → 0.045 ms，2.4×），
+    表达式逐字照抄原子核 → 逐位等价。
+  - **LTM**：dict 版 `table.learn` 3.74 → **1.06 ms（3.5×）**（循环不变的
+    `_decay_read` 提循环外 + `_enc` 内联）。
+  - **计时口径修复**：`M4b_imprint` 的计时窗嵌套在 `M4b_ltm` 内却被累加两次 →
+    `other` 被低估 0.70 ms/tok；已修，各段之和与 step 总时长自洽。
+  - ⚠ **诚实边界**：读出已是**访存下界**（对照实验：索引排序后更新核耗时完全
+    相同 → 瓶颈是写带宽而非 gather），算法层无提速空间；LTM 的 dict 版收益
+    **在生产默认的在线 CSR 路径上不适用**。详见
+    `docs/PHD-Net_CPU性能优化实录_P211.md`。
 
 ---
 
@@ -255,7 +275,7 @@ python train/train.py --preset 1b --data pretrain --report
 | `--readout-master-weight` | off | P195：fp32 master + 低精度影子（默认 off，多付 866.7 MiB） |
 | `--readout-conn-k` | `128` | 稀疏读出（≈4.2% 连接率）；0 = 稠密 |
 | `--micro-batch` | `1` | P194 Q1：读出梯度 B 步平均提交（主干/记忆仍逐 token 保序） |
-| `--forward-only` | 关 | P210：前向only 训练路径（FP+FTP 内核，给 M2 主干补任务信号）。**默认关**，关闭时轨迹逐位不变；收益未达显著，见 `docs/PHD-Net_前向only训练路径.md` |
+| `--no-forward-only` | 关（即前向only **开**） | P211：前向only 训练路径（FP+FTP 内核，给 M2 主干补任务信号）。**P211 起默认开启**；`--forward-only-eta 0` = 退回旧行为（逐位等价）；PPL 改善 2.53% 但低于 <20% 判据，见 `docs/PHD-Net_前向only训练路径.md` |
 | `--step-profiling` | **开** | P198 起默认开：日志带 `loop:` 与 `segments:` 分段用时；`--no-step-profiling` 关 |
 | `eta_oja`（config） | `0.0` | P198：>0 生产规模发散（9.1e11），默认 0 + RuntimeWarning |
 | `--cython-kernels` | `auto` | 加载已编译扩展否则就地构建，失败静默回落 numba |
@@ -303,7 +323,8 @@ python train/train.py --preset 1b --data pretrain --report
 | **看性能数字 / 为什么吃不满多核** | `docs/PHD-Net_性能评估与迭代方案.md`（性能唯一出处） |
 | 快速查现状 / 已定案结论 | `docs/PHD-Net_现状速查.md` |
 | 加新机制 / 扩硬件后端 | `docs/PHD-Net_扩展指南.md`、`docs/PHD-Net_硬件后端适配报告.md` |
-| 了解 forward-only（无反向传播）训练路径 | `docs/PHD-Net_前向only训练路径.md`（FF/FP/FTP/NoProp/Sigprop 调研 + P210 实现 + A/B） |
+| 了解 forward-only（无反向传播）训练路径 | `docs/PHD-Net_前向only训练路径.md`（FF/FP/FTP/NoProp/Sigprop 调研 + P210/P211 实现 + A/B） |
+| 查 CPU 侧提速的实测与边界 | `docs/PHD-Net_CPU性能优化实录_P211.md`（P211：int32 索引 / 融合核 / LTM 内联 / 计时口径 + **访存下界的诚实边界**） |
 | 与 Transformer / 大脑对比 | `docs/PHD-Net_竞争力与脑同构性评估.md` |
 | 查一个 bug 的症状→根因→门禁缺口 | `BUGS.md`（53 条） |
 | 制备语料 / 数据集入口 | `tools/README.md`、`datasets/README.md` |

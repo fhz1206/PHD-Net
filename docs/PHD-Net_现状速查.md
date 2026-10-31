@@ -1,4 +1,4 @@
-# PHD-Net 现状速查（一页式，2026-10-31 P210）
+# PHD-Net 现状速查（一页式，2026-10-31 P211）
 
 > 本文是**当前事实基线**：数字、命令、开关默认值、已知问题、文档索引。
 > 开关默认值全部从源码核实（`phdnet/config.py` / `train/train.py` / `train/config_1b.py`）；
@@ -11,9 +11,9 @@
 | 项 | 值 | 来源 |
 |---|---|---|
 | `python tests/run_tests.py fast` | **9/9**（<1 分钟，零回归门槛） | `[历史锚点]`，持续门禁 |
-| `tests/gates/gate_*.py` 专项门禁 | **48 个**（`ls` 现查，勿写死）；P210 时点 **48/48 全绿** | `[本会话实测]` `outputs/test/reorg_gates/summary.json`；`gate_csr_vectorization_perf` 曾 26/27 属 golden 基准缺失，后续已绿 |
+| `tests/gates/gate_*.py` 专项门禁 | **51 个**（`ls` 现查，勿写死）；P211 时点 **49/51 通过**，3 个失败（`gate_cli_lang_semantics` / `gate_encoder_gemv` / `gate_ltm_reverse_index`）经 `git stash` 对拍确认为**改动前既有**的环境路径问题 | `[本会话实测]` `outputs/test/reorg_gates/summary.json`；`gate_csr_vectorization_perf` 曾 26/27 属 golden 基准缺失，后续已绿 |
 | P194–P199 新增门禁 | `gate_insession_learning` / `gate_readout_master_weight` / `gate_generate_truncation` / `gate_cc_traces` / `gate_cli_i18n`（30 项显式契约） | `[源码]` tests/gates/ |
-| P210 新增门禁 | `gate_forward_only`（26 项：固定随机投影 / 层目标学习 / 接线与零回归） | `[源码]` tests/gates/gate_forward_only.py |
+| P210/P211 新增门禁 | `gate_forward_only`（**30 项**：固定随机投影 / 层目标学习 / 接线与**「eta=0 ≡ 旧路径」逐位判据**）、`gate_cpu_opt_p211`（**15 项**：int32 索引 / FO 融合核 / LTM 内联逐位等价） | `[源码]` tests/gates/ |
 | P192 发布验证 | fast 9/9 + 40/41 verifier（唯一失败即 `gate_ltm_trace_semantics` (a) 组，**P193 已修 → 32/32**） | `[历史锚点]` `outputs/test/p192_publication/summary.json` |
 | CI | 两套 workflow（`.gitcode/` + `.github/`），无 Jenkinsfile；远端状态未核验，**不宣称全绿** | `[源码]` |
 
@@ -98,7 +98,7 @@ py -3.14 tools/eval/rebaseline.py
 | `--encoder-dtype` | fp32 | x86 上比 fp64 快 1.80× |
 | `--ckpt-dtype` | fp16 | 位模式存储；master 模式 ro_W 存 fp32 逐位 |
 | `--m2-kernel` | plain | P113 服务器实测（M2_infer 5.41×）；fused/serial 留作对照 |
-| `--forward-only` | **关** | P210：前向only 层目标学习（FP+FTP 内核，给 M2 主干补任务信号）。关闭时轨迹逐位不变；**收益未达显著**（smoke probe_PPL −0.32%/−2.52%，<20% 判据）→ 候选而非定案。详见 `docs/PHD-Net_前向only训练路径.md` |
+| `--no-forward-only` | 关（即前向only **开**） | P211：前向only 层目标学习（FP+FTP 内核，给 M2 主干补任务信号）。**P211 起默认开启**；`--forward-only-eta 0` = 退回旧行为（逐位等价，门禁 C3b）。smoke 档 PPL 13017.891 vs 13355.328（**改善 2.53%**，方向为正但仍**低于 <20% 判据**）→ 生产档判据仍需服务器 A/B。详见 `docs/PHD-Net_前向only训练路径.md` |
 | `--csr-online` | **开** | 在线可写 CSR（5.74× 省）；`--no-csr-online` 回退 dict |
 | `--micro-batch` | 1 | P194 Q1 |
 | `--readout-master-weight` / `--readout-shadow-refresh` | off / 8 | P195 |

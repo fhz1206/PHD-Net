@@ -62,7 +62,11 @@ FP 的闭式回归需要**整数据集统计**（对偶/核方法），与本项
   （3000 步 probe_PPL 9.1e11），故上行保持只读。只更新**下行生成权重** dn0/dn1。
 - 层目标 τ 由**固定随机投影**产生，与标签的具体语义无关 → 它**不保证**比
   无监督重构更好的 PPL；**收益必须由 `probe_PPL` A/B 判定**，不得先验断言。
-- 默认**关闭**（铁律④：行为变更以 config 开关承载，默认关闭）。
+- ⚠ **P211（fhz 2026-10-31 指示「默认采用 forward-only，旧的非 forward-only 路径
+  删去」）**：本路径**默认开启**（`cfg.forward_only=True`），且旧的「非 forward-only
+  路径」**不再是并列模式**，而是本路径的一个**特例**——把 `forward_only_eta` 设为 0
+  即完全等价于旧行为（`learn_forward_target` 首行 `eta == 0` 直接返回）。
+  门禁 `gate_forward_only` 的 C3b 用**训练轨迹摘要逐位**验证了这条等价关系。
 """
 
 from __future__ import annotations
@@ -153,7 +157,7 @@ class ForwardTargetProjector:
     """
 
     def __init__(self, n_out: int, n_layers: tuple[int, ...], seed: int,
-                 gain: float = 1.0):
+                 gain: float = 1.0, cache_size: int = 4096):
         self.n_out = int(n_out)
         self.n_layers = tuple(int(d) for d in n_layers)
         self.seed = int(seed)
@@ -161,20 +165,41 @@ class ForwardTargetProjector:
         if any(d <= 0 for d in self.n_layers):
             raise ValueError(f"ForwardTargetProjector：层维度必须 > 0，"
                              f"实际 {self.n_layers}")
+        # P211 性能：按标签缓存已算出的目标码。
+        # 语料里 token 服从 zipf 分布，头部标签在相邻 token 上反复出现 →
+        # 缓存命中率可观。而 `hash_codes` 每步都要跑 splitmix64（多次 uint64
+        # 乘加 + 位运算）+ tanh，属纯重复计算。
+        # ⚠ **不改变数值**：固定投影对同一 (label, layer) 恒得同一码，缓存
+        #   只是把「重算」换成「重取」。返回的数组是**共享副本**——调用方
+        #   不得原地修改它（`recurse` 只读，外部也不改）。
+        self._cache: dict[tuple[int, int], np.ndarray] = {}
+        self._cache_size = int(cache_size)
 
     def project(self, label_idx: int, layer: int) -> np.ndarray:
         """把标签 ``label_idx`` 投影成第 ``layer`` 层的**目标激活**。
 
         返回经过 ``tanh`` 压到 (-1, 1) 的稠密向量（长度 = 该层维度），
         与 M2 各层激活（`tanh` 输出）同值域。**不做任何学习、不依赖模型权重。**
+
+        P211：命中缓存时直接返回**同一对象**（共享副本，调用方只读）。
         """
         li = int(label_idx)
         if not (0 <= li < self.n_out):
             raise ValueError(
                 f"ForwardTargetProjector：标签 id {li} 越界 [0, {self.n_out})")
-        d = self.n_layers[int(layer)]
+        li_layer = int(layer)
+        key = (li, li_layer)
+        hit = self._cache.get(key)
+        if hit is not None:
+            return hit
+        d = self.n_layers[li_layer]
         code = hash_codes(li, d, self.seed, self.gain)
-        return np.tanh(code)
+        out = np.tanh(code)
+        # 简单容量上限：超限就清空（LRU 太重，且命中率对 FIFO 几乎无差）。
+        if len(self._cache) >= self._cache_size:
+            self._cache.clear()
+        self._cache[key] = out
+        return out
 
     def recurse(self, tau: np.ndarray, weight_mv) -> np.ndarray:
         """用模型**自己的**权重把层目标递推到更浅一层（FTP 内核）。

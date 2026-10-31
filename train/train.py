@@ -567,9 +567,10 @@ def main() -> None:
                          "主干/记忆仍按 token 严格保序（脑同构：微小簇并行放电+突触时间整合），"
                          "仅读出末端做 B 步平均梯度更新（B7 机制的多步形式）。"
                          "B=8/16/32 可显著提升吞吐与统计效率。")
-    # ── P210：前向only 训练路径（forward-only）──
-    ap.add_argument("--forward-only", action="store_true", default=False,
-                    help="P210：**前向only 训练路径**（默认关，铁律④）。"
+    # ── P211：前向only 训练路径（forward-only）——**默认开启** ──
+    ap.add_argument("--no-forward-only", dest="forward_only",
+                    action="store_false", default=True,
+                    help="P211：**关闭**前向only 训练路径（默认**开启**）。"
                          "动机：PHD-Net 已无反向传播，但**任务信号只到 M6 读出**，"
                          "主干 M2 只学无监督重构。forward-only 家族"
                          "（FF/FP/FTP/NoProp/Sigprop）解决的正是「无反向传播下"
@@ -579,10 +580,13 @@ def main() -> None:
                          "eta_oja>0 正反馈发散）。"
                          "⚠ 层目标是「下一 token 的随机码」、**不承载标签语义** → "
                          "**收益必须由 --probe-every 的 probe_PPL A/B 判定**，"
-                         "不得先验断言更好。")
+                         "不得先验断言更好。"
+                         "⚠ 旧的非 forward-only 路径**已删除**：不再是并列模式，"
+                         "而是本路径的一个特例——用 --forward-only-eta 0 即等价。")
     ap.add_argument("--forward-only-eta", type=float, default=0.01,
-                    help="P210：前向only 层目标匹配学习率（乘以 PC 的调制缩放）。"
-                         "默认 0.01。0 = 关闭该更新（不报错）。")
+                    help="P211：前向only 层目标匹配学习率（乘以 PC 的调制缩放）。"
+                         "默认 0.01。**设 0 = 完全退回旧行为**（不注入层目标，"
+                         "等价于删除 forward-only 路径本身）。")
     ap.add_argument("--forward-only-gain", type=float, default=1.0,
                     help="P210：层目标随机码的线性增益（再经 tanh 压到激活值域 "
                          "(-1,1)）。默认 1.0。")
@@ -908,16 +912,20 @@ def main() -> None:
     cfg.enable_cpu_parallel = args.enable_cpu_parallel  # CPU侧并行增强
     cfg.numba_threads = args.numba_threads          # numba并行线程数
     cfg.omp_threads = args.omp_threads              # OpenMP线程数
-    # ── P210：前向only 训练路径（默认关，铁律④）────────────────────────
+    # ── P211：前向only 训练路径（**默认开启**）──────────────────────────
     cfg.forward_only = bool(args.forward_only)
     cfg.forward_only_eta = float(args.forward_only_eta)
     cfg.forward_only_gain = float(args.forward_only_gain)
     cfg.forward_only_seed = int(args.forward_only_seed)
-    if cfg.forward_only:
-        print(f"[p210] 前向only 训练路径已启用：eta={cfg.forward_only_eta} "
+    if cfg.forward_only and cfg.forward_only_eta > 0.0:
+        print(f"[p211] 前向only 训练路径**已启用**（P211 起默认开）："
+              f"eta={cfg.forward_only_eta} "
               f"gain={cfg.forward_only_gain} seed偏移={cfg.forward_only_seed} "
               f"（层目标=下一 token 的固定随机码，**不承载标签语义** → "
               f"收益必须由 probe_PPL A/B 判定）", flush=True)
+    elif cfg.forward_only:
+        print("[p211] 前向only 路径已启用但 eta=0 → **等价于旧行为**"
+              "（不注入层目标）", flush=True)
     # P202：回放节奏与开关（M6_replay 是「other 之外的第三大段」）
     if args.replay_every > 0 and args.replay_every != 4:
         cfg.replay_every = int(args.replay_every)   # 覆库默认 4

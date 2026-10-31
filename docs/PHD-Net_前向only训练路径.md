@@ -1,7 +1,7 @@
 # PHD-Net 前向only 训练路径（forward-only training path）
 
-> **适用范围**：M2 主干的「层目标」学习通道（P210 新增，默认关闭）。
-> **数据截止**：2026-10-31（P210）。
+> **适用范围**：M2 主干的「层目标」学习通道（P210 新增；**P211 起默认开启**）。
+> **数据截止**：2026-10-31（P211）。
 > **相关文档**：[架构设计](PHD-Net_架构设计.md)（六机制与脑同构）、
 > [性能评估与迭代方案](PHD-Net_性能评估与迭代方案.md)（性能数字唯一出处）、
 > [扩展指南](PHD-Net_扩展指南.md)（怎么加东西）、
@@ -15,6 +15,14 @@
 市面上的 forward-only（无反向传播）训练路径解决的核心问题是
 **「没有反向梯度时，如何把任务信号送到中间层」**。PHD-Net 已经是无反向传播架构，
 但**任务信号只到达 M6 读出，主干 M2 只学无监督重构**——本路径补的就是这一缺口。
+
+**P211（fhz 2026-10-31 指示「默认采用 forward-only，旧的非 forward-only 可以删去」）**
+之后，本路径是**默认且唯一**的任务信号注入通道：
+
+- `cfg.forward_only` 默认 **True**；
+- CLI 的 `--forward-only`（开启）已删除，只剩 `--no-forward-only`（关闭）；
+- 旧的「非 forward-only 路径」**不再是并列模式**，而是本路径的一个**特例**：
+  `--forward-only-eta 0` 即完全等价于旧行为（门禁 C3b 用训练轨迹摘要逐位验证）。
 
 ---
 
@@ -111,7 +119,9 @@ FP 的闭式回归需要**整数据集统计**（对偶/核方法），与本项
 - **不触碰上行识别权重 up0/up1** —— P198 实测 `eta_oja>0` 在生产规模正反馈发散
   （3000 步 probe_PPL 9.1e11），上行必须保持只读。本路径只改下行生成权重
   （`eta_pc` 那一侧，P194 实测该侧安全）。
-- **默认关闭**（铁律④）。关闭时训练轨迹**逐位不变**（门禁 C2）。
+- **P211 起默认开启**（`cfg.forward_only=True`）。旧路径不再是并列模式，而是本路径的
+  **特例**：`--forward-only-eta 0` 时训练轨迹**逐位不变**（门禁 C3b 用摘要验证）；
+  `--no-forward-only` 则连投影器都不构造（零开销，门禁 C1c）。
 - 只在**有监督信号**时执行（无标签就没有层目标）。
 
 ---
@@ -119,27 +129,35 @@ FP 的闭式回归需要**整数据集统计**（对偶/核方法），与本项
 ## 3. 用法
 
 ```bash
-# 打开前向only 路径（默认关）
-python train/train.py --preset 1b --data pretrain --forward-only
+# 默认就是前向only 路径（P211 起默认开启，无需任何开关）
+python train/train.py --preset 1b --data pretrain
+
+# 退回旧行为（等价于删掉本路径）：层目标学习率设 0
+python train/train.py --preset 1b --data pretrain --forward-only-eta 0
+
+# 关掉整条路径（等价于 eta=0，但连投影器都不构造）
+python train/train.py --preset 1b --data pretrain --no-forward-only
 
 # 调层目标匹配学习率（默认 0.01，乘以 PC 的调制缩放）
-python train/train.py --preset 1b --data pretrain --forward-only --forward-only-eta 0.02
+python train/train.py --preset 1b --data pretrain --forward-only-eta 0.02
 
 # A/B 判据：必须用 probe_PPL（sliding PPL 信噪比仅 0.40，测不出 <20% 的差异）
 python train/train.py --preset 1b --data pretrain --remote-data \
-    --forward-only --probe-every 1000 --probe-tokens 2048
+    --probe-every 1000 --probe-tokens 2048
 ```
 
 | 开关 | 默认 | 说明 |
 |---|---|---|
-| `--forward-only` | 关 | 前向only 路径总开关 |
-| `--forward-only-eta` | `0.01` | 层目标匹配学习率（乘 PC 调制缩放）；0 = 该项无贡献 |
+| `--no-forward-only` | 关（即 forward-only **开**） | **关闭**整条路径（连投影器都不构造）。P211 起 forward-only 是默认 |
+| `--forward-only-eta` | `0.01` | 层目标匹配学习率（乘 PC 调制缩放）；**0 = 完全等价旧行为** |
 | `--forward-only-gain` | `1.0` | 目标随机码增益（再经 tanh 压到 (-1,1)） |
 | `--forward-only-seed` | `0` | 固定随机投影的种子偏移（0 = 跟随 `--seed`） |
 
 ---
 
-## 4. 实测（本机 x86，**未达显著**）
+## 4. 实测
+
+### 4.1 P210 首测（显式开启时，未达显著）
 
 **口径**：smoke 档（width=256）、`--data cc_traces`、2000 token、x86 8 核本机、
 `--probe-every 1000 --probe-tokens 512`（探针文本 = 冻结 `eval_corpus/internal_corpus.txt`
@@ -157,10 +175,25 @@ python train/train.py --preset 1b --data pretrain --remote-data \
   的差异都测不出来；sliding PPL 信噪比仅 0.40）。**不能据此宣称收益。**
 - 本机是 x86 8 核 **无 NPU**，且 smoke 档仅验管线 —— **生产档（1b、昇腾、
   百万 token）未测**。
-- 结论必须由**服务器上的 1b 档 probe_PPL A/B** 给出。若无显著收益，本路径应保持
-  默认关闭（它是「机制已实现、收益待验」的候选，不是已定案的优化）。
 
-### 4.1 附带修复：探针从未真正生效
+### 4.2 P211 复测（默认开启后；smoke 档 sliding PPL 对照）
+
+**口径**：smoke 档、`--data cc_traces`、3000 token、x86 8 核本机，4 次取最优。
+
+| 配置 | final_ppl | ms/tok（中位） |
+|---|---|---|
+| **forward-only 开**（P211 新默认） | **13,017.891** | 8.12 |
+| forward-only 关（`--no-forward-only`） | 13,355.328 | 7.61 |
+
+- 方向**明确为正**：**PPL 改善 2.53%**（13017.891 vs 13355.328）。
+- ⚠ **仍低于项目 <20% 判据** → 本机 smoke 档**不能据此宣称收益**；
+  真正的判据仍需**服务器 1b 档 probe_PPL A/B**。
+- ⚠ forward-only 本身有**开销**（FO_learn 段 0.32–0.44 ms/tok）——
+  在本机 smoke 档它**换来的 PPL 改善与开销相抵**（8.12 vs 7.61 更慢）。
+  这正是「收益必须由服务器 A/B 判定」的原因：若生产档收益不显著，
+  应把 `forward_only_eta` 调小或设 0。
+
+### 4.3 附带修复：探针从未真正生效
 
 本次 A/B 准备过程中发现一个**既有缺陷**（与 forward-only 无关）：
 `train/train.py` 的 `sys.path` 只加了 `tools/`，而 `probe_nll` 来自
@@ -176,15 +209,23 @@ python train/train.py --preset 1b --data pretrain --remote-data \
 
 ## 5. 门禁
 
-`tests/gates/gate_forward_only.py`（P210 新增，26 项）：
+`tests/gates/gate_forward_only.py`（P210 新增；**P211 更新为 30 项**）：
 
 | 组 | 内容 |
 |---|---|
 | A | 固定随机投影：确定性、区分性、值域、无溢出告警、标签越界报错 |
 | B | 层目标学习：目标递推维度与值域、**不触碰上行**、稀疏性（CSR 行宽不变）、目标匹配方向、eta=0 零贡献 |
-| C | 接线与零回归：默认关闭不构造投影器、关闭时同种子逐位一致、开启时轨迹确实改变、配置 fail-fast、CLI 开关存在 |
+| C | 接线与零回归（P211 更新）：**默认开启**（C1a/C1b）、显式关闭不构造投影器（C1c）、关闭时同种子逐位一致（C2a）、开启时轨迹确实改变（C3）、**eta=0 轨迹 == 旧路径轨迹**（C3b，P211 新契约）、配置 fail-fast（C4）、CLI 只剩 `--no-forward-only`（C5） |
 
 跑法：`py -3.14 tests/gates/gate_forward_only.py`
+
+**C3b 是 P211「删旧路径」的实现方式判据**：它断言「forward-only 且 eta=0」的
+训练轨迹摘要与「显式关闭 forward-only」的轨迹**逐位相同** —— 即旧路径没有另起
+一套代码，而是被表达成新路径的特例。
+
+`tests/gates/gate_cpu_opt_p211.py`（P211 新增，15 项）覆盖本路径的性能改造
+（融合核逐位等价、不触碰上行、稀疏性、稳态缩放只作用于下行），
+详见 [CPU 性能优化实录](PHD-Net_CPU性能优化实录_P211.md)。
 
 ---
 

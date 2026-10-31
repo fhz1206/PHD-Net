@@ -238,7 +238,7 @@ class PHDNetConfig:
     pc_pred_mix: float = 1.0        # 预测项权重（1−mix 为重构项权重）
 
     # ───────────────────────────────────────────────────────────────────────
-    # P210：前向only 训练路径（forward-only training path）——**默认关闭**
+    # P211：前向only 训练路径（forward-only training path）——**默认开启**
     # ───────────────────────────────────────────────────────────────────────
     # 动机：PHD-Net 已是无反向传播架构，但**任务信号只到 M6 读出**，主干 M2
     # 只学无监督重构（P198 起上行识别权重更被冻结，eta_oja=0）。forward-only
@@ -249,7 +249,15 @@ class PHDNetConfig:
     #
     # ⚠ **收益必须由 probe_PPL A/B 判定**，不得先验断言更好——层目标 τ 是
     #   「下一 token 的随机码」，不承载标签语义。
-    forward_only: bool = False       # 总开关（默认关闭，铁律④）
+    #
+    # ⚠⚠ **P211（fhz 2026-10-31 指示「默认采用 forward-only，旧的非
+    #   forward-only 路径删去」）**：
+    #   · `forward_only` 语义**反转为「禁用」**——保留字段是为了让门禁/实验
+    #     仍能显式关掉做 A/B 对照，**默认 True**（即默认走 forward-only）。
+    #   · 旧路径（仅无监督重构、不注入层目标）**不再是「另一种模式」**，而是
+    #     「forward-only 的一个特例」：把 `forward_only_eta` 设为 0 即等价于
+    #     旧行为。旧的布尔开关语义（True=开）已翻转，见 `__post_init__`。
+    forward_only: bool = True        # True=走 forward-only（P211 起默认开）
     forward_only_eta: float = 0.01   # 层目标匹配学习率（乘以 PC 的调制缩放）
     forward_only_gain: float = 1.0   # 目标码增益（再经 tanh 压到激活值域）
     forward_only_seed: int = 0       # 固定随机投影的种子（0 = 跟随 cfg.seed）
