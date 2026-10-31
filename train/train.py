@@ -69,7 +69,13 @@ import numpy as np
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent
-for p in (str(_HERE), str(_ROOT), str(_ROOT / "tools")):
+# ⚠ P210 修复（既有缺陷）：`tools/eval/` 也必须在 sys.path 上 ——
+#   `probe_nll` 来自 `tools/eval/ppl_probe.py`，而原路径只加了 `tools/`，
+#   于是 `--probe-every` 永远走 except 分支打印「探针不可用」→ **A/B 判据
+#   （probe_PPL）从未真正生效**（README §4 明确要求 A/B 用 probe_PPL）。
+#   这是本次改动前就存在的问题（与 forward-only 无关），但它让所有 A/B
+#   都退化为 sliding PPL（项目已说明 sliding PPL 信噪比仅 0.40）。
+for p in (str(_HERE), str(_ROOT), str(_ROOT / "tools"), str(_ROOT / "tools" / "eval")):
     if p not in sys.path:
         sys.path.insert(0, p)
 os.environ.setdefault(  # P39：numba 缓存持久化（不被 __pycache__ 清理波及）
@@ -561,6 +567,28 @@ def main() -> None:
                          "主干/记忆仍按 token 严格保序（脑同构：微小簇并行放电+突触时间整合），"
                          "仅读出末端做 B 步平均梯度更新（B7 机制的多步形式）。"
                          "B=8/16/32 可显著提升吞吐与统计效率。")
+    # ── P210：前向only 训练路径（forward-only）──
+    ap.add_argument("--forward-only", action="store_true", default=False,
+                    help="P210：**前向only 训练路径**（默认关，铁律④）。"
+                         "动机：PHD-Net 已无反向传播，但**任务信号只到 M6 读出**，"
+                         "主干 M2 只学无监督重构。forward-only 家族"
+                         "（FF/FP/FTP/NoProp/Sigprop）解决的正是「无反向传播下"
+                         "如何把任务信号送到中间层」。本实现取 FP（标签→固定"
+                         "随机投影目标）+ FTP（沿模型自己的权重递推层目标）"
+                         "两条内核，落到 M2 **下行生成权重**（不碰上行：P198 实测 "
+                         "eta_oja>0 正反馈发散）。"
+                         "⚠ 层目标是「下一 token 的随机码」、**不承载标签语义** → "
+                         "**收益必须由 --probe-every 的 probe_PPL A/B 判定**，"
+                         "不得先验断言更好。")
+    ap.add_argument("--forward-only-eta", type=float, default=0.01,
+                    help="P210：前向only 层目标匹配学习率（乘以 PC 的调制缩放）。"
+                         "默认 0.01。0 = 关闭该更新（不报错）。")
+    ap.add_argument("--forward-only-gain", type=float, default=1.0,
+                    help="P210：层目标随机码的线性增益（再经 tanh 压到激活值域 "
+                         "(-1,1)）。默认 1.0。")
+    ap.add_argument("--forward-only-seed", type=int, default=0,
+                    help="P210：固定随机投影的种子偏移（0=跟随 --seed）。"
+                         "改它会换一套目标方向 → 必须与 A/B 一起固定。")
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--epochs", type=int, default=1,
                     help="语料流过遍数（状态跨 epoch 连续不重置）")
@@ -880,6 +908,16 @@ def main() -> None:
     cfg.enable_cpu_parallel = args.enable_cpu_parallel  # CPU侧并行增强
     cfg.numba_threads = args.numba_threads          # numba并行线程数
     cfg.omp_threads = args.omp_threads              # OpenMP线程数
+    # ── P210：前向only 训练路径（默认关，铁律④）────────────────────────
+    cfg.forward_only = bool(args.forward_only)
+    cfg.forward_only_eta = float(args.forward_only_eta)
+    cfg.forward_only_gain = float(args.forward_only_gain)
+    cfg.forward_only_seed = int(args.forward_only_seed)
+    if cfg.forward_only:
+        print(f"[p210] 前向only 训练路径已启用：eta={cfg.forward_only_eta} "
+              f"gain={cfg.forward_only_gain} seed偏移={cfg.forward_only_seed} "
+              f"（层目标=下一 token 的固定随机码，**不承载标签语义** → "
+              f"收益必须由 probe_PPL A/B 判定）", flush=True)
     # P202：回放节奏与开关（M6_replay 是「other 之外的第三大段」）
     if args.replay_every > 0 and args.replay_every != 4:
         cfg.replay_every = int(args.replay_every)   # 覆库默认 4

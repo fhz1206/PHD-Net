@@ -237,6 +237,23 @@ class PHDNetConfig:
     pc_predictive_target: bool = False
     pc_pred_mix: float = 1.0        # 预测项权重（1−mix 为重构项权重）
 
+    # ───────────────────────────────────────────────────────────────────────
+    # P210：前向only 训练路径（forward-only training path）——**默认关闭**
+    # ───────────────────────────────────────────────────────────────────────
+    # 动机：PHD-Net 已是无反向传播架构，但**任务信号只到 M6 读出**，主干 M2
+    # 只学无监督重构（P198 起上行识别权重更被冻结，eta_oja=0）。forward-only
+    # 家族（FF / FP / FTP / NoProp / Sigprop）解决的正是「无反向传播下如何把
+    # 任务信号送到中间层」这一缺口。本组开关引入其中 **FP（标签 → 固定随机
+    # 投影目标）+ FTP（沿模型自己的权重递推层目标）** 两条内核，落到 M2 的
+    # **下行生成权重**（不碰上行：P198 实测 eta_oja>0 正反馈发散）。
+    #
+    # ⚠ **收益必须由 probe_PPL A/B 判定**，不得先验断言更好——层目标 τ 是
+    #   「下一 token 的随机码」，不承载标签语义。
+    forward_only: bool = False       # 总开关（默认关闭，铁律④）
+    forward_only_eta: float = 0.01   # 层目标匹配学习率（乘以 PC 的调制缩放）
+    forward_only_gain: float = 1.0   # 目标码增益（再经 tanh 压到激活值域）
+    forward_only_seed: int = 0       # 固定随机投影的种子（0 = 跟随 cfg.seed）
+
     # T2.2 可学习稀疏词典：M1 W_enc 由 Foldiak 局部规则慢调
     #      （活跃单元 Oja 更新 + 行范数稳态双约束，防 Oja 塌缩）。
     #      脑对应初级皮层 simple cell 感受野学习。
@@ -637,6 +654,14 @@ class PHDNetConfig:
                 "规模会正反馈发散（P198 实测：3000 步 probe_PPL 9.1e11）。"
                 "小规模/短跑的机制测试可忽略本警告；生产训练请保持 0。",
                 RuntimeWarning, stacklevel=2)
+        # P210（fwd-only 路径）fail-fast：非法值立即报错，不静默纠正。
+        if self.forward_only_eta < 0.0:
+            raise ValueError(
+                f"forward_only_eta={self.forward_only_eta} 非法：学习率须 >= 0。")
+        if self.forward_only_gain <= 0.0:
+            raise ValueError(
+                f"forward_only_gain={self.forward_only_gain} 非法："
+                "目标码增益须 > 0（0 会让层目标恒为 0，退化成无信号更新）。")
 
     @classmethod
     def from_ckpt(cls, d: dict) -> "PHDNetConfig":

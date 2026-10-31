@@ -6,19 +6,19 @@ Python + numba + Cython（可选）+ PyTorch/昇腾 NPU（读出加速）。
 
 **唯一生产训练入口是 `train/train.py`。**
 
-适用范围：仓库根入口文档。数据截止 **2026-10-17（P199）**。
+适用范围：仓库根入口文档。数据截止 **2026-10-31（P210）**。
 文档分工见 `docs/文档写作规范.md`；详细性能数字与迭代历史见
 `docs/PHD-Net_性能评估与迭代方案.md`（性能唯一出处）。
 
 ---
 
-## 1. 当前状态（P199，2026-10-17）
+## 1. 当前状态（P210，2026-10-31）
 
 | 项 | 状态 |
 |---|---|
 | fast 回归 | `python tests/run_tests.py fast` = **9/9**（零回归门槛） |
-| 专项门禁 | `tests/gates/gate_*.py` = **47 个，当前全绿**（数量用 `ls tests/gates/gate_*.py` 现查，别写死） |
-| 生产默认 | 读出 fp32（P194）/ `eta_oja=0`（P198）/ SDR 新颖性印迹开（P197）/ `--step-profiling` 默认开（P198）/ `--lang en`（P199 消息目录） |
+| 专项门禁 | `tests/gates/gate_*.py` = **48 个，当前全绿**（数量用 `ls tests/gates/gate_*.py` 现查，别写死） |
+| 生产默认 | 读出 fp32（P194）/ `eta_oja=0`（P198）/ SDR 新颖性印迹开（P197）/ `--step-profiling` 默认开（P198）/ `--lang en`（P199 消息目录）/ 前向only 路径**关**（P210） |
 | 已知红线 | `eta_oja>0` 生产规模正反馈发散（已默认 0 + RuntimeWarning）；1B 档大词表 × 少 token 曝光不足（见 §9） |
 
 近期迭代主线（均已在本仓库实测验证）：
@@ -39,6 +39,15 @@ Python + numba + Cython（可选）+ PyTorch/昇腾 NPU（读出加速）。
 - **P199**：i18n 重写为**显式消息目录**（`phdnet/i18n.py::_CATALOG` 整句精确匹配，
   废弃正则词表替换）——`--lang en` 现在真正输出英文核心消息；TeeLogger 建立后重装
   翻译层的顺序 bug 已修。新代码用 `T("中文", "English")`。
+- **P210**：**前向only 训练路径**（`--forward-only`，默认关）——调研市面上的
+  forward-only 家族（FF / FP / FTP / NoProp / Sigprop），取 **FP**（标签 → 固定随机
+  投影目标）+ **FTP**（沿模型自己的权重递推层目标）两条内核，给 **M2 主干**补上
+  「任务信号到达中间层」的通道（此前任务信号只到 M6 读出，主干只学无监督重构）。
+  **默认关闭**，关闭时训练轨迹逐位不变。**收益未达显著**（smoke 档 probe_PPL
+  −0.32% / −2.52%，远低于项目 <20% 判据）→ 定位为「机制已实现、收益待服务器
+  1b 档 A/B」的候选。详见 `docs/PHD-Net_前向only训练路径.md`。
+  同批修复了一个**既有缺陷**：`--probe-every` 因 `tools/eval/` 不在 `sys.path`
+  而从未真正跑通（README §4 规定的 A/B 判据失效）。
 
 ---
 
@@ -246,6 +255,7 @@ python train/train.py --preset 1b --data pretrain --report
 | `--readout-master-weight` | off | P195：fp32 master + 低精度影子（默认 off，多付 866.7 MiB） |
 | `--readout-conn-k` | `128` | 稀疏读出（≈4.2% 连接率）；0 = 稠密 |
 | `--micro-batch` | `1` | P194 Q1：读出梯度 B 步平均提交（主干/记忆仍逐 token 保序） |
+| `--forward-only` | 关 | P210：前向only 训练路径（FP+FTP 内核，给 M2 主干补任务信号）。**默认关**，关闭时轨迹逐位不变；收益未达显著，见 `docs/PHD-Net_前向only训练路径.md` |
 | `--step-profiling` | **开** | P198 起默认开：日志带 `loop:` 与 `segments:` 分段用时；`--no-step-profiling` 关 |
 | `eta_oja`（config） | `0.0` | P198：>0 生产规模发散（9.1e11），默认 0 + RuntimeWarning |
 | `--cython-kernels` | `auto` | 加载已编译扩展否则就地构建，失败静默回落 numba |
@@ -293,6 +303,7 @@ python train/train.py --preset 1b --data pretrain --report
 | **看性能数字 / 为什么吃不满多核** | `docs/PHD-Net_性能评估与迭代方案.md`（性能唯一出处） |
 | 快速查现状 / 已定案结论 | `docs/PHD-Net_现状速查.md` |
 | 加新机制 / 扩硬件后端 | `docs/PHD-Net_扩展指南.md`、`docs/PHD-Net_硬件后端适配报告.md` |
+| 了解 forward-only（无反向传播）训练路径 | `docs/PHD-Net_前向only训练路径.md`（FF/FP/FTP/NoProp/Sigprop 调研 + P210 实现 + A/B） |
 | 与 Transformer / 大脑对比 | `docs/PHD-Net_竞争力与脑同构性评估.md` |
 | 查一个 bug 的症状→根因→门禁缺口 | `BUGS.md`（53 条） |
 | 制备语料 / 数据集入口 | `tools/README.md`、`datasets/README.md` |
@@ -305,9 +316,9 @@ python train/train.py --preset 1b --data pretrain --report
 train/          生产训练子项目（train.py / config_1b.py / corpus_stream.py / infer.py / README.md）
 phdnet/         核心包（config / sparse_encoder / sparse_pc / stdp_kernels / plasticity / wm /
                 ltm / bigltm / sparse_table / modulator / readout / model / word_encoder /
-                word_lm / corpus / ms_stream / i18n / device / backends/）
+                word_lm / corpus / ms_stream / i18n / device / forward_only / backends/）
 eval_corpus/    冻结评测基准 + OOD 探针
-tests/          run_tests.py（fast 9 项）+ gates/（47 个 gate_*.py）
+tests/          run_tests.py（fast 9 项）+ gates/（48 个 gate_*.py）
 tools/          数据制备 / 评测 / 诊断（diag_vocab_budget.py、data/cc_traces_to_text.py 等）
 docs/           架构、性能、扩展、后端、竞争力、现状速查
 chat/           对话前端（tui.py，--selftest 可无模型走通 UI）

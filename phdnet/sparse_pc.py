@@ -937,6 +937,59 @@ class SparsePCStack:
         if homeostasis:
             self._homeostatic_scale()
 
+    # ---------- P210：前向only 层目标学习（forward-only target learning） ----------
+    def learn_forward_target(self, cache: dict, tau_r1: np.ndarray,
+                             tau_s0: np.ndarray, eta: float,
+                             homeostasis: bool = False) -> None:
+        """前向only 的**层目标匹配**更新（只动下行生成权重 dn0/dn1）。
+
+        对齐 Forward Projection（Nat Commun 2026）与 Forward Target
+        Propagation（arXiv 2506.11030）的内核：层目标由「标签 → 固定随机投影」
+        生成，再沿**模型自己的权重**递推到更浅一层；每层用**自己的目标**做
+        局部目标匹配更新。
+
+            dn1 += η·(τ_r1 − dn1·r2) ⊗ r2
+            dn0 += η·(τ_s0 − dn0·r1) ⊗ r1
+
+        稀疏口径：与既有 PC 学习一致，**只更新已存在的边**（CSR 外积），
+        不新增连接、不改变拓扑（铁律：稀疏是架构原则）。
+
+        ⚠ **不触碰上行识别权重 up0/up1** —— P198 实测 `eta_oja>0` 在生产规模
+        正反馈发散（3000 步 probe_PPL 9.1e11），上行必须保持只读。
+        本方法只改下行生成权重（eta_pc 那一侧），P194 实测该侧安全。
+
+        参数
+        ----
+        cache : dict
+            `pc.infer` 的缓存（取 r1/r2/s0）。
+        tau_r1 : np.ndarray
+            r1 空间（n_mid）的层目标。
+        tau_s0 : np.ndarray
+            s0 空间（n_sdr）的层目标（已沿 dn0 递推）。
+        eta : float
+            学习率（已含外部调制缩放）。
+        homeostasis : bool
+            是否在更新后做行范数稳态缩放（与既有路径同口径）。
+        """
+        if eta == 0.0:
+            return
+        r1, r2 = cache["r1"], cache["r2"]
+        # 生成侧的当前预测（下行权重作用在上一层激活上的输出）。
+        # ⚠ 用 **cache 里的 r1/r2 之外**的量：预测 = 上层激活经下行权重的
+        #   matvec，与 PC 误差 e1 = r1 − dn1·r2 同源但符号相反。
+        pred_r1 = self._mv(self.dn1, r2)          # dn1·r2 → r1 空间
+        pred_s0 = self._mv(self.dn0, r1)          # dn0·r1 → s0 空间
+        # 目标匹配残差（局部：只看本层预测与本层目标，无跨层梯度）。
+        d_r1 = np.asarray(tau_r1, dtype=np.float64) - pred_r1
+        d_s0 = np.asarray(tau_s0, dtype=np.float64) - pred_s0
+        # 稀疏外积：只更新存在边（与 _pc_learn_fused 的 dn 更新同构）。
+        self._add_outer(self.dn1, d_r1, r2, eta)
+        self._add_outer(self.dn0, d_s0, r1, eta)
+        self._clip(self.dn0[2], self.w_max)
+        self._clip(self.dn1[2], self.w_max)
+        if homeostasis:
+            self._homeostatic_scale()
+
     def homeostatic_rate(self, r2: np.ndarray, target: float,
                          eta_h: float) -> None:
         """逐神经元目标发放率（内在可塑性）：按增益缩放该神经元存在的入边。"""

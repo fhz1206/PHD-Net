@@ -147,6 +147,26 @@ class PHDNet:
         self._mb_accum: dict | None = None
         self._mb_count = 0
 
+        # ── P210：前向only 训练路径（forward-only）──────────────────────
+        # 任务信号此前**只到 M6 读出**，主干 M2 拿不到任何任务信号。forward-only
+        # 家族（FF/FP/FTP/NoProp/Sigprop）解决的是「无反向传播下如何把任务
+        # 信号送到中间层」。本实现取 FP（标签 → 固定随机投影目标）+ FTP（沿
+        # 模型自己的权重递推层目标）两条内核。
+        #
+        # ⚠ 层目标 τ 是「下一 token 的随机码」，**不承载标签语义** → 收益
+        #   必须由 probe_PPL A/B 判定，不得先验断言更好。
+        # ⚠ 只更新**下行生成权重** dn0/dn1（不碰 up0/up1）——P198 实测
+        #   eta_oja>0 正反馈发散，上行必须保持只读。
+        self._fwd_only = bool(getattr(cfg, "forward_only", False))
+        self._fwd_projector = None
+        if self._fwd_only:
+            from .forward_only import ForwardTargetProjector
+            _fwd_seed = int(getattr(cfg, "forward_only_seed", 0) or 0)
+            self._fwd_projector = ForwardTargetProjector(
+                n_out=n_out, n_layers=(cfg.n_mid, cfg.n_sdr),
+                seed=(cfg.seed + _fwd_seed) if _fwd_seed else cfg.seed,
+                gain=float(getattr(cfg, "forward_only_gain", 1.0)))
+
         # P35：step 分段计时（诊断 CPU 侧耗时分布；默认关，零开销）
         self._prof_on = bool(getattr(cfg, "step_profiling", False))
         self._prof: dict = {}
@@ -687,6 +707,28 @@ class PHDNet:
                     if cfg.learnable_encoder:
                         self.encoder.learn(x, s0, cfg.eta_enc * pc_scale)
                     self._prof_end('PC_learn', _p)
+                # P210：前向only 层目标学习（forward-only target learning）。
+                # 放在 PC 学习**之后**、同一份 cache 之上：层目标由「标签 → 固定
+                # 随机投影」生成，再沿模型自己的下行权重 dn0 递推到 s0 空间
+                # （FTP 内核），每层做局部目标匹配（无跨层梯度回传）。
+                # ⚠ 只在**有监督信号**时执行（无标签就没有层目标）。
+                # ⚠ 学习率乘以与 PC 相同的调制缩放 pc_scale（与发育窗口一致）。
+                if (self._fwd_only and self._fwd_projector is not None
+                        and target is not None and learn):
+                    _lbl = (int(target_idx) if target_idx is not None
+                            else int(np.argmax(target)))
+                    _p = self._prof_t('FO_learn')
+                    _eta_fo = float(getattr(cfg, "forward_only_eta", 0.01)) * pc_scale
+                    if _eta_fo > 0.0:
+                        # FP 内核：标签 → 固定随机投影目标（r1 空间）
+                        _tau_r1 = self._fwd_projector.project(_lbl, 0)
+                        # FTP 内核：沿模型自己的 dn0 把目标递推到 s0 空间
+                        _tau_s0 = self._fwd_projector.recurse(
+                            _tau_r1, lambda v: self.pc._mv(self.pc.dn0, v))
+                        self.pc.learn_forward_target(
+                            cache, _tau_r1, _tau_s0, _eta_fo,
+                            homeostasis=cfg.homeostasis)
+                    self._prof_end('FO_learn', _p)
                 # 脑同构 M6：突触修剪——PC 权重低于阈值归零（突触消除，降噪+释容）
                 if cfg.critical_period:
                     if hasattr(self.pc, "prune_silence"):      # O1-2 结构性稀疏表

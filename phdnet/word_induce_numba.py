@@ -253,17 +253,19 @@ if NUMBA_WORD_OK:
 
 
 def default_nthreads() -> int:
-    """默认 prange 线程数 = **总核数 / 10**（fhz 2026-09-28 定调）。
+    """默认 prange 线程数 = **固定 12**（fhz 2026-10-31 定调，原为「核数 / 10」）。
 
     理由：① prange 的局部计数表按**块**分配（内存 O(chunk)），线程数过多会
     放大分配与合并开销；② 外层还有**层间线程池**（5 个 L 各自 nogil 并行），
-    总并行度 = nthreads × 层数，故每层取核数的 1/10 量级即可铺满
-    （191 核 → 19 × 5 ≈ 95 线程，留出主线程与 I/O 余量）；
-    ③ 上限 64（再大收益递减且局部表缓存压力上升）。
+    总并行度 = nthreads × 层数，故每层 12 线程在 191 核机器上约为 12 × 5 ≈ 60
+    线程，留出主线程与 I/O 余量；③ 固定值让**不同核数机器上的词表构建行为
+    一致**（原「核数/10」在 8 核→1、191 核→19 之间漂移，A/B 不可比）。
+
+    ⚠ 固定 12 在**核数 < 12 的小机器**上会超订（线程数 > 物理核数）→ 由
+    numba/OpenMP 自行调度（只是上下文切换变多，不影响正确性）。
+    本项目实测机型（191 核）无此问题；8 核本机仅用于冒烟。
     """
-    import multiprocessing
-    cpu = multiprocessing.cpu_count() or 1
-    return max(1, min(64, cpu // 10))
+    return 12
 
 
 def induce_length_numba(codes, inv_codes, n: int, L: int, min_count: int,

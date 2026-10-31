@@ -86,8 +86,8 @@ def build_segmenter_parallel(text: str, seg_kwargs: dict | None = None,
     """词涌现多核构建（P18：numba nogil + prange，层间**线程池**零 pickle）。
 
     引擎二选一（词集合逐位一致，gate_vocab_parallel A 例把关）：
-      - numba 可用 → `phdnet.word_induce_numba`：层内 prange（默认核数/10 线程）
-        + 层间 ThreadPoolExecutor（nogil 释放 GIL → 真并行）；
+      - numba 可用 → `phdnet.word_induce_numba`：层内 prange（默认固定 12 线程，
+        P210 前为「核数/10」）+ 层间 ThreadPoolExecutor（nogil 释放 GIL → 真并行）；
       - 否则 → 原 numpy `_induce_length` + ThreadPoolExecutor（**P192：回退
         路径也从进程池改线程池**；该路径是纯 Python 持 GIL，并行度受限，
         但生产环境不走它）。
@@ -118,7 +118,7 @@ def build_segmenter_parallel(text: str, seg_kwargs: dict | None = None,
     nw = min(workers, max_len - 1)               # 任务数只有 max_len-1 个
 
     if NUMBA_WORD_OK:
-        nth = default_nthreads()                # 核内 prange 线程（核数/10）
+        nth = default_nthreads()                # 核内 prange 线程（固定 12）
         with ThreadPoolExecutor(max_workers=nw) as ex:
             futs = [ex.submit(induce_length_numba, codes, inv_codes, n, L,
                               min_count, min_entropy, nth)
