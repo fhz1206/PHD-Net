@@ -113,7 +113,7 @@
   修后 RL 门禁恢复 PASS（0.375 → 0.417）。
 - 门禁 `gate_cpu_opt_p211` 的 B1d/B1e 锁住这条契约（含
   「`learn_scale=0` 的轨迹 == 关闭 forward-only 的轨迹」的**逐位**判据）。
-  详见 [技术债清理与性能默认优化 P212](PHD-Net_技术债清理与性能默认优化_P212.md)。
+  详见 [已落地优化与红线](PHD-Net_已落地优化与红线.md)。
 
 ### 2.3 为什么 τ 是「随机码」而不是「正确答案」
 
@@ -245,7 +245,7 @@ python train/train.py --preset 1b --data pretrain --remote-data \
 
 `tests/gates/gate_cpu_opt_p211.py`（P211 新增，15 项）覆盖本路径的性能改造
 （融合核逐位等价、不触碰上行、稀疏性、稳态缩放只作用于下行），
-详见 [CPU 性能优化实录](PHD-Net_CPU性能优化实录_P211.md)。
+详见 [已落地优化与红线](PHD-Net_已落地优化与红线.md)。
 
 ---
 

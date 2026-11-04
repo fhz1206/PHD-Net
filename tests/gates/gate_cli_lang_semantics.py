@@ -30,7 +30,10 @@ import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[2]
-for _p in ("", "tests", "tools", "train"):
+# ⚠ P213：`eval_common` 实际在 **tests/evals/**（不是 tests/）——
+#   原来只加了 "tests" → `from eval_common import ...` 报
+#   `ModuleNotFoundError: No module named 'eval_common'`（本门禁长期失败）。
+for _p in ("", "tests", "tests/evals", "tools", "train"):
     if str(_ROOT / _p) not in sys.path:
         sys.path.insert(0, str(_ROOT / _p))
 

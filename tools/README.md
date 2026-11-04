@@ -71,6 +71,10 @@ M5 公平评测（PHD-Net vs nanoGPT 级 Transformer）入口**不在本目录**
 | `estimate_scale.py` | 逐档放大主干/词表，实测 (参数量, ms/token) 并外推，同时给内存需求 | `python tools/bench/estimate_scale.py --tokens 800` |
 | `profile_lm.py` | LM 热路径剖析：cProfile 端到端 + 逐相手工计时（编码/PC/STDP/WM/LTM/读出），结果写 `outputs/experiments/profile_lm.log`。**无命令行参数**，只读不改模型 | `python tools/probe/profile_lm.py` |
 | `backend_probe.py` | 硬件后端探针：昇腾 NPU / ROCm / CUDA / DirectML / CPU，并跑本机可跑的等价性自检 | `python tools/probe/backend_probe.py` |
+| **`run_gates.py`** | **统一门禁 runner**：自动实测选能 `import numpy` 的解释器、性能敏感门禁串行、输出 JSON 明细 | `python tools/run_gates.py --jobs 4` |
+| **`bench_server_threads.py`** | **服务器端到端 numba 线程 A/B**（补 P204 遗留空白）：输出 `ms/tok` + `segments(win)` 各段判据表 | `python tools/bench/bench_server_threads.py --threads 8,16,32 --preset 1b --data pretrain --remote-data` |
+| **`diagnose_npu_utilization.py`** | **NPU「假占用」判读**：解析 msprof CSV，给 `aicore_time`/`aiv_time`/`wait` 分解 + 判定依据 + 归因 + JSON；列名识别失败**拒绝出结论** | `python tools/probe/diagnose_npu_utilization.py outputs/prof/msprof_readout --log <训练日志>` |
+| `analyze_msprof_timeline.py` | msprof timeline 解析：按算子聚合耗时 + 硬件单元归属判读（AICore / AIV / 搬运 / wait） | `python tools/probe/analyze_msprof_timeline.py outputs/prof/msprof_readout` |
 
 ⚠ `bench_local.py` 测的是**本机 x86** 数字：已实测三次「x86 更快、昇腾更慢」
 （M1 fp32、M2 融合核、OMP place 表）。它只回答「这次改动让 CPU 侧变快还是变慢」，

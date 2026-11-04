@@ -205,3 +205,127 @@ def _ltm_learn_rows(K, V, S, tpi, tpi_post, ks, g_tpost, g_tpre,
                     V[r, sz] = np.float64(w2)
                 sz += 1
                 S[r] = sz
+
+
+# ⚠ P214：上面这个**线性槽位扫描**核保留作**对拍参考**与回退臂。
+#   生产路径已切到下面的 `_ltm_learn_rows_hashed`，由
+#   `OnlineCSRTable.LTM_HASH_LOOKUP` 控制；两核逐位对拍见
+#   `tests/gates/gate_ltm_hash_lookup.py`。
+
+
+@njit(cache=True, nogil=True, parallel=True, fastmath=False)
+def _ltm_learn_rows_hashed(K, V, S, tpi, tpi_post, ks, g_tpost, g_tpre,
+                           eta, w_max, q, int8, m_out, HK, HV):
+    """P214：与 `_ltm_learn_rows` **逐位相同**，但把「线性槽位扫描」换成
+    **每行一张开放寻址哈希表**。
+
+    ## 为什么要改
+
+    原核是三重循环：
+
+    ```
+    for r in prange(R):          # 活跃行数，1b 档 ~256–512
+        for c in range(C):       # grow_order，同量级
+            for s in range(sz):  # 行内槽位，最多 m_out=72
+                if K[r,s] == k: ...
+    ```
+
+    1b 档 R=C≈512、m_out=72 → **每步约 1,900 万次 int64 比较**。
+    `sparse_table.py::_find_slot` 的注释「线性扫描定位键（m_out ≤ 60，
+    扫描成本可忽略）」对 **dict 版**（每个 key 只扫一行）成立，
+    对 P78 的 prange 批量核**不成立**（R×C 次重复扫描）。
+    项目自己记录 `table.learn` 占 `M4b_imprint` 的 **88%**。
+
+    ## 改法
+
+    每行建一张容量 `H`（2 的幂，≥ 2·(m_out+1)）的开放寻址表：
+    `HK[r,h]` 存键、`HV[r,h]` 存槽位，`HV==-1` 表示空槽。
+    建表按槽位**升序**插入、同键**不覆盖** → 保留「**首个**匹配槽」
+    语义（与线性扫描的 `break` 完全一致）。查表 O(1) 期望，
+    复杂度 `O(R·C·sz)` → **`O(R·(sz + C))`**。
+
+    ## 逐位一致的四条保证
+
+    1. 建表按 `s` 升序、同键不覆盖 → `found` 与原版首个匹配槽相同；
+    2. `c` 的遍历顺序、`ltp<=0` 的短路、浮点运算表达式**逐字照抄**；
+    3. 生长出新槽后**立即入表** → 后续 `c` 若再遇同键，可见性与原版相同；
+    4. `S[r] = sz` 只在生长分支写（与原版一致）。
+
+    HK/HV 由调用方**预分配复用**（不在核内分配）；核内只清 `HV[r,:]`
+    （`HK` 的内容仅在 `HV!=-1` 时被读，故无需清零）。
+    """
+    R = K.shape[0]
+    C = ks.shape[0]
+    H = HK.shape[1]
+    mask = H - 1
+    for r in prange(R):
+        tp = tpi[r]
+        if tp <= 0.0:
+            continue
+        tp_post = tpi_post[r]
+        sz = S[r]
+        # ① 清表：只清 slot 数组（HK 无需清，理由见 docstring）
+        for h in range(H):
+            HV[r, h] = -1
+        # ② 建表：按槽位升序；同键保留**首个**槽位
+        for s in range(sz):
+            kk = K[r, s]
+            h0 = (kk ^ (kk >> 17)) & mask
+            for p in range(H):
+                if HV[r, h0] == -1:
+                    HK[r, h0] = kk
+                    HV[r, h0] = s
+                    break
+                if HK[r, h0] == kk:
+                    break                     # 同键不覆盖 → 首个槽位
+                h0 = (h0 + 1) & mask
+        for c in range(C):
+            ltp = eta * tp * g_tpost[c]
+            if ltp <= 0.0:
+                continue
+            k = ks[c]
+            # ③ O(1) 查表（替代 `for s in range(sz)`）
+            h0 = (k ^ (k >> 17)) & mask
+            found = -1
+            for p in range(H):
+                sl = HV[r, h0]
+                if sl == -1:
+                    break                     # 空槽 → 该键不存在
+                if HK[r, h0] == k:
+                    found = sl
+                    break
+                h0 = (h0 + 1) & mask
+            if found >= 0:
+                if int8:
+                    w = np.float64(np.int32(V[r, found])) / np.float64(q)
+                else:
+                    w = np.float64(V[r, found])
+                ltd = eta * tp_post * g_tpre[c]
+                w2 = w + ltp - ltd
+                if w2 < 0.0:
+                    w2 = 0.0
+                elif w2 > w_max:
+                    w2 = w_max
+                if int8:
+                    V[r, found] = np.int16(int(np.round(w2 * q)))
+                else:
+                    V[r, found] = np.float64(w2)
+            elif sz < m_out:
+                w2 = ltp if ltp < w_max else w_max
+                K[r, sz] = k
+                if int8:
+                    V[r, sz] = np.int16(int(np.round(w2 * q)))
+                else:
+                    V[r, sz] = np.float64(w2)
+                # ④ 新槽入表（保持后续 c 的可见性，与线性扫描等价）
+                h0 = (k ^ (k >> 17)) & mask
+                for p in range(H):
+                    if HV[r, h0] == -1:
+                        HK[r, h0] = k
+                        HV[r, h0] = sz
+                        break
+                    if HK[r, h0] == k:
+                        break
+                    h0 = (h0 + 1) & mask
+                sz += 1
+                S[r] = sz

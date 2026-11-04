@@ -54,3 +54,7 @@ _tmp_*
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 门禁/基准运行产物（每次运行生成，不入库）
+outputs/experiments/gates_*.json
+outputs/experiments/server_threads_*.json

@@ -6,20 +6,21 @@ Python + numba + Cython（可选）+ PyTorch/昇腾 NPU（读出加速）。
 
 **唯一生产训练入口是 `train/train.py`。**
 
-适用范围：仓库根入口文档。数据截止 **2026-10-31（P212）**。
-文档分工见 `docs/文档写作规范.md`；详细性能数字与迭代历史见
-`docs/PHD-Net_性能评估与迭代方案.md`（性能唯一出处）。
+适用范围：仓库根入口文档。数据截止 **2026-11-04（P214）**。
+文档分工见 `docs/文档写作规范.md`；性能数字唯一出处是
+`docs/PHD-Net_性能评估与迭代方案.md`；当前事实基线见 `docs/PHD-Net_现状速查.md`。
 
 ---
 
-## 1. 当前状态（P212，2026-10-31）
+## 1. 当前状态（P214，2026-11-04）
 
 | 项 | 状态 |
 |---|---|
 | fast 回归 | `python tests/run_tests.py fast` = **9/9**（零回归门槛） |
-| 专项门禁 | `tests/gates/gate_*.py` = **52 个**，**49 通过 / 3 个失败**（`gate_cli_lang_semantics` / `gate_encoder_gemv` / `gate_ltm_reverse_index` —— 经 `git stash` 对拍确认为**改动前既有**的环境路径问题）；数量用 `ls tests/gates/gate_*.py` 现查，别写死 |
-| 生产默认 | 读出 fp32（P194）/ `eta_oja=0`（P198）/ SDR 新颖性印迹开（P197）/ `--step-profiling` 默认开（P198）/ `--lang en`（P199 消息目录）/ **前向only 路径开**（P211）/ 稀疏读出 `conn_k=128`（P108）/ 在线 CSR 大空间表（P50）/ **M2 推理核按平台自动择优**（P212：x86→fused、昇腾→plain） |
-| 已知红线 | `eta_oja>0` 生产规模正反馈发散（已默认 0 + RuntimeWarning）；1B 档大词表 × 少 token 曝光不足（见 §9） |
+| 专项门禁 | `tests/gates/gate_*.py` = **53 个，53/53 全绿**；统一入口 `python tools/run_gates.py --jobs 4`（自动选能 import numpy 的解释器 + 性能敏感门禁串行）。数量用 `ls` 现查，别写死 |
+| 生产默认 | 读出 fp32 / `eta_oja=0` / SDR 新颖性印迹开 / `--step-profiling` 默认开 / `--lang en`（只影响终端文案）/ **前向only 路径开** / 稀疏读出 `conn_k=128` / 在线 CSR 大空间表 / **M2 推理核按平台自动择优**（x86→fused、昇腾→plain）/ `--m2-kernel auto` / `--numba-threads 16` / `--cython-kernels auto`。完整源码核实表见 `docs/PHD-Net_现状速查.md` §3 |
+| 当前性能 | 服务器 1b 档 step **10.8 ms/tok**（CPU ~6.5 / NPU 读出 3.5）；NPU 是**「假占用」**（`aicore_time≈0`），见 `docs/PHD-Net_NPU利用率诊断与优化_P214.md` |
+| 已知红线 | `eta_oja>0` 生产规模正反馈发散（已默认 0 + RuntimeWarning）；1B 档大词表 × 少 token 曝光不足（见 §9）。**完整红线清单见 `docs/PHD-Net_现状速查.md` §7** |
 
 近期迭代主线（均已在本仓库实测验证）：
 
@@ -67,7 +68,7 @@ Python + numba + Cython（可选）+ PyTorch/昇腾 NPU（读出加速）。
   - ⚠ **诚实边界**：读出已是**访存下界**（对照实验：索引排序后更新核耗时完全
     相同 → 瓶颈是写带宽而非 gather），算法层无提速空间；LTM 的 dict 版收益
     **在生产默认的在线 CSR 路径上不适用**。详见
-    `docs/PHD-Net_CPU性能优化实录_P211.md`。
+    `docs/PHD-Net_已落地优化与红线.md`。
 
 ---
 
@@ -324,8 +325,12 @@ python train/train.py --preset 1b --data pretrain --report
 | 快速查现状 / 已定案结论 | `docs/PHD-Net_现状速查.md` |
 | 加新机制 / 扩硬件后端 | `docs/PHD-Net_扩展指南.md`、`docs/PHD-Net_硬件后端适配报告.md` |
 | 了解 forward-only（无反向传播）训练路径 | `docs/PHD-Net_前向only训练路径.md`（FF/FP/FTP/NoProp/Sigprop 调研 + P210/P211 实现 + A/B） |
-| 查 CPU 侧提速的实测与边界 | `docs/PHD-Net_CPU性能优化实录_P211.md`（P211：int32 索引 / 融合核 / LTM 内联 / 计时口径 + **访存下界的诚实边界**） |
-| 查技术债清理与默认值的变更 | `docs/PHD-Net_技术债清理与性能默认优化_P212.md`（P212：2 个真 bug / **RL 场景 forward-only 与策略梯度不对齐的根因** / 死代码清单 / fp8 查表 3.06× / M2 核按平台择优） |
+| 查已落地的优化 / 防重踩的禁忌 | `docs/PHD-Net_已落地优化与红线.md`（当前生效优化清单 / 已删死代码 / 保留不动的实现 / **12 条设计教训** / 门禁现状） |
+| 查 CPU 侧时间预算与提速手段 | `docs/PHD-Net_CPU侧加速方案_P213.md`（服务器 1b 档 **CPU 6.5ms / NPU 3.5ms** 分段账 / **numba 线程 A/B 脚本** / M4b 热点分解） |
+| **查 NPU「假占用」/ 利用率上不去** | **`docs/PHD-Net_NPU利用率诊断与优化_P214.md`**（`aicore_time≈0` vs 设备占用 90%+ 的判读依据 / 逐项瓶颈核查 / **已落实的 LTM 优化 1.83×** / profiling 判读工具 / 服务器待执行清单） |
+| 查 NPU 加速开关（`--beta`）现状 | `docs/P205a_NPU流水线设计.md`（p0/p1/p2 已实现、**p3 未实现**；怎么测、占用率判据） |
+| 查为什么不做跨 token 流水 | `docs/PHD-Net_CPU-NPU重叠执行计划.md`（决策记录：三条红线） |
+| 查 M2/PC 并行瓶颈诊断 | `docs/PHD-Net_P201_M2-PC并行瓶颈诊断.md` |
 | 与 Transformer / 大脑对比 | `docs/PHD-Net_竞争力与脑同构性评估.md` |
 | 查一个 bug 的症状→根因→门禁缺口 | `BUGS.md`（53 条） |
 | 制备语料 / 数据集入口 | `tools/README.md`、`datasets/README.md` |

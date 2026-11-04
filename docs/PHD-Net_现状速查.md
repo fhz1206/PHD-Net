@@ -1,4 +1,4 @@
-# PHD-Net 现状速查（一页式，2026-10-31 P212）
+# PHD-Net 现状速查（一页式，2026-11-04 P214）
 
 > 本文是**当前事实基线**：数字、命令、开关默认值、已知问题、文档索引。
 > 开关默认值全部从源码核实（`phdnet/config.py` / `train/train.py` / `train/config_1b.py`）；
@@ -10,12 +10,15 @@
 
 | 项 | 值 | 来源 |
 |---|---|---|
-| `python tests/run_tests.py fast` | **9/9**（<1 分钟，零回归门槛） | `[历史锚点]`，持续门禁 |
-| `tests/gates/gate_*.py` 专项门禁 | **52 个**（`ls` 现查，勿写死）；P212 时点 **49/52 通过**，3 个失败（`gate_cli_lang_semantics` / `gate_encoder_gemv` / `gate_ltm_reverse_index`）经 `git stash` 对拍确认为**改动前既有**的环境路径问题 | `[本会话实测]` `outputs/test/reorg_gates/summary.json`；`gate_csr_vectorization_perf` 曾 26/27 属 golden 基准缺失，后续已绿 |
-| P194–P199 新增门禁 | `gate_insession_learning` / `gate_readout_master_weight` / `gate_generate_truncation` / `gate_cc_traces` / `gate_cli_i18n`（30 项显式契约） | `[源码]` tests/gates/ |
-| P210–P212 新增门禁 | `gate_forward_only`（**30 项**：固定随机投影 / 层目标学习 / 接线与**「eta=0 ≡ 旧路径」逐位判据**）、`gate_cpu_opt_p211`（**19 项**：int32 索引 / FO 融合核逐位等价 / **`learn_scale` 调制契约** / LTM 内联）、`gate_fp8_int8_convert`（**17 项**：fp8→int8 查表等价性 / 转化效率报告） | `[源码]` tests/gates/ |
-| P192 发布验证 | fast 9/9 + 40/41 verifier（唯一失败即 `gate_ltm_trace_semantics` (a) 组，**P193 已修 → 32/32**） | `[历史锚点]` `outputs/test/p192_publication/summary.json` |
-| CI | 两套 workflow（`.gitcode/` + `.github/`），无 Jenkinsfile；远端状态未核验，**不宣称全绿** | `[源码]` |
+| `python tests/run_tests.py fast` | **9/9**（<1 分钟，零回归门槛） | 持续门禁 |
+| 专项门禁 | **53 个**（`ls tests/gates/gate_*.py` 现查，勿写死）；**53/53 全绿** | `outputs/experiments/gates_*.json` |
+| **统一入口** | `python tools/run_gates.py [--jobs 4]` —— 自动实测选能 `import numpy` 的解释器 + 性能敏感门禁串行 + 输出 JSON | `tools/run_gates.py` |
+| 关键门禁 | `gate_forward_only` 30 项 / `gate_cpu_opt_p211` 19 项 / `gate_fp8_int8_convert` 17 项 / **`gate_ltm_hash_lookup` 10 项**（P214 哈希槽位查找逐位契约） | `tests/gates/` |
+| CI | 两套 workflow（`.gitcode/` + `.github/`），无 Jenkinsfile；远端状态未核验，**不宣称全绿** | 源码 |
+
+⚠ **本机解释器陷阱**：`python` 指向 WorkBuddy 内置 3.13（**无 numpy**），
+`py -c` 与 `py <脚本>` 按不同规则选解释器 → 直接 `py tests/gates/xxx.py`
+可能报 `No module named 'numpy'`。**一律用 `tools/run_gates.py`**。
 
 ## 2. 快速命令
 
@@ -45,7 +48,7 @@ py -3.14 tools/diag_vocab_budget.py --vocab-sample-chars 4000000 --tokens 100000
 py -3.14 tools/eval/rebaseline.py
 ```
 
-## 3. 全部开关默认值表（源码核实，2026-10-17）
+## 3. 全部开关默认值表（源码核实，2026-11-04）
 
 ### 3.1 库配置 `phdnet/config.py`（关键项）
 
@@ -66,7 +69,7 @@ py -3.14 tools/eval/rebaseline.py
 | `readout_master_weight` | **False** | P195：fp32 master + 低精度影子；默认 off |
 | `readout_shadow_refresh` | 8 | 影子重量化间隔（步） |
 | `micro_batch` | 1（CLI `--micro-batch`） | 读出梯度 B 步累积；主干仍逐 token |
-| `sdr_novelty` / `sdr_novelty_cap` / `novelty_gate_floor` | **True** / 65536 / 0.85 | P197 |
+| `sdr_novelty` / `sdr_novelty_cap` / `novelty_gate_floor` | **True** / 65536 / 0.85 | 会话中学习四开关默认 True |
 | `ltm_imprint_gate` | **0.3**（旧 0.8） | P197 |
 | `task_modulation` / `error_gated_memory` | **True / True** | P197 误差广播 |
 | `plateau_sleep` / `readout_replay` | **True / True** | P197（`plateau_patience=2`、`replay_buffer=256`、`replay_every=4`、`replay_eta=0.5`） |
@@ -97,13 +100,13 @@ py -3.14 tools/eval/rebaseline.py
 | `--readout-conn-k` | **128** | 库默认 0（稠密），两者不一致是事实 |
 | `--encoder-dtype` | fp32 | x86 上比 fp64 快 1.80× |
 | `--ckpt-dtype` | fp16 | 位模式存储；master 模式 ro_W 存 fp32 逐位 |
-| `--m2-kernel` | plain | P113 服务器实测（M2_infer 5.41×）；fused/serial 留作对照 |
+| `--m2-kernel` | **`auto`** | P212 按平台择优：x86→`fused`（实测 1.34–2.05×）、昇腾 aarch64→`plain`（P113 5.41×）；可显式 `serial`/`fused`/`plain` 覆盖 |
 | `--no-forward-only` | 关（即前向only **开**） | P211：前向only 层目标学习（FP+FTP 内核，给 M2 主干补任务信号）。**P211 起默认开启**；`--forward-only-eta 0` = 退回旧行为（逐位等价，门禁 C3b）。smoke 档 PPL 13017.891 vs 13355.328（**改善 2.53%**，方向为正但仍**低于 <20% 判据**）→ 生产档判据仍需服务器 A/B。详见 `docs/PHD-Net_前向only训练路径.md` |
 | `--csr-online` | **开** | 在线可写 CSR（5.74× 省）；`--no-csr-online` 回退 dict |
 | `--micro-batch` | 1 | P194 Q1 |
 | `--readout-master-weight` / `--readout-shadow-refresh` | off / 8 | P195 |
 | `--readout-powlaw-alpha/kmin/kmax` | 0 / 1 / 0 | alpha>0 回落 numba（加速器对非均匀行宽 fail-fast，正确行为） |
-| `--numba-threads` / `--nll-sync-every` / `--ckpt-every` | 8 / 8 / 50000 | |
+| `--numba-threads` / `--nll-sync-every` / `--ckpt-every` | **16** / 8 / 50000 | 线程数的服务器 A/B **尚未做** → 用 `tools/bench/bench_server_threads.py --threads 8,16,32` |
 | `--step-profiling` | **开** | P198 起 |
 | `--vocab-scan` / `--vocab-sample-chars` | head / 4,000,000 | |
 | `--remote-fraction` | 0.3 | 前缀子集 |
@@ -158,3 +161,27 @@ py -3.14 tools/eval/rebaseline.py
 - `tools/bench/bench_cpu_local.py` 只测本机 CPU 相对变化，**不产出文档数字**。
 - 已删除且勿再引用：rust 栈（`phdnet_rs/`，P188）、稠密 PC 栈（pc.py）、
   torch 栈全套、`sparse_conn` 开关（P193）、fp4/int4（P191e）、`readout_pipeline`（P192 停用）。
+
+---
+
+## 7. 红线速查（禁令 / 契约，改动前必读）
+
+| # | 红线 | 为什么 |
+|---|---|---|
+| 1 | **x86 的性能结论不构成昇腾证据**，连「无差别」也不构成 | 项目已有四次方向相反 |
+| 2 | **判性能一律看 `segments(win)`**，不看 `segments(cum)` | cum 是含 JIT 冷编译的历史平均 |
+| 3 | **A/B 判据只能用 `probe_PPL`**（`--probe-every 1000 --probe-tokens 2048`） | sliding PPL 信噪比仅 0.40，<20% 测不出 |
+| 4 | **`eta_oja > 0` 会发散** | 3000 步 probe_PPL 9.1e11（=0 时 916） |
+| 5 | **值不能降到 bf16**（非目标行更新保留率仅 5.79%） | 会退化成纯 Hebbian；只有索引能压 |
+| 6 | `--readout-pipeline` 是 **fail-fast 死开关** | P192 定案：叠第二层异步 + 语义风险 |
+| 7 | **不要做跨 token 流水** | `M6(t)→PC_learn(t)→M2(t+1)` 串行链不可断；前移换时序规则（铁律③）；`readout_recurrence` 会静默拿错 y |
+| 8 | **`--beta p3` 未实现**（help 有、代码无） | 传了静默无效 |
+| 9 | **三条线程治理时序约束**：BLAS cap 在 `import numpy` 前 / `numba.set_num_threads` 在任何核首次执行前 / `OMP_PROC_BIND` 在 numba 初始化前 | 违反后**无法事后补救** |
+| 10 | `_decay_read_arr` **必须逐个调 `_decay_read`** | `gate_ltm_trace_semantics` 的突变测试注入点；内联会让负向对照变空操作 |
+| 11 | `_learn_batch` 的 K/V **必须预留到 `m_out`** | 核内会生长到 m_out，收紧会广播失败 |
+| 12 | **混合 dtype**（`fp32 W @ fp64 x`）会脱离 BLAS 走慢路径 | 且**没有任何断言检查** `A.dtype == b.dtype` |
+| 13 | `learn_predictive` 保持**多核调用** | P59 实测融合版 0.91–1.36× 负收益 |
+| 14 | 读出前向走 **BLAS**；fp8 转换默认走 **torch** | 实测 numba 慢 0.68× / torch 快 5.6× |
+| 15 | **不要为提速改读出精度**（fp16/bf16 舍掉非目标行更新） | 保留率 fp32 99.95% / fp16 26.67% / bf16 5.79% / int8-fp8 0.04% |
+| 16 | **优化 NPU 的目标是把 `aicore_time` 提上去 / 把 `wait` 降下来** | 设备占用率高 ≠ 算力高；占用下降但 ms/tok 下降是好事 |
+

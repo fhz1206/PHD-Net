@@ -5,7 +5,8 @@
 
 import numpy as np
 
-from .ltm_kernel import NUMBA_LTM, _ltm_learn_rows, _recall_project
+from .ltm_kernel import (NUMBA_LTM, _ltm_learn_rows,
+                         _ltm_learn_rows_hashed, _recall_project)
 from .tokenizer import U64
 
 
@@ -335,6 +336,63 @@ class OnlineCSRTable(SparseSynapseTable):
         self._cap0 = cap0
         # P103：批量 learn 的组合数阈值（可被 verifier 注入以强制走某条路径）
         self.BATCH_MIN_COMBOS = 4096
+        # ── P214：批量 learn 的**持久化缓冲** + 哈希查找开关 ──────────────
+        #   原 `np.zeros((R, cap))` × 2 每步要 calloc ~1.2 MB、清零、
+        #   触发 page fault；且行数 R 稳态稳定 → 按上限预分配一次、每步取切片。
+        #   ⚠ **不清零是安全的**（见 `_batch_buffers` 的论证）：所有会被
+        #   scatter 读取的列，都被 gather 或核内生长**写过**。
+        self._batch_buf: tuple | None = None
+        # True = 走 `_ltm_learn_rows_hashed`（O(R·(sz+C))）；
+        # False = 回退原线性扫描核（供 A/B、对拍与排障）。
+        self.LTM_HASH_LOOKUP = True
+
+    # ---------- P214：批量缓冲 ----------
+    def _hash_cap(self) -> int:
+        """哈希表容量：2 的幂，≥ 2·(m_out+1)（装填因子 ≤ 50%）。"""
+        h = 1
+        need = 2 * (self.m_out + 1)
+        while h < need:
+            h <<= 1
+        return h
+
+    def _batch_buffers(self, R: int, dt):
+        """返回可复用的 `(K, V, S, HK, HV)` 视图（均为按 `R` 切片，零分配）。
+
+        ⚠ **为什么可以不清零 K/V**（P214）：
+          - gather 写 `K[r,:sz]` / `V[r,:sz]`（sz = 该行原有效槽数）；
+          - 核内只**读** `s < sz` 的列，生长时**写** `K[r,sz]` / `V[r,sz]`
+            并 `sz += 1`（照样逐个写过）；
+          - scatter 只读 `[:sz_new]`，而 `sz_new ≤ m_out` 且区间内每一列
+            都已被 gather 或生长覆盖。
+          → **不存在读到未初始化内存的路径**。
+          `tpi` ≤ 0 的行被核跳过，其 `S[r]` 不变，gather 同样已覆盖前 sz 列。
+
+        ⚠ **为什么 cap 恒等于 m_out**：`_new_row` 分配 `min(grow_chunk, m_out)`，
+          `_grow_row` 扩到 `min(len*2, m_out)` → `len(keys[i]) ≤ m_out` 恒成立，
+          故原式 `max(m_out, max(len(keys[i]) for i in rows))` **恒等于 m_out**。
+          → 省掉每步 R 次 Python `len()` + `max()`（1b 档 R≈512）。
+          防御性校验只在**缓冲重建时**做一次（不在每步关键路径）。
+        """
+        cap = self.m_out
+        H = self._hash_cap()
+        b = self._batch_buf
+        ok = (b is not None and b[0].shape[0] >= R
+              and b[1].dtype == dt and b[0].shape[1] == cap
+              and b[3].shape[1] == H)
+        if not ok:
+            # 只在重建时校验一次：行容量不得超过 m_out（否则说明 _grow_row 放宽了）
+            if b is None:
+                mx = max((len(self.keys[i]) for i in self.keys), default=0)
+                if mx > cap:
+                    cap = mx
+            Rcap = max(R, 256, (b[0].shape[0] * 2 if b is not None else 0))
+            b = (np.empty((Rcap, cap), dtype=np.int64),       # K
+                 np.empty((Rcap, cap), dtype=dt),             # V
+                 np.empty(Rcap, dtype=np.int64),              # S
+                 np.empty((Rcap, H), dtype=np.int64),         # HK
+                 np.empty((Rcap, H), dtype=np.int64))         # HV
+            self._batch_buf = b
+        return b[0][:R, :], b[1][:R, :], b[2][:R], b[3][:R, :], b[4][:R, :]
 
     # ---------- 行级操作 ----------
     def _new_row(self, i: int) -> np.ndarray:
@@ -516,18 +574,17 @@ class OnlineCSRTable(SparseSynapseTable):
                 rows.append(i)
         if not rows:
             return
-        # ⚠ P205 **回滚记录**：曾把 cap 收紧为 `max(len(keys[i]) for i in rows)`
-        #   想省 gather/scatter 的整行宽度 —— **错**：`_ltm_learn_rows` 核内
-        #   会把行**生长到 m_out**（最多新增到 m_out 个槽），K/V 必须预留到
-        #   m_out 的空间，否则 scatter 处 `ks_i[:sz_new] = K[r, :sz_new]`
-        #   广播失败（实测 ValueError: could not broadcast (64,) into (72,)）。
-        #   原式 `max(self.m_out, ...)` 正是为此而设，**不要改**。
-        cap = max(self.m_out, max(len(self.keys[i]) for i in rows))
+        # ⚠ cap 恒等于 m_out（证明见 `_batch_buffers` docstring）：
+        #   `_new_row` 分配 min(grow_chunk, m_out)，`_grow_row` 扩到
+        #   min(len*2, m_out) → 行容量不可能超过 m_out。
+        #   P214：原式 `max(self.m_out, max(len(self.keys[i]) for i in rows))`
+        #   每步做 R 次 Python len() + 一次 max（1b 档 R≈512）→ 去掉。
+        #   ⚠ **不要**把 cap 收紧为「当前行宽」（曾试过，会让核内生长到
+        #   m_out 时越界，scatter 广播失败：ValueError could not broadcast
+        #   (64,) into (72,)）—— 缓冲按 m_out 预分配，正是为此。
         R, C = len(rows), len(grow_order)
         dt = np.int16 if int8 else np.float64
-        K = np.zeros((R, cap), dtype=np.int64)
-        V = np.zeros((R, cap), dtype=dt)
-        S = np.zeros(R, dtype=np.int64)
+        K, V, S, HK, HV = self._batch_buffers(R, dt)   # P214：复用，零 calloc
         tpi = np.empty(R, dtype=np.float64)
         tpi_post = np.empty(R, dtype=np.float64)
         # ── P205：λ^Δt 补偿的批量取值（`_decay_read_arr`）──────────────────
@@ -561,9 +618,18 @@ class OnlineCSRTable(SparseSynapseTable):
                               dtype=np.float64, count=len(grow_order))
         g_tpre = self._decay_read_arr(_t_pre, _s_pre, grow_order)
         before = S.copy()
-        _ltm_learn_rows(K, V, S, tpi, tpi_post, ks, g_tpost, g_tpre,
-                        float(eta), float(w_max), float(q), bool(int8),
-                        int(self.m_out))
+        if self.LTM_HASH_LOOKUP:
+            # P214：每行一张开放寻址哈希表 → 槽位查找 O(1)，
+            #       复杂度 O(R·C·sz) → O(R·(sz+C))，数值逐位相同。
+            _ltm_learn_rows_hashed(
+                K, V, S, tpi, tpi_post, ks, g_tpost, g_tpre,
+                float(eta), float(w_max), float(q), bool(int8),
+                int(self.m_out), HK, HV)
+        else:
+            _ltm_learn_rows(
+                K, V, S, tpi, tpi_post, ks, g_tpost, g_tpre,
+                float(eta), float(w_max), float(q), bool(int8),
+                int(self.m_out))
         # ── scatter：扩容 + 写回 + in_deg ──
         for r, i in enumerate(rows):
             sz_new = int(S[r])

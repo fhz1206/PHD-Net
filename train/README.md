@@ -88,7 +88,7 @@ python tests/run_tests.py fast
 | `--accel` | `auto` | 读出计算设备。`auto` = 有加速器就用（**昇腾 → ROCm → CUDA → DirectML**），否则回落 numba CPU 原路径（逐位不变）。也可显式 `cpu`/`npu`/`cuda`/`rocm`/`dml` |
 | `--nll-sync-every` | `8` | 读出 nll 同步周期。`1`=每步 `.item()`（旧行为，会在每步暴露同步点）；`N>1` 时 nll 累积到设备、每 N 步同步一次 → CPU/NPU 重叠，NPU 场景端到端约 −30~40%。默认 8 是因为服务器实测（读出 12.9 ms/tok、CPU 仅占 1.3–3.2/191 核、CS/s 250 万+ = 线程空转等同步）确认每步 `.item()` 是主要暴露点。代价：PPL 统计滞后 N 步，滑动均值下可忽略 |
 | `--fp8-refresh` | `8` | 读出 fp8 forward 副本的重建间隔（步）。量化 1.6 亿元素是一次设备算子，摊到 N 步。**仅在 `--readout-dtype fp8`（CPU 码本路径）下生效**，fp16 路径不用 forward 副本 |
-| `--numba-threads` | `8` | numba prange 线程上限（`0`=用 numba 默认=全部核）。服务器 191 核上主循环只用 1.3 核、CS/s 250 万+（百万级上下文切换 = 线程空转等锁）；核内 1→6 线程仅 1.16×（访存带宽饱和）→ 8 线程足够。默认从「全部核」降到 8 就是为了这个 |
+| `--numba-threads` | `16` | numba prange 线程上限（`0`=用 numba 默认=全部核）。P204 从 8 改成 16。⚠ **服务器 A/B 至今未做**（本机 x86 实测 16/32 是 fork/join 负收益区，但本机 ≠ 昇腾，项目已有四次方向相反）→ **用 `python tools/bench/bench_server_threads.py --threads 8,16,32` 在服务器上定论**（脚本直接输出端到端 ms/tok + `segments(win)` 各段的判据表）。背景：所有 CPU 侧 prange 核的并行元素数只有 ~300（n0/n1/n2/R），而 fork/join 屏障成本随线程数上升 → 线程数存在最优点，不是越多越好 |
 | `--omp-proc-bind` | **开** | 设 `OMP_PROC_BIND=close` 把 OpenMP 线程绑到物理核。⚠ 只设 PROC_BIND、**不设 `OMP_PLACES=cores`**——191 核 place 表会让线程池每次同步遍历，实测 M2 慢 8–13×。`--no-omp-proc-bind` 关闭 |
 | `--torch-compile` | **关** | 默认 OFF：inductor 编译在服务器上不稳定（debug trace 干扰 + 编译耗时不可控）；eager 在 NPU 上是 4 个小 kernel 异步流提交。本机实测曾 +15%（26.34 vs 30.98 ms/tok），但跨平台不保证 |
 | `--torch-compile-mode` | `default` | 显式开编译时的模式。**必须用 `default`**：读出每步原地更新 W，cudagraphs 拒绝 mutated inputs，`reduce-overhead` / `max-autotune` 会打印 `skipping cudagraphs due to mutated inputs` 并丢掉该收益 |
@@ -359,7 +359,7 @@ meta 落盘**数据口径**（数据路径 / `--remote-fraction` / 语言过滤�
 
 | 症状 | 先查 |
 |---|---|
-| 训练慢、CPU 占用率极低 | 逐 token 串行是**架构性**的。确认 `--numba-threads`（默认 8）与 `[parallel]` 行 |
+| 训练慢、CPU 占用率极低 | 逐 token 串行是**架构性**的。确认 `--numba-threads`（默认 16）与 `[parallel]` 行 |
 | `[device] ⚠️ NPU 初始化失败` | 杀掉残留进程（`npu-smi info` / `ps aux \| grep train_1b`）；确认容器映射设备；或 `--accel cpu` |
 | `--lang zh` 看着没生效 | 看 `[sample lang=…]` 行的 CJK 占比（比猜 PPL 可靠）；注意 `--lang` 默认是 `all` |
 | PPL 震荡不降 | 确认 `--readout-dtype int8`（bf16 把非目标行更新舍成纯 Hebbian，这是历史根因） |
