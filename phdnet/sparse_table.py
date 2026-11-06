@@ -380,11 +380,13 @@ class OnlineCSRTable(SparseSynapseTable):
               and b[1].dtype == dt and b[0].shape[1] == cap
               and b[3].shape[1] == H)
         if not ok:
-            # 只在重建时校验一次：行容量不得超过 m_out（否则说明 _grow_row 放宽了）
-            if b is None:
-                mx = max((len(self.keys[i]) for i in self.keys), default=0)
-                if mx > cap:
-                    cap = mx
+            # ⚠ P215 审计修复：删掉原「mx > cap 就把 cap 改大」的防御分支。
+            #   它自相矛盾：`ok` 判断恒用 `cap = m_out`，一旦按 mx 分配了更宽
+            #   的缓冲，下一次 `ok` 必然为 False → 重建回 m_out 宽，防御失效。
+            #   而且 `size[i] ≤ len(keys[i]) ≤ m_out`（由 _new_row/_grow_row 的
+            #   min(..., m_out) 保证），gather/scatter 只用前 size 列 →
+            #   **宽度恒为 m_out 就是正确的**，无需动态放宽。
+            #   若将来 _grow_row 放宽了上限，应同步改本方法并补门禁。
             Rcap = max(R, 256, (b[0].shape[0] * 2 if b is not None else 0))
             b = (np.empty((Rcap, cap), dtype=np.int64),       # K
                  np.empty((Rcap, cap), dtype=dt),             # V

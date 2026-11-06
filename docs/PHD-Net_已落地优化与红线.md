@@ -23,7 +23,7 @@
 | **`--replay-every` 接线** | 已修 | 只需判 `> 0`；`argparse default=0` 已表达「沿库默认」 |
 | **`homeostasis` 参数** | 已修（融合核条件化） | `gate_cpu_opt_p211` B1b/B1c：`False` 与 `True` 结果必须**不同** |
 | **forward-only 接受 `learn_scale` 调制** | 已修 | `gate_cpu_opt_p211` B1d/B1e；普通训练 `learn_scale=1.0` 逐位不变 |
-| **LTM 哈希槽位查找 + 持久化缓冲**（P214） | 默认开 | `gate_ltm_hash_lookup` 10 项；`imprint` **1.83×**，逐位一致 |
+| **LTM 哈希槽位查找 + 持久化缓冲**（P214） | 默认开 | `gate_ltm_hash_lookup` **13 项**；`imprint` **1.83×**，逐位一致 |
 | **统一门禁 runner** | 已接线 | `tools/run_gates.py`（自动选带 numpy 的解释器 + 性能敏感门禁串行） |
 | **numba 线程 A/B 脚本** | 已接线，**服务器未跑** | `tools/bench/bench_server_threads.py --threads 8,16,32` |
 | **NPU 假占用判读工具** | 已接线 | `tools/probe/diagnose_npu_utilization.py` |
@@ -87,6 +87,29 @@
 | `gate_cpu_opt_p211` | 19 | int32 索引 / FO 融合核逐位等价（含 `homeostasis=False`）/ **`learn_scale` 调制契约** / LTM 内联 |
 | `gate_forward_only` | 30 | 固定随机投影 / 层目标学习 / 「eta=0 ≡ 旧路径」逐位判据 |
 | `gate_fp8_int8_convert` | 17 | 查表与 powf 逐位等价 / 边缘位模式 / NaN / 转化效率报告 |
-| `gate_ltm_hash_lookup` | 10 | 两核逐位一致 / int8 / 饱和期 / 脏缓冲不清零安全 / 哈希表容量 |
+| `gate_ltm_hash_lookup` | **13** | 两核逐位一致 / int8 / 饱和期 / **显式重复键首个槽** / **真实脏缓冲** / 哈希表容量 / **开关分派负向对照** |
 
 **全量 53/53 通过**（`python tools/run_gates.py --jobs 4`）。
+
+### 5.1 门禁有效性契约（改动门禁前必读）
+
+**门禁必须把业务失败传播为进程退出码** —— 只 `print("FAIL")` 不算把关。
+`tools/run_gates.py` 与 CI 都按 `returncode` 判定，一个「打印 FAIL 但 `rc=0`」
+的门禁等于**没有门禁**。
+
+| 规则 | 说明 |
+|---|---|
+| ① 结果收集 + 退出码 | 用 `check()` / `_RESULTS` 收集，汇总处 `raise SystemExit(0 if all_ok else 1)` |
+| ② 禁止裸 `assert` 作唯一断言 | `python -O` 会整段跳过；改显式收集 |
+| ③ 禁止零断言的 `gate_*.py` | 只打印结果的探针请放 `tools/probe/`，别占用 `gate_` 前缀 |
+| ④ 参考实现必须与生产**同精度同口径** | 否则会把「精度不同」误判成「并行不一致」；确实不能逐位时按 `gate_cython_kernels` 惯例用容差并**如实打出 `max|Δ|`** |
+| ⑤ 开关类契约要有**负向对照** | 验证开关被忽略时门禁会 FAIL，而不只是「True 分支跑通」 |
+| ⑥ 脏数据测试必须写在**会被复用**的对象上 | 写进新建的孤立对象 = 空操作 |
+
+**防回归**：`python tools/audit_gates.py --strict`（静态初筛无退出机制的门禁）。
+⚠ 静态只是初筛：新增/修改门禁后，还要**人工动态复核** —— 把业务断言强制改成
+`False`，确认 `rc != 0`。临时脚本必须放在 `tests/gates/` 内，否则
+`Path(__file__).parents[2]` 定位仓库根会失效（会制造「全部能检出」的假阳性）。
+
+**性能敏感门禁**：含 `perf_counter` / 墙钟时限的门禁必须**串行**跑
+（`tools/run_gates.py` 自动检测 + 显式名单），并发抢 CPU 会造成假失败。

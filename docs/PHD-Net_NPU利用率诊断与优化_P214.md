@@ -154,7 +154,7 @@ NPU:                  └── forward_dev ──┘   └── learn_softmax 
 ⚠ 绝对数字是**本机**的（README §4：x86 数字不构成昇腾证据）；
 **算法复杂度改善与平台无关**，但服务器收益必须由日志 `M4b_ltm` 段确认。
 
-**门禁**：新增 `tests/gates/gate_ltm_hash_lookup.py`（**10/10**）：
+**门禁**：新增 `tests/gates/gate_ltm_hash_lookup.py`（**13/13**，P215 审计加固）：
 多 seed 逐位一致 / int8 量化 / 小 m_out 饱和期 / 两核同输入 K/V/S 相同 /
 缓冲视图复用 + 自动扩容 + 脏缓冲不清零安全 / 哈希表容量契约。
 全量门禁 **53/53 通过**。
@@ -250,6 +250,6 @@ python tools/probe/diagnose_npu_utilization.py <csv> --json
 |---|---|
 | `phdnet/ltm_kernel.py` | 新增 `_ltm_learn_rows_hashed`（哈希槽位查找）；原线性核保留作对拍/回退 |
 | `phdnet/sparse_table.py` | 新增 `_batch_buffers`（持久化 K/V/S/HK/HV 复用）+ `LTM_HASH_LOOKUP` 开关；`_learn_batch` 去掉每步 `np.zeros×2` 与 512 行 Python max，默认走哈希核 |
-| `tests/gates/gate_ltm_hash_lookup.py` | **新增**（10 项：逐位一致 / int8 / 饱和期 / 缓冲复用安全 / 容量契约） |
+| `tests/gates/gate_ltm_hash_lookup.py` | **新增**（13 项：逐位一致 / int8 / 饱和期 / **显式重复键首个槽** / 真实脏缓冲 / 容量契约 / **开关分派负向对照**） |
 | `tools/probe/diagnose_npu_utilization.py` | **新增**：msprof 假占用判读（判定 + 依据 + 归因 + JSON；列名识别失败拒绝出结论） |
 | `docs/PHD-Net_NPU利用率诊断与优化_P214.md` | **新增**：本文 |

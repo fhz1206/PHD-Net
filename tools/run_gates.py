@@ -80,11 +80,31 @@ python_exe = _load_python_exe_helper()
 
 _GATE_DIR = _ROOT / "tests" / "gates"
 
-# ⚠ **性能敏感门禁**：内含**墙钟时限**断言（如「词级替换 < 200µs」），
-#   与其它门禁并发时 CPU 被抢 → **假失败**（实测：gate_cli_i18n 在
-#   --jobs 4 下 FAIL、单独跑 PASS）。→ 这些门禁**单独串行**跑。
-#   判据：名字里带 timing/perf/bench，或门禁自己声明了时限断言。
-_TIMING_SENSITIVE = ("gate_cli_i18n",)
+# ⚠ **性能敏感门禁**：内含**墙钟时限**断言（如「词级替换 < 200µs」、
+#   「CSR 向量化加速比 ≥ X」），与其它门禁并发时 CPU 被抢 → **假失败**
+#   （实测：gate_cli_i18n 在 --jobs 4 下 FAIL、单独跑 PASS）。
+#   → 这些门禁**单独串行**跑。
+#
+# ⚠ P215 审计修复：原版只硬编码 `("gate_cli_i18n",)`，漏掉了
+#   `gate_csr_vectorization_perf`（它用 perf_counter 测墙钟 + golden 基准）。
+#   现改为「显式名单 **+ 源码自动检测**」：任何含 perf_counter /
+#   时限断言 / `µs` / `ms/tok` 的门禁自动串行，新增门禁不漏。
+_TIMING_SENSITIVE = frozenset({
+    "gate_cli_i18n",
+    "gate_csr_vectorization_perf",
+})
+_TIMING_MARKERS = ("perf_counter", "time.perf_counter", "µs", "us/tok",
+                   "ms/tok", "elapsed", "加速比", "golden")
+
+
+def _is_timing_sensitive(path: Path) -> bool:
+    if path.stem in _TIMING_SENSITIVE:
+        return True
+    try:
+        src = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return any(m in src for m in _TIMING_MARKERS)
 
 
 def _summary(stdout: str) -> str:
@@ -152,8 +172,11 @@ def main() -> int:
     print(f"[runner] {len(paths)} 个门禁 | 解释器 {exe} | jobs={args.jobs}")
     t0 = time.perf_counter()
     # 性能敏感门禁 → 串行、且在并发跑完之后跑（避免被抢 CPU）
-    timing_paths = [p for p in paths if p.stem in _TIMING_SENSITIVE]
-    par_paths = [p for p in paths if p.stem not in _TIMING_SENSITIVE]
+    timing_paths = [p for p in paths if _is_timing_sensitive(p)]
+    par_paths = [p for p in paths if p not in timing_paths]
+    if timing_paths:
+        print(f"[runner] 串行（性能敏感）{len(timing_paths)} 个: "
+              + ", ".join(p.stem for p in timing_paths))
 
     results = []
     if args.jobs > 1 and par_paths:

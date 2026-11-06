@@ -156,4 +156,7 @@ if __name__ == "__main__":
     print("-" * 66)
     print(f"L1={ok1}  L2={ok2}  L3={ok3}   → {'PASS' if all([ok1, ok2, ok3]) else 'FAIL'}"
           f"   加速 {a/max(1e-9,b):.2f}×")
-    _force(None)
+    _force(all([ok1, ok2, ok3]))
+    # ⚠ P215 审计修复：`_force` 只写内部状态、不改变进程退出码 →
+    #   原实现打印 FAIL 后仍 rc=0（假绿）。必须显式传播。
+    raise SystemExit(0 if all([ok1, ok2, ok3]) else 1)

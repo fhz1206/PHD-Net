@@ -36,7 +36,7 @@ def probe(jit, blocking=None, rt_blocking=None, queue='2'):
         return result
 
 
-def main():
+def main() -> int:
     cases = [
         ('binary/unset', True, None, None, '2', True),
         ('explicit zero', True, '0', None, '2', True),
@@ -50,12 +50,20 @@ def main():
         ('unknown blocking value', True, 'invalid', None, '2', None),
         ('known failure plus unknown JIT', None, None, None, '0', False),
     ]
+    failed = []
     for label, jit, blocking, rt, queue, expected in cases:
         actual = probe(jit, blocking, rt, queue)['effective']
-        assert actual is expected, (label, actual, expected)
-        print('PASS', label, 'effective=', actual)
-    print(f'cann dispatch gate: {len(cases)}/{len(cases)} passed (mocked status only)')
+        # ⚠ P215 审计修复：原用裸 `assert`（`python -O` 下会被**整段跳过** →
+        #   门禁静默失效）。改成显式收集 + 退出码传播。
+        if actual is not expected:
+            failed.append(label)
+            print('FAIL', label, 'effective=', actual, 'expected=', expected)
+        else:
+            print('PASS', label, 'effective=', actual)
+    print(f'cann dispatch gate: {len(cases)-len(failed)}/{len(cases)} passed '
+          f'(mocked status only)')
+    return 1 if failed else 0
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())

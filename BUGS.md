@@ -158,7 +158,7 @@ F CI 与工程 F1–F4（4）｜G 环境与数据 G1–G2（2）。
 ### B10 绑核与线程：`OMP_PLACES` 引来 8–13× 退化并被回滚（P71 `10f0396` / P73 `5c4c303` / P74 `753d157`）
 - **症状**（服务器 12:50 日志）：`CS/s 250 万–600 万`、只用 1.1–3.2 核（191 核）；引入 `OMP_PLACES=cores` 后 **M1_encode 0.85 → 58–60 ms/tok（70×）、M2_infer 2.4 → 19–32（8–13×）**。
 - **根因（三条独立缺陷）**：① P71 numba/OpenMP 线程**无核心亲和性**，到处漂移（cache miss 与上下文切换的直接来源）；② P73 `*_NUM_THREADS` **从未限上限**，OpenBLAS 拉 **191 线程**跑 1024×2048 的 sgemv —— 仓库早有 `multi_device.configure_host_threads()` 但**无生产调用点**，典型的「**修了一半**」；③ P74 `OMP_PLACES=cores` 在 191 核上要建 191 项 place 表，OpenMP/numba 每次线程池同步都要遍历它 → 假设**被实测否掉**。
-- **修复**：`--omp-proc-bind`（默认开）只设 `OMP_PROC_BIND=close`（**不设 `OMP_PLACES`**）；`--numba-threads` 默认 8，**四个 BLAS 变量必须在 `import numpy` 之前**设（OpenBLAS 初始化后再设无效）。
+- **修复**：`--omp-proc-bind`（默认开）只设 `OMP_PROC_BIND=close`（**不设 `OMP_PLACES`**）；`--numba-threads` 默认 **16**，**四个 BLAS 变量必须在 `import numpy` 之前**设（OpenBLAS 初始化后再设无效）。
 - **门禁缺口**：⚠ 三条都**无法在 CI 上验证**（CI 机器核数不同）。「限线程」的正确性**依赖部署机器的核数**，只能人工确认。⚠ P74 是**假设被实测否掉**的记录 —— 保留它是为了避免有人再把 `OMP_PLACES` 加回来。
 
 ### B11 fp8 能力探针本身测错了东西（P85 `646db01` → P87 `0263cc8`）

@@ -878,7 +878,7 @@ fp8 若要用须配 `--readout-master-weight`），历史 fp8 默认阶段的锚
 | 项 | 状态 |
 |---|---|
 | `python tests/run_tests.py fast` | **9/9**（零回归门槛） |
-| 专项 verifier | **`tests/gates/gate_*.py` 现查**（当前 52 个；`bench_accel_readout_path.py` 是基准脚本，不计入）。⚠ **不要在文档里写死这个数字**（它变过 6 次） |
+| 专项 verifier | **`tests/gates/gate_*.py` 用 `ls` 现查**；统一入口 `python tools/run_gates.py --jobs 4`。⚠ **不要在文档里写死数量**（它会变）；`bench_accel_readout_path.py` 是基准脚本，不计入 |
 | `gate_ltm_trace_semantics.py` | ✅ 全绿（32/32）。根因是 LTD 的第二条迹 `t_pre[k]` 走裸读（`k` 取自 `cur`、不保证在 `prev` 里）→ 缺 λ^Δt 补偿 → LTD 偏大 → 权重被过度抑制（ΣW ratio=0.9398、单边 max\|ΔW\|=8.8e-2）。改走 `_decay_read` 后三配置（dict/csr_py/csr_batch）与急切参考 `max\|ΔW\|=5.551e-17`、`ratio=1.000000`。⚠ **这是学习规则层面的语义变更**，历史 PPL 数字不再可比 |
 | `gate_readout_fused.py` / `gate_accel_readout.py` | ✅ PASS（融合更新核 1.54×） |
 | `gate_m2_infer_kernels.py` | ✅ 三态（fused/serial/plain）受控对拍（§4.2） |
@@ -932,7 +932,7 @@ fp8 若要用须配 `--readout-master-weight`），历史 fp8 默认阶段的锚
 - ❌ 不带平台的加速倍数
 - ❌ 旧 PPL 锚点 78.16 / 90.2480 / 73.1166（**只存 git 历史**，§10.1）
 - ❌ 容量 1.317e9（1B 档实算 **1.370e9**）
-- ❌ 旧门禁数（fast 11/19/24 项；专项 verifier 18/21/22/26/29/47）
+- ❌ 任何写死的门禁数量（用 `ls` 现查；当前以 `tools/run_gates.py` 输出为准）
 - ❌ 「三套 CI」（实际两套，无 Jenkinsfile）
 - ❌ 「读出默认 fp16」/「读出默认 fp8」（**现行默认 fp32**；引用一律带 P 编号与日期）
 - ❌ 「fp8 已从加速后端整体删除/默认禁用」（fp8 显式请求放行，走位模式绕行；默认走 `--readout-master-weight`）

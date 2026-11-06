@@ -32,8 +32,18 @@ try:
     from numba import njit, prange
     NUMBA_LTM = True
 except ImportError:                                     # pragma: no cover
-    from numba import njit, prange                      # numba 缺失时这里会抛
-    NUMBA_LTM = True
+    # ⚠ P215 审计修复：原 except 分支里又 `from numba import ...`
+    #   （与 try 完全相同）→ numba 缺失时二次抛 ImportError，
+    #   `NUMBA_LTM` 恒为 True ⇒ `sparse_table.py` 的 Python 回退臂是
+    #   **死代码**。照抄 `sparse_encoder.py` 的恒等装饰器回退。
+    NUMBA_LTM = False
+
+    def njit(*a, **kw):
+        def wrap(fn):
+            return fn
+        return wrap if not a or not callable(a[0]) else a[0]
+
+    prange = range
 
 
 # ⚠ P212：原此处有 `_encode_hash_uniq`（numba 化的哈希去重核）——
@@ -133,13 +143,20 @@ def _recall_project_hashed(big_ids, weights, out, slot_keys, slot_pos,
         if b == 0:                # 原 big_i == -1 → 跳过
             continue
         slot = (b * 2654435761) & mask
-        while True:
+        # ⚠ P215 审计修复：原 `while True` 在「表满且键不存在」时会**死循环**。
+        #   生产表长 ≥ 4×键数（恒有空槽）故不可达，但把有界性写进代码
+        #   比依赖调用方更稳。改成有界探测 + 显式命中标记。
+        hit = False
+        for _ in range(slot_keys.shape[0]):
             v = slot_keys[slot]
-            if v == 0 or v == b:
+            if v == 0:                    # 空槽 → 该键不存在
+                break
+            if v == b:                    # 命中
+                hit = True
                 break
             slot = (slot + 1) & mask
-        if slot_keys[slot] == 0:
-            continue                      # 该键不存在（空槽）
+        if not hit:
+            continue
         pos = slot_pos[slot]              # 命中即得，**无二次查找**
         w = weights[t]
         for q in range(rev_off[pos], rev_off[pos + 1]):

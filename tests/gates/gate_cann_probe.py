@@ -148,16 +148,18 @@ def main() -> int:
     if not res.ok:
         print("      · 本机无 NPU → 真实 submit→fetch 用例由 cann_bridge 门禁覆盖（此处显式跳过）")
 
-    _finish()
-    return 0
+    # ⚠ P215 审计修复：原实现 `_finish()` 只打印、`main()` 恒 `return 0`
+    #   → 任何 check 失败都只打印 FAIL 而进程 rc=0（假绿）。
+    return _finish()
 
 
-def _finish() -> None:
+def _finish() -> int:
     ok = sum(1 for r in _RESULTS if r[0])
     bad = [r[1] for r in _RESULTS if not r[0]]
     print("\n" + "=" * 78)
     print(f"结果：{ok}/{len(_RESULTS)} 通过" + (f" | 失败 {bad}" if bad else ""))
     print("=" * 78)
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":

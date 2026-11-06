@@ -13,7 +13,7 @@
 | `python tests/run_tests.py fast` | **9/9**（<1 分钟，零回归门槛） | 持续门禁 |
 | 专项门禁 | **53 个**（`ls tests/gates/gate_*.py` 现查，勿写死）；**53/53 全绿** | `outputs/experiments/gates_*.json` |
 | **统一入口** | `python tools/run_gates.py [--jobs 4]` —— 自动实测选能 `import numpy` 的解释器 + 性能敏感门禁串行 + 输出 JSON | `tools/run_gates.py` |
-| 关键门禁 | `gate_forward_only` 30 项 / `gate_cpu_opt_p211` 19 项 / `gate_fp8_int8_convert` 17 项 / **`gate_ltm_hash_lookup` 10 项**（P214 哈希槽位查找逐位契约） | `tests/gates/` |
+| 关键门禁 | `gate_forward_only` 30 项 / `gate_cpu_opt_p211` 19 项 / `gate_fp8_int8_convert` 17 项 / **`gate_ltm_hash_lookup` 13 项**（P214 哈希槽位查找逐位契约） | `tests/gates/` |
 | CI | 两套 workflow（`.gitcode/` + `.github/`），无 Jenkinsfile；远端状态未核验，**不宣称全绿** | 源码 |
 
 ⚠ **本机解释器陷阱**：`python` 指向 WorkBuddy 内置 3.13（**无 numpy**），
@@ -184,4 +184,5 @@ py -3.14 tools/eval/rebaseline.py
 | 14 | 读出前向走 **BLAS**；fp8 转换默认走 **torch** | 实测 numba 慢 0.68× / torch 快 5.6× |
 | 15 | **不要为提速改读出精度**（fp16/bf16 舍掉非目标行更新） | 保留率 fp32 99.95% / fp16 26.67% / bf16 5.79% / int8-fp8 0.04% |
 | 16 | **优化 NPU 的目标是把 `aicore_time` 提上去 / 把 `wait` 降下来** | 设备占用率高 ≠ 算力高；占用下降但 ms/tok 下降是好事 |
+| 17 | **门禁必须把业务失败传播为退出码**（只 `print("FAIL")` 不算） | `run_gates.py`/CI 按 returncode 判定；新增门禁后用 `python tools/audit_gates.py --strict` 初筛 + 强制失败动态复核 |
 

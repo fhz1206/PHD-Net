@@ -100,41 +100,27 @@ def _ctx_switches() -> tuple[int, int]:
 
 
 def _python_exe() -> str:
-    """返回**带 numpy 的**解释器路径。
+    """返回**带 numpy 的**解释器路径 —— **复用 `phdnet/_python_exe.py`**。
 
-    ⚠ **不能用 `sys.executable` 盲信**：若本脚本是用裸 `python` 启动的
-    （如某些环境里 `python` 指向一个没装 numpy 的解释器），子进程会
-    `ModuleNotFoundError: No module named 'numpy'`。
-    实测（本机）：`python` → WorkBuddy 内置 3.13（**无 numpy**）、
-    `py` → 3.14.5（有 numpy 2.5.2）→ 两者混用会让所有子进程直接失败。
+    ⚠ P215 审计修复：本函数原是 `run_gates.py` 那套探测的**独立副本**，
+      但漏了后来加的加固项：① 扫描 `%LOCALAPPDATA%/Programs/Python/...`
+      等常见安装位置；② **把 `py.exe` 启动器降级到兜底**（它的解释器选择
+      依赖被运行文件的路径/关联，实测 `py -c` 与 `py <脚本>` 会挑不同解释器）。
+      用裸 `python`（WorkBuddy 内置 3.13 无 numpy）启动本脚本时，
+      旧版会选中 `C:\\Windows\\py.EXE` → 子进程可能全灭。
+      现统一走单一实现，避免两份逻辑漂移。
 
-    策略：按优先级探测一个**能 import numpy** 的解释器；
-    都不可用时退回 `sys.executable`（让子进程自己报错，信息更直接）。
+    ⚠ 按**文件路径**加载，不 `import phdnet._python_exe`：
+      `phdnet/__init__.py` 会连带 import numpy/numba，在没装 numpy 的
+      解释器里直接炸 —— 而本模块自己必须能在那种环境里跑。
     """
-    import shutil
-    cands: list[str] = []
-    # 1) 当前解释器（最优先：与本脚本同一环境）
-    if sys.executable:
-        cands.append(sys.executable)
-    # 2) PATH 里的 python3 / python
-    for name in ("python3", "python", "py"):
-        p = shutil.which(name)
-        if p:
-            cands.append(p)
-    seen: set[str] = set()
-    for exe in cands:
-        key = os.path.normcase(os.path.abspath(exe)) if os.path.isfile(exe) else exe
-        if key in seen:
-            continue
-        seen.add(key)
-        try:
-            r = subprocess.run([exe, "-c", "import numpy"],
-                               capture_output=True, timeout=60)
-            if r.returncode == 0:
-                return exe
-        except Exception:                                   # noqa: BLE001
-            continue
-    return sys.executable or "python"
+    import importlib.util
+    src = _ROOT / "phdnet" / "_python_exe.py"
+    spec = importlib.util.spec_from_file_location("_phdnet_python_exe", src)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod.python_exe()
 
 
 def run_once(threads: int, args: argparse.Namespace) -> dict:

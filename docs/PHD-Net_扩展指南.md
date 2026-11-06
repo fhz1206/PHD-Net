@@ -384,9 +384,9 @@ P111 恰恰是要取消这个回落。改代码前若不看清断言，**会把�
 | `--lang` | 终端输出语言（默认 **en**） | ⚠ **对训练结果零影响**。语料过滤是 `--data-lang`（会改变结果）|
 | `--readout-dtype` | 读出计算精度（默认 **fp32**，P194 Q4；`choices` = `fp32`/`fp16`/`bf16`/`fp8`） | ⚠ **默认 fp32**（P194）：fp8 的非目标行 `p − t` 更新保留率最低（P110 实测 fp16 仅 26.67%）→ 学习偏向纯 Hebbian。要 fp8 的访存收益请配 `--readout-master-weight`（P195：fp32 master + fp8 影子前向）。int 族显式请求仍禁（P163）、fp4/int4 仍禁（P152） |
 | `--encoder-dtype` | M1 权重存储精度（默认 fp32） | 昇腾走平台自适应 GEMV，与 dtype 无关 |
-| `--m2-kernel` | M2 推理核（默认 **`plain`**） | 三态见下方 §9.1。**`plain` 在昇腾赢 5.41×**（P113 实测）；`fused` 在昇腾退化 3–4×（已否）。门禁 `gate_m2_infer_kernels.py` |
+| `--m2-kernel` | M2 推理核（默认 **`auto`** = 按平台择优） | x86→`fused`（1.34–2.05×）、昇腾 aarch64→`plain`（5.41×）；`fused` 在昇腾退化 3–4×（已否）。三态见 §9.1，门禁 `gate_m2_infer_kernels.py` |
 | `--nll-sync-every` | nll 同步周期（默认 8） | N>1 时消除每步硬同步 |
-| `--numba-threads` | prange 线程上限（默认 8） | 191 核上 P22 实测 1→6 线程仅 1.16×（带宽饱和） |
+| `--numba-threads` | prange 线程上限（默认 **16**） | 服务器线程 A/B 尚未做 → 用 `tools/bench/bench_server_threads.py --threads 8,16,32` |
 | `--accel` | 读出设备（默认 auto） | `cpu/off/numba` = 强制 numba 路径 |
 | `--omp-proc-bind` | 绑核（默认**开**，只设 `OMP_PROC_BIND=close`） | **不要**加 `OMP_PLACES`（191 核实测慢 8×，已回滚） |
 | `--ckpt-dtype` | 检查点存储精度（默认 fp16） | 位模式存取，加载侧解码闭环 |
@@ -424,13 +424,13 @@ A1 fused vs serial、A2 plain vs serial（容差 1e-7 量级——plain 是非�
 A3 `n_steps=1/2/3`、B 类断言行级 prange **不改变求和顺序**。
 P113 的零回归证据见性能文档 §2.1（四个采样点 sliding PPL 与 serial 运行**逐位相同**）。
 
-⚠ **库默认 ≠ CLI 默认**：`phdnet/config.py:198` 的 `pc_fused_kernel` 默认 `True`（= `fused`），
-被 `train.py:495-496` 在 CLI 层覆盖为三态。**引用「M2 默认用哪个核」必须指明是哪一层**
-（**CLI = `plain`；库 config = `fused`**）。
+⚠ **库默认 ≠ CLI 默认**：`phdnet/config.py:307` 的 `pc_fused_kernel` 默认 `True`（= `fused`），
+CLI `--m2-kernel` 默认 **`auto`**（`train.py:471`，按平台择优：x86→`fused` / 昇腾→`plain`）。
+**引用「M2 默认用哪个核」必须指明是哪一层**（**CLI = `auto`；库 config = `fused`**）。
 
 ---
 
-## 9.2 P192：怎么加一个新的 Cython 核（含四个必踩的坑）
+### 9.2 加一个新的 Cython 核（四个必踩的坑）
 
 Cython 臂是**第二套数值实现**。加核不是「写个函数」，而是**同时欠下一笔等价性债**。
 以下是 P192 实际踩到的，按踩坑顺序写。

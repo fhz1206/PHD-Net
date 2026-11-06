@@ -51,13 +51,16 @@ if NUMBA_OK:
 
     @njit(cache=False, fastmath=True)
     def row_norms_serial(indptr, val):
+        # ⚠ P215：与生产 `_csr_row_norms` **统一 fp32**（P175 起生产输出 fp32）。
+        #   原参考版用 `np.zeros(n)` 默认 fp64 + fp64 累加 → 与生产差 ~1e-7，
+        #   那不是「并行不一致」，只是**精度口径不同**，会污染判据。
         n = indptr.shape[0] - 1
-        out = np.zeros(n)
+        out = np.zeros(n, dtype=np.float32)
         for i in range(n):
-            s = 0.0
+            s = np.float32(0.0)
             for p in range(indptr[i], indptr[i + 1]):
                 s += val[p] * val[p]
-            out[i] = s ** 0.5
+            out[i] = s ** np.float32(0.5)
         return out
 
     @njit(cache=False, fastmath=True)
@@ -75,7 +78,12 @@ if NUMBA_OK:
                 val[p] *= f
 
 
-def part_a() -> None:
+def part_a() -> bool:
+    """Part A：5 个 CSR 并行核 vs 并行化前串行版，全部要求**逐位一致**。
+
+    ⚠ P215 审计修复：原实现只 `print` 结果、不返回也不退出 →
+      **业务断言失败仍 rc=0（假绿）**。现在收集结果并返回。
+    """
     rng = np.random.default_rng(42)
     n_rows, n_cols, k = 512, 256, 16
     indptr = np.arange(0, (n_rows + 1) * k, k, dtype=np.int64)
@@ -95,35 +103,48 @@ def part_a() -> None:
     # matvec
     y_par = _csr_matvec(indptr, idx, val0, b)
     y_ser = matvec_serial(indptr, idx, val0, b)
-    print(f"matvec     逐位: {np.array_equal(y_par, y_ser)}")
+    _ok = [np.array_equal(y_par, y_ser)]
+    print(f"matvec     逐位: {_ok[-1]}")
 
     # add_outer
     v1 = val0.copy()
     v2 = val0.copy()
     _csr_add_outer(indptr, idx, v1, a, b, 0.05)
     add_outer_serial(indptr, idx, v2, a, b, 0.05)
-    print(f"add_outer  逐位: {np.array_equal(v1, v2)}")
+    _ok.append(np.array_equal(v1, v2))
+    print(f"add_outer  逐位: {_ok[-1]}")
 
     # oja_up
     v1, v2 = val0.copy(), val0.copy()
     _csr_oja_up(indptr, idx, v1, post, b, 0.02)
     oja_up_serial(indptr, idx, v2, post, b, 0.02)
-    print(f"oja_up     逐位: {np.array_equal(v1, v2)}")
+    _ok.append(np.array_equal(v1, v2))
+    print(f"oja_up     逐位: {_ok[-1]}")
 
     # row_norms
+    # ⚠ P215：这一项**不能要求逐位** —— 生产的 `_csr_row_norms` 带
+    #   `fastmath=True`，允许 FMA 收缩 / 浮点重结合，与串行参考的累加次序
+    #   不同 → fp32 下差 1 ulp（实测 max|Δ| ≈ 2.4e-7）。
+    #   按项目惯例（`gate_cython_kernels`）用**数值级容差**并如实打出 max|Δ|；
+    #   其余 4 个核仍严格要求逐位一致。
     n1 = _csr_row_norms(indptr, val0)
     n2 = row_norms_serial(indptr, val0)
-    print(f"row_norms  逐位: {np.array_equal(n1, n2)}")
+    _delta = float(np.max(np.abs(n1.astype(np.float64) - n2.astype(np.float64))))
+    _ok.append(np.allclose(n1, n2, rtol=1e-6, atol=1e-6))
+    print(f"row_norms  容差: {_ok[-1]}  max|Δ|={_delta:.3e}（fastmath 1 ulp，非逐位）")
 
     # scale_rows
     v1, v2 = val0.copy(), val0.copy()
     _csr_scale_rows(indptr, v1, target)
     scale_rows_serial(indptr, v2, target)
-    print(f"scale_rows 逐位: {np.array_equal(v1, v2)}")
+    _ok.append(np.array_equal(v1, v2))
+    print(f"scale_rows 逐位: {_ok[-1]}")
+    print(f"Part A: {sum(_ok)}/{len(_ok)} 逐位一致")
+    return all(_ok)
 
 
 # ---------- Part B：zh 多进程流 vs 串行 一致性 ----------
-def part_b(n_chunks: int = 64) -> None:
+def part_b(n_chunks: int = 64) -> bool:
     from corpus_stream import PrefetchChars, SEP, zh_char_chunks
 
     glob = os.path.join(_ROOT, "datasets", "pretrain", "pretrain_*.parquet")
@@ -168,11 +189,17 @@ def part_b(n_chunks: int = 64) -> None:
                 break
     else:
         print(f"  首块前 60 字符: {ser[0][:60]!r}")
+    return bool(same)
 
 
 if __name__ == "__main__":
     print("== Part A: CSR 并行核 vs 并行化前串行版（同 fastmath）==")
-    part_a()
+    ok_a = part_a()
     print("== Part B: zh 多进程流 vs 串行参考 ==")
-    part_b()
-    print("DONE")
+    ok_b = part_b()
+    print("-" * 66)
+    print(f"Part A={'PASS' if ok_a else 'FAIL'}  Part B={'PASS' if ok_b else 'FAIL'}"
+          f"   → {'PASS' if (ok_a and ok_b) else 'FAIL'}")
+    # ⚠ P215 审计修复：必须把业务结果传播为进程退出码，
+    #   否则 runner / CI 会把失败判成 PASS（假绿）。
+    raise SystemExit(0 if (ok_a and ok_b) else 1)

@@ -75,6 +75,7 @@ M5 公平评测（PHD-Net vs nanoGPT 级 Transformer）入口**不在本目录**
 | **`bench_server_threads.py`** | **服务器端到端 numba 线程 A/B**（补 P204 遗留空白）：输出 `ms/tok` + `segments(win)` 各段判据表 | `python tools/bench/bench_server_threads.py --threads 8,16,32 --preset 1b --data pretrain --remote-data` |
 | **`diagnose_npu_utilization.py`** | **NPU「假占用」判读**：解析 msprof CSV，给 `aicore_time`/`aiv_time`/`wait` 分解 + 判定依据 + 归因 + JSON；列名识别失败**拒绝出结论** | `python tools/probe/diagnose_npu_utilization.py outputs/prof/msprof_readout --log <训练日志>` |
 | `analyze_msprof_timeline.py` | msprof timeline 解析：按算子聚合耗时 + 硬件单元归属判读（AICore / AIV / 搬运 / wait） | `python tools/probe/analyze_msprof_timeline.py outputs/prof/msprof_readout` |
+| **`audit_gates.py`** | **门禁有效性静态初筛**：找出无退出机制 / 裸 `assert` / 打印 FAIL 却不退出的「假绿」门禁 | `python tools/audit_gates.py --strict` |
 
 ⚠ `bench_local.py` 测的是**本机 x86** 数字：已实测三次「x86 更快、昇腾更慢」
 （M1 fp32、M2 融合核、OMP place 表）。它只回答「这次改动让 CPU 侧变快还是变慢」，

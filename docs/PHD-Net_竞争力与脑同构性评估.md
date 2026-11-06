@@ -287,7 +287,7 @@ PHD-Net 不存在反向传播路径（§二.2）。与 Transformer 的差距不�
 | PPL 3403→389 / bigram 78% | 本会话实测（P198；3,392 词表 / 40K token） |
 | fp8±master A/B 2.84→2.15 | 本会话实测（`tests/checks_p195.py --ab`，x86 构造量级口径） |
 | eta_oja 发散 9.1e11 vs 916 | 本会话实测（P198，生产规模 3000 步） |
-| 门禁 9/9 fast + 47 专项 | `tests/run_tests.py`、`ls tests/gates/gate_*.py`、`outputs/test/reorg_gates/summary.json` |
+| 门禁 `fast 9/9` + 专项（用 `ls` 现查） | `tests/run_tests.py`、`tools/run_gates.py`、`ls tests/gates/gate_*.py` |
 | 全部性能数字 | `docs/PHD-Net_性能评估与迭代方案.md`（本文只引用不复制） |
 
 ### 7.2 外部文献（均可核查）

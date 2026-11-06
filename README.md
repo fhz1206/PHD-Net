@@ -193,7 +193,7 @@ python tools/diag_vocab_budget.py --vocab-sample-chars 300000 --tokens 400000
 
 ```bash
 python tests/run_tests.py fast        # 9/9
-ls tests/gates/gate_*.py              # 47 个专项 verifier，按需跑
+ls tests/gates/gate_*.py              # 专项 verifier（数量用 ls 现查，勿写死）
 ```
 
 ### 训练时间预估（P204 公式）

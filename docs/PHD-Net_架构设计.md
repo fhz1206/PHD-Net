@@ -586,7 +586,7 @@ big_ltm 容量 = big_ltm_N × big_ltm_m = 2^24 × 72 = 1,207,959,552
   `TASK_QUEUE_ENABLE=2` / `COMBINED_ENABLE=1` / expandable_segments /
   MULTI_STREAM_MEMORY_REUSE（P120 起默认，不覆盖用户显式值）；
   `--cann-dispatch` 只核对是否真生效（不新增行为；官方列了两个静默失效条件）。
-- **线程**：`--numba-threads` 默认 8（191 核服务器实测核内 1→6 线程仅 1.16×，
+- **线程**：`--numba-threads` 默认 **16**（服务器线程 A/B 尚未做，见 `tools/bench/bench_server_threads.py`；本机实测核内 1→6 线程仅 1.16×，
   访存带宽饱和）；`OMP_PROC_BIND=close`、无 OMP_PLACES（P74 撤销，place 表让 M2 慢 8–13×）。
 - M3 与 M4b 生长是 CPU 结构操作，不上加速器（迁移丢机制 / 定长行生长不可设备化）。
 
@@ -613,7 +613,7 @@ prompt 段 `learn=False` 推进状态。
 ## 9. 评测与门禁
 
 - **零回归门禁**：`python tests/run_tests.py fast` = **9/9**（< 1 分钟）。
-- **专项验证**：`tests/gates/gate_*.py` 共 **47 个**（`ls` 现查，别写死数量）；
+- **专项验证**：`tests/gates/gate_*.py`（**用 `ls` 现查，别写死数量**）；当前 `python tools/run_gates.py --jobs 4` **53/53 全绿**；
   P199 时点 **47/47 全绿**（`outputs/test/reorg_gates/summary.json`；
   `gate_csr_vectorization_perf` 曾 26/27 属 golden 基准文件缺失，后续已绿）。
   P194–P199 新增：`gate_insession_learning` / `gate_readout_master_weight` /

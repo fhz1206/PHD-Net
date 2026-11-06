@@ -28,11 +28,13 @@ P214 改成**每行一张开放寻址哈希表**（`ltm_kernel._ltm_learn_rows_h
    `keys` / `vals` / `size` / 行数 **完全相同**（SHA-256 摘要比对）。
 2. **语义边界**：覆盖**行生长初期**（sz < m_out）与**饱和期**（sz = m_out）、
    重复键、以及 `ltp<=0` 短路。
-3. **开关可控**：`LTM_HASH_LOOKUP=False` 必须真的回退到线性核
-   （否则 A/B 与排障能力是假的）。
-4. **缓冲复用安全**：`_batch_buffers` 返回的必须是**视图**且不清零；
-   多次调用后数值仍一致（防止读到上一步残留）。
+3. **开关可控**：`LTM_HASH_LOOKUP=False` 必须真的回退到线性核 —— 用
+   **spy patch** 验证「True 只调哈希核 / False 只调线性核」（P215 审计加的负向对照）。
+4. **缓冲复用安全**：`_batch_buffers` 返回**视图**且不清零；在**该表自己的**
+   缓冲上写脏（含把 `HV` 伪装成「所有槽非空」）后数值仍与干净缓冲一致
+   （P215 修复了原 D4「脏数据写进新建孤立表」的空操作）。
 5. **哈希表容量**：`H` 是 2 的幂且 ≥ 2·(m_out+1)（装填因子 ≤ 50%）。
+6. **首个匹配槽**：C 组**显式构造重复键**（不靠随机碰撞），验证同键只更新最靠前的槽。
 
 运行：`python tests/gates/gate_ltm_hash_lookup.py`（退出码 0 = PASS）
 """
@@ -128,8 +130,7 @@ def _check_b():
 
 
 def _check_c():
-    print("\n[C] 开关可控：False 真的走线性核")
-    # 直接对拍两个核在同一组输入上的输出（绕过 Python 包装层）
+    print("\n[C] 两核对拍 + **首个匹配槽**语义（显式构造重复键）")
     rng = np.random.default_rng(3)
     R, C, m_out = 48, 64, 32
     H = 1
@@ -139,13 +140,24 @@ def _check_c():
 
     K = rng.integers(0, 5000, size=(R, cap)).astype(np.int64)
     V = rng.random((R, cap))
-    S = rng.integers(4, 20, size=R).astype(np.int64)
+    S = rng.integers(10, 20, size=R).astype(np.int64)   # ⚠ 保证 > 8，重复槽可用
     tpi = rng.random(R) + 0.1
     tpi_post = rng.random(R)
     ks = rng.integers(0, 5000, size=C).astype(np.int64)
     g_post = rng.random(C) + 0.1
     g_pre = rng.random(C)
     eta, w_max, q = 0.05, 1.0, 1.0
+
+    # ⚠ P215 审计修复：原版 `ks` 与 `K` 都是独立随机整数（0..5000），
+    #   重复键几乎不出现（实测 0/48 行命中）→ 「首个匹配槽」契约**没被测到**。
+    #   现在**显式**在每行制造重复键，并让 ks 大量命中它们。
+    dup_keys = []
+    for r in range(R):
+        K[r, 3] = K[r, 0]           # slot 3 与 slot 0 同键（首个 = 0）
+        K[r, 7] = K[r, 1]           # slot 7 与 slot 1 同键（首个 = 1）
+        dup_keys.append(int(K[r, 0]))
+    for c in range(0, C, 3):
+        ks[c] = dup_keys[c % R]     # 确定性命中重复键
 
     k1, v1, s1 = K.copy(), V.copy(), S.copy()
     k2, v2, s2 = K.copy(), V.copy(), S.copy()
@@ -157,12 +169,42 @@ def _check_c():
                            eta, w_max, q, False, m_out, hk, hv)
     check(np.array_equal(k1, k2) and np.array_equal(v1, v2)
           and np.array_equal(s1, s2),
-          "C 两核在同输入上 K/V/S 完全相同",
+          "C1 含重复键时两核 K/V/S 完全相同",
+          f"重复键行数={R}, ks 命中数={len(range(0, C, 3))}, "
           f"max|ΔV|={float(np.max(np.abs(v1-v2))):.3e}")
+    # 首个匹配槽的直接判据：slot 0 被更新、slot 3（同键的第二个槽）不变
+    r0 = 0
+    check(v1[r0, 3] == V[r0, 3],
+          "C2 同键只更新**首个**槽（slot 3 保持原值）",
+          f"slot0 {V[r0, 0]:.6f}→{v1[r0, 0]:.6f}, slot3 未变={v1[r0, 3] == V[r0, 3]}")
+
+
+def _run_dirty(dirty: bool, seed: int = 11, n_steps: int = 60):
+    """在同一个 `OnlineCSRTable` 上跑 imprint；`dirty=True` 时把**该表自己**
+    的持久化缓冲全部写成脏数据（包括把 HV 伪装成「所有槽非空」）。"""
+    rng = np.random.default_rng(seed)
+    ltm = SparseLTM(n_dim=1024, n_neurons=1 << 22, m_out=72,
+                    k_hash=4, csr_online=True)
+    t = ltm.table
+    t.LTM_HASH_LOOKUP = True
+    if dirty:
+        b = t._batch_buffers(256, np.dtype(np.float64))
+        b[0][:] = 999999          # K 脏
+        b[1][:] = -7.25           # V 脏
+        b[2][:] = 72              # S 脏
+        b[3][:] = 12345           # HK 脏
+        b[4][:] = 0               # HV 脏：0 = 「槽位 0 非空」→ 最狠的污染
+    for step in range(n_steps):
+        d = [64, 128, 64][step % 3]
+        r = np.zeros(1024)
+        i = rng.choice(1024, d, replace=False)
+        r[i] = rng.random(d)
+        ltm.imprint(r)
+    return _digest(t)
 
 
 def _check_d():
-    print("\n[D] 持久化缓冲：复用视图 + 不清零仍逐位一致")
+    print("\n[D] 持久化缓冲：复用视图 + **不清零**仍逐位一致")
     t = OnlineCSRTable(n_neurons=1 << 16, m_out=72)
     b1 = t._batch_buffers(100, np.dtype(np.float64))
     b2 = t._batch_buffers(100, np.dtype(np.float64))
@@ -176,13 +218,51 @@ def _check_d():
     check(H & (H - 1) == 0 and H >= 2 * (t.m_out + 1),
           "D3 哈希表容量是 2 的幂且 ≥ 2·(m_out+1)",
           f"H={H}, m_out={t.m_out}")
-    # 不清零安全性：脏缓冲 + 两核 → 仍逐位一致
-    b1[0][:] = 999999
-    b1[1][:] = -7.25
-    a = _run(True, 11, n_steps=80)
-    b = _run(False, 11, n_steps=80)
-    check(a == b, "D4 缓冲残留不影响数值（不清零安全）",
-          f"hash={a[0][:12]}")
+    # ⚠ P215 审计修复：原 D4 把脏数据写进了一个**新建的孤立表**，
+    #   而 `_run()` 内部又新造 SparseLTM → 脏数据从未被生产路径读到，
+    #   **测试是空操作**。现在改为在**同一个表自己的缓冲**上脏化，
+    #   并比对「干净 vs 脏」两次真实 imprint 的结果。
+    clean = _run_dirty(False)
+    dirty = _run_dirty(True)
+    check(clean == dirty, "D4 脏缓冲（含 HV 伪装全满）不影响数值",
+          f"clean={clean[0][:12]} dirty={dirty[0][:12]} "
+          f"槽位 {clean[1]}/{dirty[1]}")
+
+
+def _check_e():
+    """开关可控的**负向对照**：patch 掉核函数，验证开关真的分派。"""
+    print("\n[E] 开关可控：LTM_HASH_LOOKUP 真的分派到不同核")
+    import phdnet.sparse_table as ST
+    hits = {"hash": 0, "linear": 0}
+    orig_h, orig_l = ST._ltm_learn_rows_hashed, ST._ltm_learn_rows
+
+    def spy_h(*a, **kw):
+        hits["hash"] += 1
+        return orig_h(*a, **kw)
+
+    def spy_l(*a, **kw):
+        hits["linear"] += 1
+        return orig_l(*a, **kw)
+
+    ST._ltm_learn_rows_hashed, ST._ltm_learn_rows = spy_h, spy_l
+    try:
+        for flag, expect in ((True, "hash"), (False, "linear")):
+            hits["hash"] = hits["linear"] = 0
+            rng = np.random.default_rng(23)
+            ltm = SparseLTM(n_dim=1024, n_neurons=1 << 20, m_out=72,
+                            k_hash=4, csr_online=True)
+            ltm.table.LTM_HASH_LOOKUP = flag
+            for step in range(12):
+                r = np.zeros(1024)
+                i = rng.choice(1024, 64, replace=False)
+                r[i] = rng.random(64)
+                ltm.imprint(r)
+            other = "linear" if expect == "hash" else "hash"
+            check(hits[expect] > 0 and hits[other] == 0,
+                  f"E LTM_HASH_LOOKUP={flag} 只调 {expect} 核",
+                  f"hash={hits['hash']} linear={hits['linear']}")
+    finally:
+        ST._ltm_learn_rows_hashed, ST._ltm_learn_rows = orig_h, orig_l
 
 
 def main() -> int:
@@ -193,6 +273,7 @@ def main() -> int:
     _check_b()
     _check_c()
     _check_d()
+    _check_e()
     n_ok = sum(1 for ok, _, _ in _RESULTS if ok)
     print("\n" + "=" * 74)
     print(f"结果：{n_ok}/{len(_RESULTS)} 通过 | 失败 {len(_RESULTS) - n_ok}")
