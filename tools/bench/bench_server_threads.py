@@ -242,10 +242,23 @@ def main() -> int:
             print(f"  ⚠ threads={t} 超时（{args.timeout}s），跳过")
             records.append({"threads_requested": t, "timeout": True})
 
-    ok = [r for r in records if not r.get("timeout")
-          and r.get("returncode") == 0]
+    # ⚠ P216 修复：原判据是 `returncode == 0`。但昇腾服务器上**训练成功完成
+    #   后进程退出时会崩**（`Fatal Python error: PyGILState_Release ...
+    #   Python runtime state: finalizing`，returncode = **-6 = SIGABRT**）——
+    #   实测 2026-11-07 `--numba-threads 32 --tokens 20000`：20,000 token 跑完、
+    #   `METRIC ... ms_per_token=9.97 final_ppl=9572.690`、model 与 checkpoint
+    #   都已保存，只是 finalize 阶段 abort。
+    #   → 判据改为「**有有效数据**」（解析到 ms/tok 或 segments），
+    #     退出码非 0 但数据完整时**单独标注**，不丢弃这一轮。
+    def _has_data(r: dict) -> bool:
+        if r.get("timeout"):
+            return False
+        return (r.get("ms_per_token") is not None) or bool(r.get("segments"))
+
+    ok = [r for r in records if _has_data(r)]
+    aborted = [r for r in ok if r.get("returncode") != 0]
     if not ok:
-        print("\n⚠ 没有任何一轮成功（下面的 stderr 是直接原因）")
+        print("\n⚠ 没有任何一轮产出有效数据（下面的 stderr 是直接原因）")
         for r in records:
             if r.get("timeout"):
                 print(f"  · threads={r.get('threads_requested')}: 超时")
@@ -257,6 +270,16 @@ def main() -> int:
               "`segments(win)`；② 数据路径不存在；③ 训练进程被 OOM 杀掉。")
         print("   建议 `--tokens` ≥ 1500（smoke 档）以确保至少打印 3 次滑窗。")
         return 1
+    if aborted:
+        print(f"\n⚠ 有 {len(aborted)} 轮「训练完成但退出时崩溃」（数据有效，已纳入对比）：")
+        for r in aborted:
+            print(f"  · threads={r.get('threads_requested')}: "
+                  f"returncode={r.get('returncode')} "
+                  f"ms/tok={r.get('ms_per_token')}")
+        print("   已知：昇腾 + numba prange 在解释器 finalize 阶段 abort"
+              "（`PyGILState_Release ... finalizing`），"
+              "\n   发生在 model/checkpoint 保存**之后**，不影响数值；"
+              "判据仍可用，但别把它当「训练失败」。")
 
     # ── 判据表 ──
     base = ok[0]

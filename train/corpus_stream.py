@@ -31,6 +31,8 @@ OOV 率打印在日志与 [METRIC] 尾行（4M 采样 + 中文语料实测应 �
 
 from __future__ import annotations
 
+import queue as _queue
+import threading as _threading
 from collections.abc import Iterable, Iterator
 
 SEP = "\n\n"
@@ -89,9 +91,30 @@ def zh_char_chunks(path, lang: str = "zh", sep: str = SEP) -> Iterator[str]:
         yield t + sep
 
 
+def _put_or_stop(q, item, stop, timeout: float = 0.5) -> bool:
+    """把 item 放进有界队列；`stop` 被置位时放弃并返回 False。
+
+    ⚠ P216：原来是裸 `q.put(...)`（**无限阻塞**）。队列满 + 消费者已退出时
+    生产者永久卡在 put 上 → `close()` 无法让线程干净退出 → 解释器 finalize
+    阶段该线程仍在 numba 核内 → `Fatal Python error: PyGILState_Release ...
+    finalizing` → **SIGABRT（returncode = -6）**。实测 2026-11-07 昇腾服务器
+    `--numba-threads 32 --tokens 20000`：训练 20,000 token 全部完成、model 与
+    checkpoint 均已保存，退出时 abort。线程数越大越容易命中。
+    """
+    while True:
+        if stop is not None and stop.is_set():
+            return False
+        try:
+            q.put(item, timeout=timeout)
+            return True
+        except _queue.Full:
+            continue
+
+
 def _prefetch_producer(tasks, sep: str, batch_samples: int, q,
                        lang: str | None = None,
-                       decode_threads: int = 0) -> None:
+                       decode_threads: int = 0,
+                       stop=None) -> None:
     """生产者**线程**体：顺序读取分派给本线程的文件，按批推入有界队列。
 
     tasks = [(全局文件序号 gfi, 路径)]（连续片段）；
@@ -108,22 +131,34 @@ def _prefetch_producer(tasks, sep: str, batch_samples: int, q,
       ③ **GIL 不是障碍**：真正的重活在 pyarrow 的 C++ 解码与
          `iter_batches`/`to_pylist`，两者**都释放 GIL**；线程真正并行的
          部分与多进程版完全相同。
-    ⚠ 保留 `daemon` 语义：线程随主进程退出，不阻止解释器关闭。
+
+    ⚠ **P216 修正 `daemon` 语义**：原注释写「线程随主进程退出，不阻止解释器
+    关闭」，但**这正是 SIGABRT 的来源** —— daemon 线程在 finalize 时仍可能在
+    numba 核里跑。现在 `stop`（`threading.Event`）由 `close()` 置位，
+    线程在文件循环 / 样本循环 / 入队三处都会尽快退出；`close()` 随后 join。
+    `daemon=True` 仅作最后保险。
     """
     from phdnet.corpus import iter_texts
     try:
         for gfi, path in tasks:
+            if stop is not None and stop.is_set():
+                return
             buf: list[str] = []
             for t in iter_texts_lang(path, lang,
                                      decode_threads=decode_threads):
+                if stop is not None and stop.is_set():
+                    return
                 buf.append(t + sep)
                 if len(buf) >= batch_samples:
-                    q.put((gfi, buf))
+                    if not _put_or_stop(q, (gfi, buf), stop):
+                        return
                     buf = []
             if buf:
-                q.put((gfi, buf))
-            q.put((gfi, None))
-        q.put(None)
+                if not _put_or_stop(q, (gfi, buf), stop):
+                    return
+            if not _put_or_stop(q, (gfi, None), stop):
+                return
+        _put_or_stop(q, None, stop)
     except BaseException as e:
         try:
             q.put(("__err__", e))
@@ -190,13 +225,15 @@ class PrefetchChars:
         self._depth = int(depth) if depth and int(depth) > 0 else 8192
         self._q: "_queue.Queue" = _queue.Queue(maxsize=self._depth)
         self._threads: list = []
+        # P216：生产者停止信号（close() 置位 → 线程尽快退出 → join 干净收尾）
+        self._stop = _threading.Event()
         bounds = [self._n_files * i // w for i in range(w + 1)]   # 连续均分
         for i in range(w):
             tasks = [(gfi, files[gfi]) for gfi in range(bounds[i], bounds[i + 1])]
             th = _threading.Thread(
                 target=_prefetch_producer,
                 args=(tasks, sep, batch_samples, self._q, lang,
-                      self._decode_threads),
+                      self._decode_threads, self._stop),
                 name=f"prefetch-{i}", daemon=True)
             th.start()
             self._threads.append(th)
@@ -265,19 +302,33 @@ class PrefetchChars:
         return t
 
     def close(self) -> None:
-        """显式清理：置关闭标志并清空队列（线程是 daemon，随主进程退出）。
+        """显式清理：置停止标志 → **join 生产者线程** → 清空队列。
 
-        ⚠ **P192 语义变更**：进程版的 `terminate()` 对线程**无效**（Python 没有
-        杀线程的 API）。故改为「置 `_closed` 标志 → 消费者在 0.5 s 超时后
-        正常返回 → 主循环退出 → daemon 线程随解释器退出」。代价是关闭最多
-        延迟 0.5 s（仅在训练结束时，不在热路径上）。
+        ⚠ **P216 修复（SIGABRT 根因）**：原实现只 `self._closed = True` +
+        `_threads.clear()`（丢引用），注释写「daemon 线程随解释器退出」。
+        但 `_closed` 只被**消费者**（`_refill`）读取，生产者线程根本不看它，
+        于是线程会继续跑完剩余 tasks；解释器 finalize 时这些 daemon 线程
+        仍在 **numba 核内** → `Fatal Python error: PyGILState_Release:
+        auto-releasing thread-state, but no thread-state for this thread`
+        → **SIGABRT / returncode = -6**。
+        实测 2026-11-07 昇腾服务器 `--numba-threads 32 --tokens 20000`：
+        训练 20,000 token 全部完成、model 与 checkpoint 已保存，退出时 abort。
+
+        现改为：置 `_stop` → 排空队列（唤醒阻塞在 `put` 的生产者）→
+        **逐个 `join(timeout)`**。`daemon=True` 仅作最后保险。
         """
         self._closed = True
+        self._stop.set()
         try:
-            while True:                            # 排空队列，释放引用
+            while True:                            # 排空队列，释放引用 + 唤醒 put
                 self._q.get_nowait()
         except Exception:                           # Empty
             pass
+        for th in self._threads:
+            try:
+                th.join(timeout=5.0)
+            except Exception:                       # noqa: BLE001
+                pass
         self._threads.clear()
 
     def __enter__(self) -> "PrefetchChars":

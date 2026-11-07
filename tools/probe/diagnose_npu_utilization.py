@@ -196,18 +196,47 @@ def verdict(m: dict) -> dict:
                           "无法区分「设备占用」与「算力占用」",
                 "note": "需 msprof op_summary（不是纯 timeline）"}
 
-    # ② aicore 占比低 = 有效矩阵计算几乎没跑
+    # ② 单算子集中度：**先看有没有「一个算子吃掉大半时间」**
+    # ⚠ P216 修复：原判据只看 `aicore_ratio < 0.10` 就判假占用、否则判
+    #   「真实计算为主」。实测 2026-11-07 昇腾 1b 档 msprof 给出
+    #   aicore 17.3% / aiv 82.1% / **单算子 `Index` 占 80.7%** →
+    #   旧逻辑判成「真实计算为主」，把最重要的事实（单点瓶颈）漏掉了。
+    top = (m.get("top_ops") or [None])[0]
+    if top and top["share"] > 0.50:
+        fake = True
+        reasons.append(
+            f"单一算子 `{top['name']}` 占 Task Duration 的 "
+            f"{top['share']*100:.1f}%（{top['duration_us']:.0f} µs，"
+            f"{top['count']} 次，均 {top['duration_us']/max(1,top['count']):.0f} µs/次）"
+            f"，其 aiv_time 占全部 aiv 的绝大部分 → **单点瓶颈**")
+        if m["aiv_ratio"] > 0.50:
+            causes.insert(0, (
+                "Vector 单元单点瓶颈（gather / 索引型算子）",
+                f"`{top['name']}` 占 {top['share']*100:.1f}%、aiv_time 占 "
+                f"{m['aiv_ratio']*100:.1f}% 而 aicore 仅 "
+                f"{m['aicore_ratio']*100:.1f}% → 算力被索引/访存型算子吃掉，"
+                "不是 Cube/MAC 在算。⚠ 算子名里的 'AiCore' 只是 CANN 分类标签",
+                "把稀疏 gather 改成 Cube 友好的 SpMM / 换 gather 实现"
+                "（`--sp-gather take`）/ 降 conn_k；详见 P214 §7"))
+
+    # ③ aicore 占比低 = 有效矩阵计算几乎没跑（与 ② 独立，避免互相掩盖）
     if m["aicore_ratio"] < 0.10:
         fake = True
         reasons.append(
             f"aicore_time 占 Task Duration 仅 {m['aicore_ratio']*100:.1f}% "
             f"（{m['aicore_time_us']:.0f} / {m['total_duration_us']:.0f} µs）"
             " → 有效矩阵计算时间近乎为 0")
+    elif not fake:
+        reasons.append(
+            f"aicore_time 占比 {m['aicore_ratio']*100:.1f}%、"
+            f"aiv_time {m['aiv_ratio']*100:.1f}%，且无单算子占比 >50% "
+            "→ 计算分布较均匀，无单点瓶颈")
     else:
         reasons.append(
-            f"aicore_time 占比 {m['aicore_ratio']*100:.1f}% → 有实质矩阵计算")
+            f"aicore_time 占比 {m['aicore_ratio']*100:.1f}%"
+            "（有矩阵计算，但不足以说明整体高效）")
 
-    # ③ Vector 单元在跑但效率低
+    # ④ Vector 单元在跑但 aicore 低
     if m["aiv_ratio"] > 0.30 and m["aicore_ratio"] < 0.10:
         fake = True
         reasons.append(
@@ -217,7 +246,7 @@ def verdict(m: dict) -> dict:
         causes.append((
             "算子切分与融合不足 / Vector 低效",
             "同访存量：Vector `Index` 8.1 GB/s vs Cube `BatchMatMul` 38 GB/s "
-            "（差 4.7×）；`Index` 占 ~89%",
+            "（差 4.7×）；`Index` 占 ~80-89%",
             "把稀疏 gather 从 Vector 索引改成 Cube 友好的 SpMM / 合批，"
             "或启用 `--beta p0,p1` Graph 融合"))
 

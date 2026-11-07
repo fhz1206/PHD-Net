@@ -211,7 +211,7 @@ ms_per_token = B / (f_cpu × e_cpu)  +  S
 |---|---|---|
 | `tokens` | 训练 token 预算 | `--tokens N`（默认 ∞，用 `--minutes` 限时） |
 | `B` | 单 token 的**串行**计算量（ms，单核口径） | 由 M1-M5 各段的单核耗时决定 |
-| `f_cpu` | numba/OpenMP 有效并行度 | `--numba-threads`（**P204 默认 16**） |
+| `f_cpu` | numba/OpenMP 有效并行度 | `--numba-threads`（**默认 32**；`16 vs 32` 受控 A/B 待补） |
 | `e_cpu` | 并行效率（屏障/带宽退化） | 1 线程=1.0；**P201 本机 x86 实测**：2-8 线程 0.9–1.0，16 线程 ≈0.6，32 线程 ≈0.45（fork/join 4.7→24.7→64.3 µs/区） |
 | `S` | 每 token 的固定开销（读出头往返 + replay 摊销 + 同步） | 见下 |
 

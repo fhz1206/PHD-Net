@@ -385,7 +385,7 @@ P111 恰恰是要取消这个回落。改代码前若不看清断言，**会把�
 | `--readout-dtype` | 读出计算精度（默认 **fp32**，P194 Q4；`choices` = `fp32`/`fp16`/`bf16`/`fp8`） | ⚠ **默认 fp32**（P194）：fp8 的非目标行 `p − t` 更新保留率最低（P110 实测 fp16 仅 26.67%）→ 学习偏向纯 Hebbian。要 fp8 的访存收益请配 `--readout-master-weight`（P195：fp32 master + fp8 影子前向）。int 族显式请求仍禁（P163）、fp4/int4 仍禁（P152） |
 | `--encoder-dtype` | M1 权重存储精度（默认 fp32） | 昇腾走平台自适应 GEMV，与 dtype 无关 |
 | `--m2-kernel` | M2 推理核（默认 **`auto`** = 按平台择优） | x86→`fused`（1.34–2.05×）、昇腾 aarch64→`plain`（5.41×）；`fused` 在昇腾退化 3–4×（已否）。三态见 §9.1，门禁 `gate_m2_infer_kernels.py` |
-| `--nll-sync-every` | nll 同步周期（默认 8） | N>1 时消除每步硬同步 |
+| `--nll-sync-every` | nll 同步周期（默认 **4**，P216 由 8 改；`task_modulation` 用 nll 门控学习率，滞后要小） | N>1 时消除每步硬同步；总等待量不变，只影响重叠窗口 |
 | `--numba-threads` | prange 线程上限（默认 **16**） | 服务器线程 A/B 尚未做 → 用 `tools/bench/bench_server_threads.py --threads 8,16,32` |
 | `--accel` | 读出设备（默认 auto） | `cpu/off/numba` = 强制 numba 路径 |
 | `--omp-proc-bind` | 绑核（默认**开**，只设 `OMP_PROC_BIND=close`） | **不要**加 `OMP_PLACES`（191 核实测慢 8×，已回滚） |

@@ -493,24 +493,29 @@ def main() -> None:
                          "核）绕开了BLAS，故与 dtype 无关。"
                          "注：库config.encoder_dtype 仍默认 fp64（形状参数默认），"
                          "生产 CLI 覆盖为 fp32，两者不一致是事实")
-    ap.add_argument("--numba-threads", type=int, default=16,
-                    help="P204（fhz 2026-10-18）：**默认 8 → 16**。"
+    ap.add_argument("--numba-threads", type=int, default=32,
+                    help="P216（fhz 2026-11-07）：**默认 16 → 32**。"
                          "numba prange 线程上限（0=用 numba 默认=全部核）。"
-                         "服务器实测 191 核上主循环只用 1.3 核、CS/s 250 万+"
-                         "（百万级上下文切换 = 线程空转等锁）；P22 实测核内 "
-                         "1→6 线程仅 1.16×（访存带宽饱和）→ 曾默认 8。"
-                         "⚠ P201 诊断（本机 x86）：1b 尺寸 2-8 线程即平台、"
-                         "16/32 因 fork/join 屏障（4.7→24.7→64.3 µs/区）负收益；"
-                         "但**本机 ≠ 昇腾**（项目已有四次方向相反）→ 服务器 "
-                         "A/B 定论：`--numba-threads 8/16/32`，判据是 "
-                         "`segments(win)` 的 M2_infer + 端到端 ms/tok + CS/s")
-    ap.add_argument("--nll-sync-every", type=int, default=8,
-                    help="读出 nll 同步周期（P34）：1=每步同步（旧行为）；N>1 时 "
+                         "依据：服务器 192 核实测 `--numba-threads 32 --tokens 20000` "
+                         "→ **9.86 ms/tok，readout 3.73**。"
+                         "⚠ **无 16 vs 32 的受控 A/B**（上次 32 档因退出时 SIGABRT "
+                         "被 bench 误判失败，判据已修）→ 要定论请跑 "
+                         "`python tools/bench/bench_server_threads.py --threads 16,32`。"
+                         "历史：P204 曾默认 8（191 核上主循环只用 1.3 核、"
+                         "CS/s 250 万+ = 线程空转等锁）；P22 实测核内 1→6 线程"
+                         "仅 1.16×（访存带宽饱和）；P201 本机 x86 显示 16/32 "
+                         "因 fork/join 屏障负收益，但**本机 ≠ 昇腾**。")
+    ap.add_argument("--nll-sync-every", type=int, default=4,
+                    help="P216（fhz 2026-11-07）：**默认 8 → 4**。"
+                         "读出 nll 同步周期（P34）：1=每步同步（旧行为）；N>1 时 "
                          "nll 累积到设备、每 N 步同步一次 → CPU/NPU 重叠，"
-                         "NPU 场景端到端约 -30~40%%（PPL 统计滞后 N 步，滑动均值下可忽略）"
-                         "｜P62 默认 8：服务器实测（2026-09-29 读出 12.9 ms/tok、"
-                         "CPU 仅 1.3-3.2/191 核、CS/s 250 万+ = 线程空转等同步）"
-                         "确认每步 .item() 是主要暴露点")
+                         "NPU 场景端到端约 -30~40%%（PPL 统计滞后 N 步，滑动均值下可忽略）。"
+                         "改 4 的动机：`task_modulation` 用 nll 门控本步主干学习率，"
+                         "N=8 时 nll 最多滞后 8 步；N=4 时效性更好。"
+                         "⚠ 代价：同步更频繁（实测每次 `aclrtSynchronizeStream` "
+                         "约 19.2 ms ≈ 8 步的 NPU 活；N=4 → 约 9.6 ms/次，"
+                         "**总等待量不变**，但重叠窗口变窄）→ 定论跑 "
+                         "`--nll-sync-every 1 vs 4 vs 8` + probe_PPL。")
     ap.add_argument("--omp-threads", type=int, default=0,
                     help="OpenMP线程数（0=自动=min(CPU核数, 32)）。用于BLAS/MKL/OpenMP并行区域。"
                          "191核建议 16-32；配合numba-threads使用，总并行度不超过物理核数")

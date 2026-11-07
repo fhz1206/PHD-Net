@@ -17,31 +17,58 @@
 
 ## 0. 一句话
 
-**「占用 90%」是真的，但它测的不是算力。** 本项目实测
-**`aicore_time = 0`、`aiv_time = 99.6%`、`Task Wait = 6.8× 自身耗时`**
-→ 设备一直「活跃」，但**有效矩阵计算几乎为零**，时间花在 Vector 单元的
-索引型算子下发/排队上。这是**指标虚高**，不是真实计算利用率。
+**「占用 90%」是真的，但它测的不是算力。** 设备一直在算，可 **80.7% 的算力
+花在一个 `Index`（稀疏 gather）算子上**，而它在 Vector 单元上只有 Cube 的
+1/4.7 效率。这是**指标虚高**，不是真实计算利用率。
 
-本轮落实了两件可验证的事：
-1. **CPU 侧 LTM 优化**（哈希槽位查找 + 持久化缓冲）→ `imprint` **1.83×**，
-   直接缩短 NPU 等 CPU 的空窗；
-2. **`tools/probe/diagnose_npu_utilization.py`** —— 把「假占用」判读自动化，
-   输入 msprof CSV 直接给判定 + 归因 + 判据（含 P142 的拒绝出结论保护）。
+**2026-11-07 实测（昇腾 192 核 + NPU，1b 档，`--beta p0,p1,p2`）**：
 
-⚠ **服务器侧 A/B 仍待 fhz 执行**（清单见 §6），本文不把未实测的收益写成结论。
+| 指标 | 读数 | 说明 |
+|---|---|---|
+| kernel 数 | 358,590 | — |
+| `aicore_time` | **17.3%** | 真有矩阵计算（BatchMatMul） |
+| `aiv_time` | **82.1%** | 绝大部分在 Vector |
+| `cube_utilization` | 99.85% | Cube 已满负荷 |
+| `Task Wait` | **0.3×** | ⚠ **不再排队**（P144 时是 6.8×） |
+| 单算子 `Index` | **80.7%**（21,245 次，均 6.5 ms） | **单点瓶颈** |
+| `BatchMatMul` | 17.3% | Cube，效率正常 |
+| Host 侧 `aclrtSynchronizeStream*` | **75.1 s / 84%** | 在**等 NPU**，不是 CPU 慢 |
+| Host 侧 `launch` | 2.82 s / 3.2% | kernel 下发**不是**瓶颈 |
+
+⚠ **这修正了 P144 时代的两个判断**：
+1. 「等 CPU / 队列背压」→ 开了 `--beta p0,p1,p2` 后 `Task Wait` 从 6.8× 降到
+   **0.3×**，**排队问题已消除**；
+2. 「launch 开销大」→ 实测 358,590 次 launch 共 2.82 s（7.9 µs/次），
+   **不是瓶颈**。
+
+**当前唯一的主因就是 `Index` 单点**。Host 侧那 84% 的「同步」是在等这段时间，
+不是独立问题 —— 所以**再优化 CPU 侧收益有限**，必须动 `Index`。
+
+本轮落实了三件事：
+1. **CPU 侧 LTM 优化**（哈希槽位查找 + 持久化缓冲）→ `imprint` **1.83×**；
+2. **`tools/probe/diagnose_npu_utilization.py`** —— 假占用判读自动化
+   （含「单算子集中度」判据，正是靠它把本次数据判成单点瓶颈）；
+3. **修 SIGABRT**（`corpus_stream.close()` 不 join daemon 线程）。
 
 ---
 
 ## 1. 现状时间预算（服务器 1b 档稳态）
 
-| 项 | ms/tok | 占比 |
-|---|---|---|
-| **端到端 step** | **10.8** | 100% |
-| CPU 侧（M1–M5 + other 未归因） | **~6.5** | **60%** |
-| NPU 读出（M6） | 3.5 | 32% |
+**2026-11-07 两次实测**（1b / pretrain / 同机）：
 
-CPU 主要项：`M6_replay` 1.5–1.8 / `M4b_ltm` 0.9–2.2（波动大）/
-`M2_infer` 0.65 / `M1_encode` 0.30 / `other` 内未归因 ~1.5。
+| 配置 | 端到端 | readout | 备注 |
+|---|---|---|---|
+| `--numba-threads 32`（无 beta） | **9.86–9.97 ms/tok** | **3.73–3.76** | 20,000 token 跑完，model+ckpt 已存 |
+| `--beta p0,p1,p2 --cann-dispatch` | 9.70 ms/tok | 4.15–4.16 | ⚠ **msprof 采集下**，profiling 有开销，不可直接与上行比 |
+
+⚠ 上表**不是受控 A/B**（代码、参数、是否 profiling 都不同）→ 只作基线记录。
+`--numba-threads 16 vs 32` 的受控 A/B **仍未做**（上次 32 档因退出时 SIGABRT
+被 bench 误判失败，判据已修，见 §7）。
+
+历史基线（P213，`--numba-threads 16`）：**10.8 ms/tok**（CPU ~6.5 / NPU 读出 3.5）。
+
+CPU 主要项（2026-11-07 日志）：`other` 4.2–4.8（未归因）/ `M6_replay` 1.5 /
+`M4b_ltm` 1.5–1.6 / `PC_learn` 0.6–0.7 / `M2_infer` 0.5 / `M1_encode` 0.3。
 
 ```
 CPU: M1 → M2 → M3 → M4ab → [提交读出] → PC_learn → STDP
@@ -210,37 +237,88 @@ python tools/probe/diagnose_npu_utilization.py <csv> --json
 
 ---
 
-## 6. 服务器待执行清单（需要 fhz）
+## 6. 服务器待执行清单
 
-| # | 命令 | 判据 | 目的 |
-|---|---|---|---|
-| 1 | `bash tools/scripts/prof_readout_msprof.sh` → 回传 `op_summary*.csv` | 喂给 §4.2 判读工具 | 拿到本批次真实的 `aicore/aiv/wait` 分解 |
-| 2 | `python tools/bench/bench_server_threads.py --threads 8,16,32 --preset 1b --data pretrain --remote-data --tokens 20000` | 端到端 ms/tok + `segments(win)` 各段 | 补 P204 遗留的线程 A/B 空白 |
-| 3 | 同参数 `--nll-sync-every 1` vs `8` | readout ms/tok + probe_PPL | 证/否证「还有隐藏同步点」 |
-| 4 | 基线 / `--beta p0,p1,p2 --cython-kernels auto` / 再加 `--cann-dispatch` | readout ms/tok + ms/tok + probe_PPL | 量化融合与 Graph 的收益 |
-| 5 | 正常跑一轮 1b，对比 `M4b_ltm` 段 | 1.96 ms（旧日志） vs 新值 | 确认 §4.1 在昇腾的收益 |
+| # | 命令 | 判据 | 目的 | 状态 |
+|---|---|---|---|---|
+| 1 | `bash tools/scripts/prof_readout_msprof.sh` | 产出 `op_summary*.csv` | 拿 `aicore/aiv/wait` 分解 | ✅ **已做**（2026-11-07，见 §0） |
+| 2 | `bench_server_threads.py --threads 16,32 --preset 1b --data pretrain --remote-data --tokens 20000` | ms/tok + `segments(win)` | 定 `--numba-threads` 默认值 | ⏳ **16 vs 32 受控 A/B 仍缺**（32 档单点已测 9.86） |
+| 3 | 同参数 `--nll-sync-every 1 / 4 / 8` | readout ms/tok + probe_PPL | 定 `nll_sync_every` 默认（已改 4，待验证） | ⏳ 未做 |
+| 4 | 基线 / `--beta p0,p1,p2` / 再加 `--cann-dispatch` | readout + ms/tok + probe_PPL | 量化 beta 收益 | ⚠ **半做**：beta 组有数据但**在 msprof 下**，需无 profiling 重跑 |
+| 5 | 正常跑 1b，对比 `M4b_ltm` | 1.96（旧） vs 新值 | 确认 LTM 优化在昇腾的收益 | ✅ **已看**：1.5–1.6（−20%） |
+| 6 | **`Index` 的替代实现 A/B**（见 §7.1） | NPU `Index` 占比 + readout ms/tok | **唯一能撬动主瓶颈的改动** | ⏳ 阻塞项 |
+
+✅ 另已修：`tools/scripts/*.sh` 的 git 执行位（服务器 `Permission denied` 的根因是
+`core.fileMode=false` 下提交成了 `100644`，现已 `100755`）。
 
 ---
 
 ## 7. 残留瓶颈与后续可优化点
 
-**结构性的，改不动**：
-- 逐 token 语义 → 不能数据并行；跨 token 流水违反铁律③；
-- 每步只提交 ~5–12 个小 kernel → 队列背压是**架构性**的。
+**结论：当前主瓶颈** = `Index` 单算子占 NPU 时间 **80.7%**（§0）。
+Host 侧那 84% 的「同步」是在等它，**不是独立问题** → 优化 CPU 侧边际收益很低。
 
-**还能做（按性价比）**：
-1. **`Index` 算子换实现**：把稀疏 gather 从 Vector `index` 改成 Cube 友好的
-   SpMM / 合批 —— 单点占 89.3%，是**唯一能大幅挪动 `aicore_time` 的方向**。
-   但需自定义算子或改稀疏表示，**风险高，须先有 msprof 基线**。
+### 7.1 `Index` 的四条替代路线（按落地难度）
+
+`Index` = `ht[Wi]`（`accel_readout.py::_sp_gather`），把 `(H,)` 的 `ht` 按
+`Wi (V, k)` 取成 `(V, k)`。**V≈5.2万、k=128** → 每次约 26.6 MB 输出，
+均 6.5 ms/次（profiling 下）≈ **4 GB/s**，而 Cube 的 BatchMatMul 是它的 4.7×。
+
+| # | 路线 | 做法 | 风险 | 预期 |
+|---|---|---|---|---|
+| 1 | **换 gather 实现** | 已有 `--sp-gather {index,take}`（P134）→ 试 `take` | 极低（开关已存在） | 未知，先测 |
+| 2 | **降 `conn_k`** | `--readout-conn-k 128 → 96/64` | 中（改模型容量） | gather 量线性下降，**必须 probe_PPL 判** |
+| 3 | **合并成 SpMM 走 Cube** | `(V,k)@(k,)` 用稀疏矩阵乘替代 gather+乘 | 高（需自定义算子/改表示） | aicore 可大幅上升 |
+| 4 | **减 V** | 词表 5.2 万 → 更小（子词/BPE 层面） | 高（改语料与词表） | 线性下降，但影响 PPL |
+
+⚠ **不要**试图靠「减少调用次数」优化：已实测 `Index` 21,245 次 ≈
+`BatchMatMul` 21,250 次 = **每步 1 次，已是最少**（P143 修过「每步 2 次」的 bug）。
+
+### 7.2 其它（次要）
+
+1. **`--beta p0/p1/p2` 转默认**：本次实测 `Task Wait` 从 6.8× → **0.3×**，
+   说明 beta **确实消除了排队**。但 beta 组的 readout（4.15）比无 beta 组
+   （3.73）慢 —— 那是 **msprof 开销**，需**无 profiling** 重跑才能定论。
 2. **稀疏路径重评 `--torch-compile`**（P201 建议 5）：默认 False 是 P58 指令，
-   但本机已实测「融合与 eager 逐位相同」→ 服务器 A/B 有空间。
-3. **`--beta p0/p1/p2` 转默认**（若 §6 第 4 项证实收益且 probe_PPL 无回归）。
-4. **M6_replay 摊销再评估**：`replay_every=16 → 32` 可省 ~0.8 ms/tok，
-   但 P204 实测「replay 少反而略差」（P197 锚定有效）→ **必须 probe_PPL 判**。
-5. **M4b 的 Python 循环**（gather/scatter/3× `_decay_read_arr` 占 66%）：
-   理论上限 ~1.0 ms/tok，但 `_decay_read_arr` 有**突变测试契约**
-   （必须逐个调 `_decay_read`），改动风险高。
-6. **`--enable-cpu-parallel` 是死配置**（代码里从未被读取）→ 先决定接线还是删。
+   本机已实测「融合与 eager 逐位相同」→ 服务器 A/B 有空间。
+3. **M6_replay 摊销**：`replay_every=16 → 32` 可省 ~0.8 ms/tok，但 P204 实测
+   「replay 少反而略差」→ **必须 probe_PPL 判**。
+4. **M4b 的 Python 循环**：理论上限 ~1.0 ms/tok，但 `_decay_read_arr` 有
+   **突变测试契约**（必须逐个调 `_decay_read`），改动风险高。
+5. **`--enable-cpu-parallel` 是死配置**（从未被读取）→ 先决定接线还是删。
+
+**结构性约束（改不动）**：逐 token 语义禁止数据并行；跨 token 流水违反铁律③。
+
+---
+
+## 8. 已修的稳定性问题：退出时 SIGABRT
+
+**症状**：昇腾服务器上训练**跑完后**进程 abort，
+`returncode = -6`，stderr：
+```
+Fatal Python error: PyGILState_Release: auto-releasing thread-state,
+but no thread-state for this thread
+Python runtime state: finalizing (tstate=0x...)
+```
+
+**影响面**：训练本身完全成功（20,000 token、`METRIC ... final_ppl=...`、
+model 与 checkpoint 均已保存），只是**退出阶段**崩。但会让
+`bench_server_threads.py` 把这一轮判成失败（原判据只看 `returncode == 0`）。
+
+**根因**：`train/corpus_stream.py::PrefetchChars.close()` 只置 `_closed`（消费者
+侧标志）+ `_threads.clear()`（丢引用），**从不 join**；`_prefetch_producer`
+也**没有停止信号**、`q.put` 是无限阻塞。于是 8 个 prefetch 线程在解释器
+finalize 时仍在跑（可能在 numba 核内）→ abort。线程数越大越容易命中
+（`--numba-threads 32` 触发）。
+
+**修法**（两处）：
+1. `_prefetch_producer(..., stop)`：文件循环 / 样本循环 / 入队三处检查
+   `threading.Event`；入队改用可中断的 `_put_or_stop`（带 timeout 的
+   `put` 循环）。
+2. `close()`：`_stop.set()` → 排空队列（唤醒阻塞在 put 的生产者）→
+   **逐个 `join(timeout=5)`**。`daemon=True` 仅作最后保险。
+3. `bench_server_threads.py` 判据：改为「**有有效数据即算成功**」，
+   退出码非 0 但数据完整的轮次单独标注「训练完成但退出时崩溃」。
 
 ---
 

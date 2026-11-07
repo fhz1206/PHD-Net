@@ -106,7 +106,7 @@ py -3.14 tools/eval/rebaseline.py
 | `--micro-batch` | 1 | P194 Q1 |
 | `--readout-master-weight` / `--readout-shadow-refresh` | off / 8 | P195 |
 | `--readout-powlaw-alpha/kmin/kmax` | 0 / 1 / 0 | alpha>0 回落 numba（加速器对非均匀行宽 fail-fast，正确行为） |
-| `--numba-threads` / `--nll-sync-every` / `--ckpt-every` | **16** / 8 / 50000 | 线程数的服务器 A/B **尚未做** → 用 `tools/bench/bench_server_threads.py --threads 8,16,32` |
+| `--numba-threads` / `--nll-sync-every` / `--ckpt-every` | **32** / **4** / 50000 | P216（fhz 2026-11-07）。threads 依据：服务器 `--numba-threads 32` → 9.86 ms/tok（⚠ **无 16 的受控 A/B**，跑 `bench_server_threads.py --threads 16,32`）。nll-sync 4：`task_modulation` 用 nll 门控学习率，N=8 滞后太多；每次同步约 19.2 ms≈8 步 NPU 活 → **总等待量不变**，但重叠窗口变窄（待 `1/4/8` A/B） |
 | `--step-profiling` | **开** | P198 起 |
 | `--vocab-scan` / `--vocab-sample-chars` | head / 4,000,000 | |
 | `--remote-fraction` | 0.3 | 前缀子集 |

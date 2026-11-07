@@ -534,10 +534,16 @@ class PHDNetConfig:
     #      「P194 四件套」一节；此处不再重复定义。
     # P34：nll 同步周期（AccelReadout）。1=每步同步（旧行为）；N>1 时
     # nll 累积到设备、每 N 步同步一次 → CPU/NPU 重叠（NPU 上端到端约 -30~40%）。
-    # P62（2026-09-29）：默认 1 → **8**。服务器日志证据：读出 12.9 ms/tok、
+    # P62（2026-09-29）：默认 1 → 8。服务器日志证据：读出 12.9 ms/tok、
     # CPU 仅 1.3–3.2/191 核、CS/s 250 万–600 万（线程空转等同步）——每步
     # .item() 把 NPU 延迟完全暴露给 CPU，流水线无法重叠。
-    nll_sync_every: int = 8
+    # P216（2026-11-07，fhz 指令）：默认 8 → **4**。动机是 **nll 时效性**：
+    # `task_modulation` 用 nll 门控本步主干学习率，N=8 时 nll 最多滞后 8 步。
+    # ⚠ 代价与边界：实测每次 `aclrtSynchronizeStream` 约 19.2 ms（≈8 步的 NPU 活）
+    # → N=4 时约 9.6 ms/次，**总等待量不变**（同步本质是等 NPU 干完），
+    # 但 CPU/NPU 重叠窗口变窄。真正的 A/B 判据：
+    # `--nll-sync-every 1 vs 4 vs 8` + `probe_PPL`（不看 sliding PPL）。
+    nll_sync_every: int = 4
     # P35：step 分段计时（诊断 CPU 侧 11.4 ms/tok 的分布）。
     # ⚠ 2026-10-07 **默认改为 True**（fhz 指令「默认开启 step 详细用时查看」）：
     #   开启后 train.py 日志按段打印累计耗时（M1 编码/M2 推理/M3 预测/M5 调制/
