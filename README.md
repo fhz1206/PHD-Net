@@ -211,7 +211,7 @@ ms_per_token = B / (f_cpu × e_cpu)  +  S
 |---|---|---|
 | `tokens` | 训练 token 预算 | `--tokens N`（默认 ∞，用 `--minutes` 限时） |
 | `B` | 单 token 的**串行**计算量（ms，单核口径） | 由 M1-M5 各段的单核耗时决定 |
-| `f_cpu` | numba/OpenMP 有效并行度 | `--numba-threads`（**默认 32**；`16 vs 32` 受控 A/B 待补） |
+| `f_cpu` | numba/OpenMP 有效并行度 | `--numba-threads`（**P204 默认 16**） |
 | `e_cpu` | 并行效率（屏障/带宽退化） | 1 线程=1.0；**P201 本机 x86 实测**：2-8 线程 0.9–1.0，16 线程 ≈0.6，32 线程 ≈0.45（fork/join 4.7→24.7→64.3 µs/区） |
 | `S` | 每 token 的固定开销（读出头往返 + replay 摊销 + 同步） | 见下 |
 
@@ -331,6 +331,7 @@ python train/train.py --preset 1b --data pretrain --report
 | 查 NPU 加速开关（`--beta`）现状 | `docs/P205a_NPU流水线设计.md`（p0/p1/p2 已实现、**p3 未实现**；怎么测、占用率判据） |
 | 查为什么不做跨 token 流水 | `docs/PHD-Net_CPU-NPU重叠执行计划.md`（决策记录：三条红线） |
 | 查 M2/PC 并行瓶颈诊断 | `docs/PHD-Net_P201_M2-PC并行瓶颈诊断.md` |
+| **查 Yan 架构能否让训练并行 / 降低单 token 计算量** | **`docs/PHD-Net_Yan架构启发与并行化评估.md`**（MCSD 公式核实 + 三条落地路径 + 为什么在线学习不能直接并行） |
 | 与 Transformer / 大脑对比 | `docs/PHD-Net_竞争力与脑同构性评估.md` |
 | 查一个 bug 的症状→根因→门禁缺口 | `BUGS.md`（53 条） |
 | 制备语料 / 数据集入口 | `tools/README.md`、`datasets/README.md` |

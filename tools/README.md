@@ -76,6 +76,7 @@ M5 公平评测（PHD-Net vs nanoGPT 级 Transformer）入口**不在本目录**
 | **`diagnose_npu_utilization.py`** | **NPU「假占用」判读**：解析 msprof CSV，给 `aicore_time`/`aiv_time`/`wait` 分解 + 判定依据 + 归因 + JSON；列名识别失败**拒绝出结论** | `python tools/probe/diagnose_npu_utilization.py outputs/prof/msprof_readout --log <训练日志>` |
 | `analyze_msprof_timeline.py` | msprof timeline 解析：按算子聚合耗时 + 硬件单元归属判读（AICore / AIV / 搬运 / wait） | `python tools/probe/analyze_msprof_timeline.py outputs/prof/msprof_readout` |
 | **`audit_gates.py`** | **门禁有效性静态初筛**：找出无退出机制 / 裸 `assert` / 打印 FAIL 却不退出的「假绿」门禁 | `python tools/audit_gates.py --strict` |
+| **`bench_readout_gather_npu.py`** | **NPU notebook 自包含 benchmark**：对比 `ht[Wi]` / `torch.take` / `einsum` / 等价 SpMM 的耗时与 `max|Δ|`，回答「Vector gather 换 Cube 算子能快多少」——直击 `Index` 占 80.7% 的瓶颈；不依赖仓库 | 整段粘贴进 AtomGit Notebook（1×NPU 910B）运行 |
 
 ⚠ `bench_local.py` 测的是**本机 x86** 数字：已实测三次「x86 更快、昇腾更慢」
 （M1 fp32、M2 融合核、OMP place 表）。它只回答「这次改动让 CPU 侧变快还是变慢」，
