@@ -74,7 +74,7 @@ def analyse(data: dict) -> int:
             print(f"  [{dt}] `{best['name'][:38]}` 比生产实现快 "
                   f"**{best['speedup_vs_A']:.2f}×**，max|Δ|="
                   f"{best.get('max_abs_delta_vs_A')} "
-                  "→ **零语义风险，可直接换算子/开关**")
+                  "→ **算子层面零语义风险**；但生产路径还要 A/B + probe_PPL 才能改默认")
         else:
             print(f"  [{dt}] B/C/D 均无显著优势 → 瓶颈在 Vector 单元本身，"
                   "需真 CSR SpMM / 自定义算子")

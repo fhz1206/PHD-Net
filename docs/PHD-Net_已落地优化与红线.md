@@ -96,7 +96,7 @@
 AtomGit NPU Notebook（**Ascend910B4**）实测：
 `torch.index_select(ht, 0, Wi.ravel()).view(Wi.shape)` 与生产 `ht[Wi]`
 **逐位相同**（`max|Δ|=0`），但快 **52.80×（fp16）/ 29.63×（fp32）**
-（6.483→0.123 / 6.743→0.225 ms/step）。已接成
+（6.489→0.123 / 6.743→0.228 ms/step）。已接成
 `--readout-gather-impl index_select`（第三选项，与 `index`/`take` 并列），
 门禁 `gate_gather_impl.py` **17/17** 锁住逐位等价 + 负向对照。
 

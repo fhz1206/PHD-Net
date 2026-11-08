@@ -1066,8 +1066,8 @@ class AccelReadout:
                 #   `torch.index_select(ht, 0, Wi.ravel()).view(Wi.shape)` 与
                 #   `ht[Wi]` **数值逐位相同**（max|Δ| = 0.000e+00），但
                 #   在 NPU 上快 **52.80×（fp16）/ 29.63×（fp32）**：
-                #     fp16: 6.483 ms → 0.123 ms/step
-                #     fp32: 6.743 ms → 0.225 ms/step
+                #     fp16: 6.489 ms → 0.123 ms/step
+                #     fp32: 6.743 ms → 0.228 ms/step
                 #   原因：`ht[Wi]` 走 `aclnnIndex`（Vector 单元，msprof 实测占
                 #   NPU 时间 80.7%）；`index_select` 走另一条连续访存 kernel。
                 #   ⚠ 这是**孤立算子** benchmark；生产路径还有缓存/量化分支，

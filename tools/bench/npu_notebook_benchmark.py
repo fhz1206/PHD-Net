@@ -157,7 +157,7 @@ for DT in DTS:
 
 summary = [
     "", "=" * 78, "判读要点",
-    "  1. B/C/D 若明显快且 max|Δ| 在 1e-3 量级内 → 换算子即可，零语义风险",
+    "  1. B/C/D 若明显快且 max|Δ|=0 → 算子层面等价；生产换默认仍需 A/B",
     "     （`--sp-gather take` / `--sparse-fwd-kernel einsum` 开关已存在）。",
     "  2. E 是「分区激活」的理论上限；真用要改学习规则，必须 probe_PPL 判。",
     "  3. F 是等价 SpMM 的算子信号；若 Cube 明显快，值得做真 CSR SpMM。",

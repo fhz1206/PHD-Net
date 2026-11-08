@@ -359,7 +359,7 @@ def main() -> None:
                          "三者数值**逐位相同**（max|Δ|=0），纯性能开关。"
                          "⚠ P217 AtomGit Notebook **Ascend910B4 实测**："
                          "index_select 比 index 快 **52.80×（fp16）/ 29.63×（fp32）**"
-                         "（6.483→0.123 / 6.743→0.225 ms/step），take 仅 1.03×。"
+                         "（6.489→0.123 / 6.743→0.228 ms/step），take 仅 1.03×。"
                          "⚠ 那是孤立算子 benchmark，生产路径还有缓存/量化分支 →"
                          " **默认仍是 index**，改默认前必须服务器 A/B + probe_PPL")
     ap.add_argument("--readout-powlaw-alpha", type=float, default=0.0,
