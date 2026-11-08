@@ -249,6 +249,38 @@ P214 文档写的 25.37 MiB 是 **fp32** 中间张量口径，两者不矛盾。
 4. 路径 B（推理路径 parallel scan）/ 路径 C（分区激活）排在后面，
    且 C 必须先有 `probe_PPL` 基线。
 
+### 5.1 P218：一次「无效 A/B」的复盘（务必记住）
+
+2026-11-08 用户回传两段生产日志，看起来像 `index` vs `index_select`
+的 A/B，但**不能用它判定收益**，三个原因：
+
+1. **服务器代码版本落后**：`train.py` 的 choices 仍是
+   `{index,take}`（旧于 `fe4b596`），用户加 `--readout-gather-impl
+   index_select` 直接报 `invalid choice`。→ 那两轮**根本没有跑过**
+   `index_select`。A/B 前必须 `git fetch` 并核对 `--help`。
+2. **只有 cum 口径的 readout 指标**：旧日志 `readout ms/tok` 是
+   `_ro_ms_accum / _ro_calls`（从 token 0 起的累计平均），含 JIT 冷编译。
+   两段日志第一段 500 步 **58.54 ms/tok**（`PC_learn 15.70` /
+   `FO_learn 13.52` / `M1_encode 6.55`），第二段 500 步 **21.68 ms/tok**
+   —— 这是**冷/热 numba cache** 的差异，不是改动收益；而两段的
+   `segments(win)` 几乎完全一致，`probe_PPL` 四个采样点**逐位相同**。
+3. **启动日志不打印生效值** → 无法区分「改了没效果」与「CLI 存了值、
+   生产路径没接线」（P134/P186 踩过两次）。
+
+**P218 已修**（`866a2bd`）：
+- 日志同时打印 `readout X ms/tok (cum) / Y (win)`，`reset_prof_window()`
+  同步清零 win；
+- 启动行 `[readout] gather_impl=<实际生效> (requested <CLI 值>) |
+  gather_dtype=... | conn_k=...` 自证开关；
+- `gate_readout_win_timing.py`（8/8）锁住契约；
+- `tools/analyze_readout_ab.py` 校验两轮生效值确实不同、且各自等于 CLI 值，
+  再用 `probe_PPL`（语义）+ `readout (win)`（性能）出对比表。
+
+**正确的 A/B 顺序**：`git fetch` → 核对 `--help` → **先跑一轮预热**
+（填 numba cache）→ A(`index`) → B(`index_select`) → 必要时再跑一次 A
+交叉验证；判据用 `probe_PPL` 与 `readout (win)`，**不看 cum、不看
+sliding PPL**。
+
 ---
 
 ## 6. 一句话回答用户的问题
