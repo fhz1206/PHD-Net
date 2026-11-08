@@ -92,23 +92,43 @@ def main() -> int:
           "负向对照：scatter_ 构造的稠密 SpMM 与 index 不等价（应被检出）",
           f"max|Δ|={float((y_scatter-y_index).abs().max()):.3e}")
 
-    # CLI / config 契约
+    # CLI / config 契约（P218：默认 auto = 按平台择优）
     src = io.open(_ROOT / "train" / "train.py", encoding="utf-8").read()
     seg = src[src.find('"--readout-gather-impl"'):]
-    seg = seg[:400]
-    check('"index_select"' in seg and '"index"' in seg and '"take"' in seg,
-          "CLI choices 含三个实现")
-    check('default="index"' in seg,
-          "CLI 默认仍是 index（未擅自改默认）")
+    seg = seg[:420]
+    check('"auto"' in seg and '"index_select"' in seg and
+          '"index"' in seg and '"take"' in seg,
+          "CLI choices 含四个选项（含 auto）")
+    check('default="auto"' in seg, "CLI 默认 auto（按平台择优）")
 
     cfg = io.open(_ROOT / "phdnet" / "config.py", encoding="utf-8").read()
-    check('readout_gather_impl: str = "index"' in cfg,
-          "config 默认仍是 index")
+    check('readout_gather_impl: str = "auto"' in cfg,
+          "config 默认 auto")
 
     body = io.open(_ROOT / "phdnet" / "backends" / "accel_readout.py",
                    encoding="utf-8").read()
     check(body.count('_gather_impl == "index_select"') >= 2,
           "accel_readout 两条精度臂都接了 index_select 分支")
+    check("resolve_gather_impl(gather_impl" in body,
+          "构造时调用 resolve_gather_impl 解析 auto")
+
+    # auto 解析的行为（直接测函数，不需要构造整个 AccelReadout）
+    from phdnet.backends.accel_readout import resolve_gather_impl
+    cases = [
+        ("auto", "npu:0", "index_select"),
+        ("auto", "NPU:1", "index_select"),
+        ("auto", "ascend", "index_select"),
+        ("auto", "cpu", "index"),
+        ("auto", "cuda:0", "index"),           # 未实测 → 不外推
+        ("index", "npu:0", "index"),           # 显式指定不被覆盖
+        ("index_select", "cpu", "index_select"),
+        ("take", "npu:0", "take"),
+        (None, "cpu", "index"),
+    ]
+    for impl, dev, expect in cases:
+        got = resolve_gather_impl(impl, dev)
+        check(got == expect, f"resolve(auto) {impl!r}@{dev} → {expect}",
+              f"got={got}")
 
     ok = sum(1 for r in _RESULTS if r[0])
     print("\n" + "=" * 74)

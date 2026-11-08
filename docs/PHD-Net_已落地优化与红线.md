@@ -100,9 +100,10 @@ AtomGit NPU Notebook（**Ascend910B4**）实测：
 `--readout-gather-impl index_select`（第三选项，与 `index`/`take` 并列），
 门禁 `gate_gather_impl.py` **17/17** 锁住逐位等价 + 负向对照。
 
-⚠ **默认仍是 `index`** —— 那是孤立算子 benchmark，生产 `_sp_gather` 还有
-缓存 / fp8·int8 量化臂 / `_gather_dtype` 降精度分支；改默认前必须
-服务器 A/B（`segments(win)` readout + 端到端）+ `probe_PPL`。
+✅ **P218 已按平台择优改默认 `auto`**：预热后的生产 A/B（5000 token、
+probe 每 1000、`gather_impl` 生效值自证）给出 probe_PPL **9 点逐位相同**、
+`readout (win)` 均值 **3.14×**、端到端 **1.81×** → NPU 默认 `index_select`；
+本机 CPU 实测慢 11% → CPU 保持 `index`。其它后端无实测证据，不外推。
 ⚠ benchmark 里「稠密 SpMM」一项**不等价**（`scatter_` 对重复列覆盖，
 `max|Δ|≈1.05`），别当成可用实现。
 

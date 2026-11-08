@@ -499,7 +499,10 @@ class PHDNetConfig:
     # ⚠ P145 清理：此处原有**三份重复的注释 + 三次同名赋值**（P134 那次脚本
     #   失败后重试插入的残留）。功能上无害（后两次覆盖前两次、值相同），
     #   但属死代码，且暴露「重试式插入」的纪律漏洞 —— 已合并为一份。
-    readout_gather_impl: str = "index"
+    # P218：默认 auto = 按平台择优（AccelReadout 构造时解析）：
+    #   NPU/昇腾 → index_select（生产 A/B：readout(win) 3.14× / 端到端 1.81×，
+    #   probe_PPL 9 点逐位相同）；CPU → index（避免本机实测的 11% 回退）。
+    readout_gather_impl: str = "auto"
     # P145：gather **中间量 g**（= `ht[Wi]` 的输出）的精度。
     # **默认 fp32 = 保持现状**。
     # 动机（msprof 昇腾 600 步实测）：`Index` 占 81.0%，其中

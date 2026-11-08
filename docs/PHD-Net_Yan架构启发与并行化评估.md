@@ -281,6 +281,42 @@ P214 文档写的 25.37 MiB 是 **fp32** 中间张量口径，两者不矛盾。
 交叉验证；判据用 `probe_PPL` 与 `readout (win)`，**不看 cum、不看
 sliding PPL**。
 
+### 5.2 P218 生产 A/B 结果（2026-11-08，浏览器里跑完）
+
+环境：AtomGit Notebook / Ascend910B4 / `866a2bd`，**先跑 1000 token 预热**
+填 numba cache，然后两轮各 5000 token、`--probe-every 1000
+--probe-tokens 2048 --step-profiling`，同数据同 seed。
+启动行自证：`A gather_impl=index (requested index)` /
+`B gather_impl=index_select (requested index_select)`。
+
+| token | probe A / B | 相同 | 端到端 A→B | readout(win) A→B |
+|---:|---|---|---:|---:|
+| 1,000 | 31110.8992 / 31110.8992 | ✅ | 36.56 → 20.77 | 7.897 → 2.454 (3.22×) |
+| 2,000 | 9100.0132 / 9100.0132 | ✅ | 32.88 → 17.51 | 8.003 → 2.462 (3.25×) |
+| 3,000 | 2949.1149 / 2949.1149 | ✅ | 31.84 → 16.65 | 7.956 → 2.360 (3.37×) |
+| 4,000 | 1061.1045 / 1061.1045 | ✅ | 31.52 → 16.17 | 7.992 → 2.350 (3.40×) |
+| 5,000 | 601.8898 / 601.8898 | ✅ | 31.40 → 15.88 | 8.123 → 2.404 (3.38×) |
+
+**均值：端到端 1.81×、`readout (win)` 3.14×；probe_PPL 9 个采样点逐位相同。**
+
+注意 `readout(win)` 在整千/半千采样点呈 ~8 / ~3.8 两组（滑窗长度
+`[500 steps]` vs `[2291 steps]` 交替，probe 会改变窗口），但 **A/B 比值
+稳定在 3.1–3.4×**，不是噪声。
+
+**为什么算子级 52.80× → 生产只有 3.14×**：算子 benchmark 只测
+`(ht[Wi]*W).sum(1)`；生产 `readout ms/tok` 还含 `W` 的 fp8 反量化、
+`learn_softmax` 的 logsumexp/softmax/rank-1 更新、CPU 提交与等待。
+**端到端 1.81× 才是最终收益**（readout 只占一部分）。
+
+**落地决策（P218 最终）**：默认改为 **`auto` 按平台择优**
+（与 `--m2-kernel auto` 同一治理方式）：
+- NPU / 昇腾 → `index_select`（有上面这份生产 A/B 证据）；
+- CPU / CUDA / ROCm → `index`（本机 x86 实测 `index_select` **慢 11%**，
+  其它后端无实测证据 → 不外推）；
+- 显式 `index`/`take`/`index_select` 仍可覆盖，保留 A/B 与排障能力。
+
+`resolve_gather_impl()` 的 9 个 case 由 `gate_gather_impl.py`（27/27）锁住。
+
 ---
 
 ## 6. 一句话回答用户的问题

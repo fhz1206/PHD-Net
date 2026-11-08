@@ -63,6 +63,27 @@ def _ensure_npu_registered():
     return _f()
 
 
+def resolve_gather_impl(impl: str, device: str) -> str:
+    """把 `gather_impl` 解析成**实际生效**的实现名（P218）。
+
+    `auto` = 按平台择优：
+      · NPU / 昇腾 → `index_select`：AtomGit Notebook（Ascend910B4）生产 A/B
+        实测 `readout(win)` **3.14×**、端到端 **1.81×**，且 `probe_PPL`
+        9 个采样点**逐位相同**（零语义回归）。
+      · 其它（CPU/CUDA/ROCm）→ `index`：本机 x86 实测 `index_select` 慢 11%
+        （0.89×），其它后端没有实测证据 → **保持旧行为**（铁律：不外推）。
+
+    与 `--m2-kernel auto` 同一治理方式。显式指定 index/take/index_select
+    时原样返回（保留 A/B 与排障能力）。
+    """
+    _impl = str(impl or "index").lower()
+    if _impl != "auto":
+        return _impl
+    dev = str(device or "").lower()
+    return ("index_select"
+            if ("npu" in dev or "ascend" in dev) else "index")
+
+
 def resolve_accel_device(spec: str = "auto") -> str:
     """解析加速器设备（auto = 昇腾 → ROCm → CUDA → DirectML → CPU）。
 
@@ -607,7 +628,16 @@ class AccelReadout:
         # P134：gather 实现（"index" = 高级索引基线 / "take" = 另一条 device kernel）
         # ⚠ P145 清理：这里原本有**三份重复赋值**（P134 那次脚本失败重试的残留，
         #   功能上无害但属死代码，且说明「重试式插入」的纪律漏洞）。
-        self._gather_impl = str(gather_impl or "index").lower()
+        # ⚠⚠ P218：**默认改为 `auto`（按平台择优）**。依据 2026-11-08
+        #   AtomGit Notebook（Ascend910B4）生产 A/B，两轮都在 numba cache
+        #   预热之后、生效值自证通过：
+        #     probe_PPL 9 个采样点**逐位相同**（零语义回归）
+        #     readout(win) 均值 **3.14×**、端到端 **1.81×**
+        #   但本机 x86 CPU 实测 index_select 比 index **慢 11%**（0.89×）
+        #   → 不能无条件改默认，否则伤 CPU 用户。
+        #   与 `--m2-kernel auto` 同一治理方式：NPU 走快的，CPU 保持原样。
+        _impl = resolve_gather_impl(gather_impl, getattr(self, "device", ""))
+        self._gather_impl = _impl
         # P145：gather 输出的精度（"fp32" | "fp16" | "bf16"），**默认 fp32=保持现状**。
         # 动机（msprof 昇腾实测，600 步）：
         #   aclnnIndex_IndexAiCore_Index  占 81.0%，耗时 3,975,871 μs，
