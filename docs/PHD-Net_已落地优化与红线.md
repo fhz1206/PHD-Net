@@ -89,7 +89,22 @@
 | `gate_fp8_int8_convert` | 17 | 查表与 powf 逐位等价 / 边缘位模式 / NaN / 转化效率报告 |
 | `gate_ltm_hash_lookup` | **13** | 两核逐位一致 / int8 / 饱和期 / **显式重复键首个槽** / **真实脏缓冲** / 哈希表容量 / **开关分派负向对照** |
 
-**全量 53/53 通过**（`python tools/run_gates.py --jobs 4`）。
+**全量 54/54 通过**（`python tools/run_gates.py --jobs 4`）。
+
+### 5.0 P217 新增：`index_select` gather 开关（默认未改）
+
+AtomGit NPU Notebook（**Ascend910B4**）实测：
+`torch.index_select(ht, 0, Wi.ravel()).view(Wi.shape)` 与生产 `ht[Wi]`
+**逐位相同**（`max|Δ|=0`），但快 **52.80×（fp16）/ 29.63×（fp32）**
+（6.483→0.123 / 6.743→0.225 ms/step）。已接成
+`--readout-gather-impl index_select`（第三选项，与 `index`/`take` 并列），
+门禁 `gate_gather_impl.py` **17/17** 锁住逐位等价 + 负向对照。
+
+⚠ **默认仍是 `index`** —— 那是孤立算子 benchmark，生产 `_sp_gather` 还有
+缓存 / fp8·int8 量化臂 / `_gather_dtype` 降精度分支；改默认前必须
+服务器 A/B（`segments(win)` readout + 端到端）+ `probe_PPL`。
+⚠ benchmark 里「稠密 SpMM」一项**不等价**（`scatter_` 对重复列覆盖，
+`max|Δ|≈1.05`），别当成可用实现。
 
 ### 5.1 门禁有效性契约（改动门禁前必读）
 

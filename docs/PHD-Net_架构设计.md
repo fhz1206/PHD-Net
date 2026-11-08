@@ -613,7 +613,7 @@ prompt 段 `learn=False` 推进状态。
 ## 9. 评测与门禁
 
 - **零回归门禁**：`python tests/run_tests.py fast` = **9/9**（< 1 分钟）。
-- **专项验证**：`tests/gates/gate_*.py`（**用 `ls` 现查，别写死数量**）；当前 `python tools/run_gates.py --jobs 4` **53/53 全绿**；
+- **专项验证**：`tests/gates/gate_*.py`（**用 `ls` 现查，别写死数量**）；当前 `python tools/run_gates.py --jobs 4` **54/54 全绿**；
   P199 时点 **47/47 全绿**（`outputs/test/reorg_gates/summary.json`；
   `gate_csr_vectorization_perf` 曾 26/27 属 golden 基准文件缺失，后续已绿）。
   P194–P199 新增：`gate_insession_learning` / `gate_readout_master_weight` /

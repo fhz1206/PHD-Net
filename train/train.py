@@ -353,10 +353,15 @@ def main() -> None:
                          "保留率仅 26.67%%；g 是中间量不累积）。"
                          "**是否开请用 --probe-every 的 probe_PPL 做 A/B 判定**")
     ap.add_argument("--readout-gather-impl", default="index",
-                    choices=["index", "take"],
-                    help="P134：稀疏读出 gather 的实现。index=高级索引（默认，"
-                         "旧行为）；take=torch.take（本机 x86 实测快 1.7×，"
-                         "**昇腾待实测**）。两者数值**逐位相同**，纯性能开关")
+                    choices=["index", "take", "index_select"],
+                    help="P134/P217：稀疏读出 gather 的实现。index=高级索引（默认，"
+                         "旧行为）；take=torch.take；index_select=torch.index_select。"
+                         "三者数值**逐位相同**（max|Δ|=0），纯性能开关。"
+                         "⚠ P217 AtomGit Notebook **Ascend910B4 实测**："
+                         "index_select 比 index 快 **52.80×（fp16）/ 29.63×（fp32）**"
+                         "（6.483→0.123 / 6.743→0.225 ms/step），take 仅 1.03×。"
+                         "⚠ 那是孤立算子 benchmark，生产路径还有缓存/量化分支 →"
+                         " **默认仍是 index**，改默认前必须服务器 A/B + probe_PPL")
     ap.add_argument("--readout-powlaw-alpha", type=float, default=0.0,
                     help="P124：M6 读出的**幂律异质连接**指数（k_i ∝ 词频^alpha）。"
                          "**默认 0.0 = 关闭**（与 --readout-conn-k 的均匀 k-conn "

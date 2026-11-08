@@ -11,7 +11,7 @@
 | 项 | 值 | 来源 |
 |---|---|---|
 | `python tests/run_tests.py fast` | **9/9**（<1 分钟，零回归门槛） | 持续门禁 |
-| 专项门禁 | **53 个**（`ls tests/gates/gate_*.py` 现查，勿写死）；**53/53 全绿** | `outputs/experiments/gates_*.json` |
+| 专项门禁 | **54 个**（`ls tests/gates/gate_*.py` 现查，勿写死）；**54/54 全绿** | `outputs/experiments/gates_*.json` |
 | **统一入口** | `python tools/run_gates.py [--jobs 4]` —— 自动实测选能 `import numpy` 的解释器 + 性能敏感门禁串行 + 输出 JSON | `tools/run_gates.py` |
 | 关键门禁 | `gate_forward_only` 30 项 / `gate_cpu_opt_p211` 19 项 / `gate_fp8_int8_convert` 17 项 / **`gate_ltm_hash_lookup` 13 项**（P214 哈希槽位查找逐位契约） | `tests/gates/` |
 | CI | 两套 workflow（`.gitcode/` + `.github/`），无 Jenkinsfile；远端状态未核验，**不宣称全绿** | 源码 |
@@ -98,6 +98,7 @@ py -3.14 tools/eval/rebaseline.py
 | `--data-lang` | all | 会改变训练结果 |
 | `--readout-dtype` | fp32 | choices: fp32/fp16/bf16/fp8 |
 | `--readout-conn-k` | **128** | 库默认 0（稠密），两者不一致是事实 |
+| `--readout-gather-impl` | **index**（默认，未改） | P217 新增 `index_select`：Ascend910B4 实测比 `index` 快 **52.80×（fp16）/ 29.63×（fp32）且逐位相同**，但那是孤立算子 benchmark → 生产 A/B + probe_PPL 后才可改默认。详见 `Yan架构启发与并行化评估.md` §4 |
 | `--encoder-dtype` | fp32 | x86 上比 fp64 快 1.80× |
 | `--ckpt-dtype` | fp16 | 位模式存储；master 模式 ro_W 存 fp32 逐位 |
 | `--m2-kernel` | **`auto`** | P212 按平台择优：x86→`fused`（实测 1.34–2.05×）、昇腾 aarch64→`plain`（P113 5.41×）；可显式 `serial`/`fused`/`plain` 覆盖 |

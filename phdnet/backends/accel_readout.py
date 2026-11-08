@@ -1061,11 +1061,23 @@ class AccelReadout:
         #   （**慢 1.78×**），而 P145 的原意是省流量。
         #   → 现在把 cast **移到 gather 之前**（对 `ht` 做，而不是对 `g`）。
         if self._gather_dtype == "fp32":
-            if self._gather_impl == "take":
+            if self._gather_impl == "index_select":
+                # ⚠⚠ P217（2026-11-08 AtomGit NPU Notebook，Ascend910B4 实测）：
+                #   `torch.index_select(ht, 0, Wi.ravel()).view(Wi.shape)` 与
+                #   `ht[Wi]` **数值逐位相同**（max|Δ| = 0.000e+00），但
+                #   在 NPU 上快 **52.80×（fp16）/ 29.63×（fp32）**：
+                #     fp16: 6.483 ms → 0.123 ms/step
+                #     fp32: 6.743 ms → 0.225 ms/step
+                #   原因：`ht[Wi]` 走 `aclnnIndex`（Vector 单元，msprof 实测占
+                #   NPU 时间 80.7%）；`index_select` 走另一条连续访存 kernel。
+                #   ⚠ 这是**孤立算子** benchmark；生产路径还有缓存/量化分支，
+                #   必须服务器 A/B + probe_PPL 后才能改默认值 → 本开关先可选。
+                g = torch.index_select(ht, 0, self.Wi.reshape(-1)).view(self.Wi.shape)
+            elif self._gather_impl == "take":
                 # P186：`_gather_impl` 此前**只存不用**（P134 接线断了）——
                 # 热路径永远走下面的 `ht[self.Wi]`。这里补上真正的 take 路径：
                 # `torch.take(ht, Wi)` 数值与 `ht[Wi]` **逐位相同**（P134 本机
-                # x86 实测快 1.7×，昇腾待实测——可用 --readout-gather-impl A/B）。
+                # x86 实测快 1.7×；P217 昇腾实测仅 1.03×，基本无差）。
                 g = torch.take(ht, self.Wi)              # (n_out, k) fp32
             else:
                 g = ht[self.Wi]                          # (n_out, k) fp32
@@ -1075,9 +1087,14 @@ class AccelReadout:
             _dt = {"fp16": torch.float16,
                    "bf16": torch.bfloat16}[self._gather_dtype]
             _ht_l = ht.to(_dt)
-            # P186：take 路径对 fp16 gather 同样适用（数值逐位相同）
-            g = (torch.take(_ht_l, self.Wi) if self._gather_impl == "take"
-                 else _ht_l[self.Wi])
+            if self._gather_impl == "index_select":
+                # P217：同上，fp16/bf16 臂同样走 index_select（昇腾 52.80×）
+                g = torch.index_select(_ht_l, 0, self.Wi.reshape(-1)).view(self.Wi.shape)
+            elif self._gather_impl == "take":
+                # P186：take 路径对 fp16 gather 同样适用（数值逐位相同）
+                g = torch.take(_ht_l, self.Wi)
+            else:
+                g = _ht_l[self.Wi]
         self._cache_g = g
         self._cache_g_src = ht                # 记住张量**对象**（P143）
         self._cache_g_epoch = self._ht_epoch  # 保留供诊断

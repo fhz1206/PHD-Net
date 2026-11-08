@@ -173,27 +173,87 @@ fp16 26.67% → bf16 5.79%）→ 退化为纯 Hebbian。**「少算一些行」�
 
 ---
 
-## 4. 建议的验证顺序（在 NPU notebook 上）
+## 4. NPU 实测结果（2026-11-08，AtomGit Notebook）
 
-环境：AtomGit Notebook，**1 × NPU 910B / CANN 8.5 / Python 3.11**，与生产服务器同构。
+环境：**Ascend910B4** × 1 / CANN 8.5 / torch 2.9.0+cpu + torch_npu /
+Python 3.11.14。`V=51962, k=128, H=3072`，warmup 8 / repeat 50。
+脚本：`tools/bench/npu_notebook_benchmark.py`（自包含，结果自动导出
+`npu_gather_bench.json` / `.txt`）。
 
-1. **算子级 benchmark**（脚本 `tools/bench/bench_readout_gather_npu.py`）：
-   对比 `ht[Wi]` / `torch.take` / `einsum` / SpMM 等价形式的耗时与 `max|Δ|`。
-   **自包含，不依赖仓库**，可直接在 notebook 粘贴运行。
-2. **若 SpMM 明显更快** → 在 `accel_readout.py::_matmul` 加一个稀疏臂开关，
-   先用 `gate_readout_sparse` 做数值对拍（容差级），再服务器 A/B。
-3. **路径 B 单独评估**：只在推理路径做 parallel scan，训练保持原样。
-4. **路径 C 排在最后**，且必须先有 `probe_PPL` 基线。
+### fp16（生产读出计算 dtype）
+
+| 实现 | ms/step | vs A | max\|Δ\| |
+|---|---:|---:|---:|
+| **A `ht[Wi]`（生产，`aclnnIndex`）** | **6.483** | 1.00× | — |
+| B `torch.take` | 6.289 | 1.03× | **0** |
+| C `einsum` | 7.029 | 0.92× | 3.90e-08 |
+| **D `torch.index_select(ht,0,Wi.ravel())`** | **0.123** | **52.80×** | **0** |
+| E 分区激活（只算 512 行） | 0.085 | 76.08× | 0 |
+| E 分区激活（只算 2048 行） | 0.281 | 23.07× | 0 |
+| F "稠密 SpMM" `S@ht`（V=4096） | 0.094 | 69.11× | **1.026 ⚠ 不等价** |
+
+### fp32
+
+| 实现 | ms/step | vs A | max\|Δ\| |
+|---|---:|---:|---:|
+| **A `ht[Wi]`（生产）** | **6.743** | 1.00× | — |
+| B `torch.take` | 6.332 | 1.06× | **0** |
+| C `einsum` | 7.957 | 0.85× | 1.92e-06 |
+| **D `index_select`** | **0.225** | **29.63×** | **0** |
+| E 分区激活（512 / 2048 行） | 0.065 / 0.235 | 70.78× / 23.67× | 0 |
+| F "稠密 SpMM"（V=4096） | 0.043 | 157.55× | **1.051 ⚠ 不等价** |
+
+### 判读（三条，别读错）
+
+1. **`index_select` 是本次最大收获**：与生产 `ht[Wi]` **逐位相同**
+   （`max|Δ| = 0`），却在 NPU 上快 **52.80×（fp16）/ 29.63×（fp32）**。
+   它绕开了 `aclnnIndex`（Vector 单元，msprof 占 80.7%）。
+   → 已接成 `--readout-gather-impl index_select`（**默认仍是 index**），
+   门禁 `gate_gather_impl.py` 17/17 锁住逐位等价契约。
+2. ⚠ **F 项名字有误导，别当等价实现**：`S.scatter_(1, Wi, W)` 对
+   **重复列索引是覆盖而非累加**，与 `Σⱼ W[i,j]·ht[Wi[i,j]]` 分歧
+   （`max|Δ|≈1.05`）。门禁的负向对照也确认了这点（`max|Δ|=5.6`）。
+   真要做 Cube 友好的 SpMM，必须用 CSR 结构（重复列分别累加），
+   不能靠 `scatter_` 稠密矩阵。而且 F 的 V 只有 4096（全量的 1/12），
+   **157× 这个数字不能与 A 直接比**。
+3. **E 是理论上限，不是可用优化**：只算 512 行确实 76×，但
+   `learn_softmax` 的 softmax 需要全 V 的 logits；真的砍行就得改
+   学习规则 → `probe_PPL` 判。P110 的坑还在（少算行/降精度 →
+   非目标行更新保留率暴跌）。
+
+⚠ **以上是孤立算子 benchmark**。生产 `_sp_gather` 还有缓存
+（P111/P143）、fp8/int8 量化臂、`_gather_dtype` 降精度分支 ——
+真实收益必须服务器 A/B + `probe_PPL` 才能定，**所以默认值没动**。
+
+另注：脚本里的 `MiB_per_step_fp16 = 12.69`（`V·k·2 bytes`）是对的；
+P214 文档写的 25.37 MiB 是 **fp32** 中间张量口径，两者不矛盾。
+
+## 5. 建议的验证顺序（在 NPU notebook 上）
+
+环境：AtomGit Notebook，**1 × NPU 910B4 / CANN 8.5 / Python 3.11**，与生产服务器同构。
+
+1. ✅ **算子级 benchmark 已跑完**（§4）：结论是 `index_select` 逐位相同且
+   快 30–53×。脚本 `tools/bench/npu_notebook_benchmark.py`，结果
+   `npu_gather_bench.json/.txt`。
+2. **下一步：生产路径 A/B** —— 用同一份数据、同参数跑
+   `--readout-gather-impl index` vs `index_select`，判据：
+   `segments(win)` 的 readout ms/tok + 端到端 ms/tok + **`probe_PPL`**
+   （不看 sliding PPL，信噪比 0.40）。
+3. **若确认收益且 PPL 无回归** → 才把 `readout_gather_impl` 默认改成
+   `index_select`，并同步 `phdnet/config.py` 与文档。
+4. 路径 B（推理路径 parallel scan）/ 路径 C（分区激活）排在后面，
+   且 C 必须先有 `probe_PPL` 基线。
 
 ---
 
-## 5. 一句话回答用户的问题
+## 6. 一句话回答用户的问题
 
 > **「能不能简化单个 token 的计算量、变成并行？」**
 
-- **简化单 token 计算量：能，而且方向很明确** —— 当前 80.7% 花在
-  对整个词表做 Vector `Index`，换成 Cube 友好的等价 SpMM（路径 A）
-  是**数学等价、不碰铁律③**的改法，最值得先测。
+- **简化单 token 计算量：能，而且已经实测出来** —— 当前 80.7% 花在
+  对整个词表做 Vector `Index`；把它换成 `torch.index_select` 在
+  Ascend910B4 上快 **52.80×（fp16）/ 29.63×（fp32）且逐位相同**（§4）。
+  这**不碰铁律③**，已做成可选开关，待生产 A/B 后即可改默认。
 - **把训练变成并行：不能在不改学习规则的前提下做到**。我们的串行来自
   「每个 token 都更新权重」，不是来自 Attention；Yan 的并行训练建立在
   「整条序列共用同一份权重」上。想并行就得改成批内延迟更新（路径 C），
@@ -203,7 +263,7 @@ fp16 26.67% → bf16 5.79%）→ 退化为纯 Hebbian。**「少算一些行」�
 
 ---
 
-## 6. 参考来源
+## 7. 参考来源
 
 - RockAI / 岩芯数智「Yan 架构」公开资料（Yan 1.0 非 Attention 通用大模型，
   2024-01；Yan 1.3 3B 多模态，MCSD + 类脑激活机制）。

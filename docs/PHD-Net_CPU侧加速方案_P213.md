@@ -232,7 +232,7 @@ python tools/bench/bench_server_threads.py --threads 8,16,32 \
   **无法可靠预判**（临时目录的 `.py` 用对解释器，仓库里的却用错的）；
 - **性能敏感门禁串行跑**（`gate_cli_i18n` 含 200µs 级时限断言，并发下会假失败）。
 
-**结果**：`python tools/run_gates.py --jobs 4` → **53/53 全绿**。
+**结果**：`python tools/run_gates.py --jobs 4` → **54/54 全绿**。
 
 ```bash
 python tools/run_gates.py --jobs 4        # 全量（并发）
