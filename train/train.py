@@ -1385,6 +1385,14 @@ def main() -> None:
              if _rb.startswith("accel:") else "")
           + (f" | fallback reason: {getattr(lm.net.readout, '_accel_fallback_reason', '')}"
              if hasattr(lm.net.readout, "_accel_fallback_reason") else ""))
+    # ⚠ P218：**开关生效值自证**。项目历史上踩过两次「CLI 存了值、生产路径
+    #   根本没接线」（P134 `gather_impl` 只存不用、P186 才修复）。A/B 时如果
+    #   日志不打印生效值，就无法区分「改了没效果」和「根本没改」。
+    #   这一行让 index / take / index_select 的 A/B 自带证据。
+    print(f"[readout] gather_impl={getattr(lm.net.readout, '_gather_impl', 'n/a')}"
+          f" (requested {cfg.readout_gather_impl})"
+          f" | gather_dtype={getattr(lm.net.readout, '_gather_dtype', 'n/a')}"
+          f" | conn_k={getattr(cfg, 'readout_conn_k', 0)}", flush=True)
     print_capacity_report(capacity_report(cfg, vocab))
     print(f"plastic params (as built, count_params basis): {count_params(lm.net):,}")
     # 瘦身：默认一行事实（可 grep：context / state never reset / big_ltm /
@@ -1677,6 +1685,9 @@ def main() -> None:
                     # 以及耗时是否已转移到 PC 栈等其余部件
                     _ro_ms = float(getattr(lm.net, "_ro_ms_accum", 0.0))
                     _ro_n = max(1, int(getattr(lm.net, "_ro_calls", 0)))
+                    # P218：滑窗口径（与 segments(win) 同一区间），A/B 判据用它
+                    _ro_wms = float(getattr(lm.net, "_ro_ms_win", 0.0))
+                    _ro_wn = max(1, int(getattr(lm.net, "_ro_calls_win", 0)))
                     _ro_dev = (getattr(lm.net.readout, "device", "cpu")
                                if _rb.startswith("accel:") else "cpu")
                     _probe_txt = (f"  probe_PPL {_probe_ppl:>10.4f}"
@@ -1685,7 +1696,8 @@ def main() -> None:
                           f"{_qtxt}{_split}"
                           f"  {ms:>8.2f} ms/tok"
                           f"  elapsed {spent / 60:.1f} min"
-                          f"  | readout {_ro_ms / _ro_n:>7.3f} ms/tok"
+                          f"  | readout {_ro_ms / _ro_n:>7.3f} ms/tok (cum)"
+                          f" / {_ro_wms / _ro_wn:>6.3f} (win)"
                           f" ({_rb.split('(')[0]}@{_ro_dev}, {_ro_ms / 1000 / max(1e-9, spent) * 100:>5.1f}% of total)",
                           flush=True)
                     if args.step_profiling and _lpn:

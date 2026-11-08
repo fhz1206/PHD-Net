@@ -11,7 +11,7 @@
 | 项 | 值 | 来源 |
 |---|---|---|
 | `python tests/run_tests.py fast` | **9/9**（<1 分钟，零回归门槛） | 持续门禁 |
-| 专项门禁 | **54 个**（`ls tests/gates/gate_*.py` 现查，勿写死）；**54/54 全绿** | `outputs/experiments/gates_*.json` |
+| 专项门禁 | **54 个**（`ls tests/gates/gate_*.py` 现查，勿写死）；**55/55 全绿** | `outputs/experiments/gates_*.json` |
 | **统一入口** | `python tools/run_gates.py [--jobs 4]` —— 自动实测选能 `import numpy` 的解释器 + 性能敏感门禁串行 + 输出 JSON | `tools/run_gates.py` |
 | 关键门禁 | `gate_forward_only` 30 项 / `gate_cpu_opt_p211` 19 项 / `gate_fp8_int8_convert` 17 项 / **`gate_ltm_hash_lookup` 13 项**（P214 哈希槽位查找逐位契约） | `tests/gates/` |
 | CI | 两套 workflow（`.gitcode/` + `.github/`），无 Jenkinsfile；远端状态未核验，**不宣称全绿** | 源码 |

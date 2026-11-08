@@ -184,7 +184,7 @@ NPU:                  └── forward_dev ──┘   └── learn_softmax 
 **门禁**：新增 `tests/gates/gate_ltm_hash_lookup.py`（**13/13**，P215 审计加固）：
 多 seed 逐位一致 / int8 量化 / 小 m_out 饱和期 / 两核同输入 K/V/S 相同 /
 缓冲视图复用 + 自动扩容 + 脏缓冲不清零安全 / 哈希表容量契约。
-全量门禁 **54/54 通过**。
+全量门禁 **55/55 通过**。
 
 ### 4.2 profiling 埋点：假占用判读自动化
 

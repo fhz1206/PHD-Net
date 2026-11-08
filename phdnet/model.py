@@ -358,6 +358,10 @@ class PHDNet:
         """
         self._prof_win = {}
         self._prof_win_n = 0
+        # P218：读出滑窗与段滑窗**同步清零**，否则 `readout (win)` 会
+        #   退化成另一个 cum，A/B 判据再次失效。
+        self._ro_ms_win = 0.0
+        self._ro_calls_win = 0
 
     @staticmethod
     def _rate(r2: np.ndarray) -> np.ndarray:
@@ -660,9 +664,15 @@ class PHDNet:
             yv = y - y.max()
             p_ = np.exp(yv); p_ /= p_.sum()
             nll = float(-np.log(p_[int(np.argmax(target))] + 1e-12))
-        self._ro_ms_accum = getattr(self, "_ro_ms_accum", 0.0) \
-            + (time.perf_counter() - _t_ro) * 1000.0
+        _dt_ro_ms = (time.perf_counter() - _t_ro) * 1000.0
+        self._ro_ms_accum = getattr(self, "_ro_ms_accum", 0.0) + _dt_ro_ms
         self._ro_calls = getattr(self, "_ro_calls", 0) + 1
+        # ⚠ P218：再加一份**滑窗**累计。原来的 `_ro_ms_accum / _ro_calls`
+        #   是**从 token 0 起的累计平均**（cum），含 JIT 冷编译/首次 kernel
+        #   编译，和 `segments(cum)` 同一个毛病 —— 用它做 A/B 会把「热缓存」
+        #   误判成「改动的收益」。判性能一律看滑窗。
+        self._ro_ms_win = getattr(self, "_ro_ms_win", 0.0) + _dt_ro_ms
+        self._ro_calls_win = getattr(self, "_ro_calls_win", 0) + 1
 
         # PC 突破②：储备库登记 + 周期回放（readout_replay=True 才启用；
         # 只写 readout.W，不动任何持久状态，默认路径零参与）

@@ -17,7 +17,7 @@ Python + numba + Cython（可选）+ PyTorch/昇腾 NPU（读出加速）。
 | 项 | 状态 |
 |---|---|
 | fast 回归 | `python tests/run_tests.py fast` = **9/9**（零回归门槛） |
-| 专项门禁 | `tests/gates/gate_*.py` = **54 个，54/54 全绿**；统一入口 `python tools/run_gates.py --jobs 4`（自动选能 import numpy 的解释器 + 性能敏感门禁串行）。数量用 `ls` 现查，别写死 |
+| 专项门禁 | `tests/gates/gate_*.py` = **55 个，55/55 全绿**；统一入口 `python tools/run_gates.py --jobs 4`（自动选能 import numpy 的解释器 + 性能敏感门禁串行）。数量用 `ls` 现查，别写死 |
 | 生产默认 | 读出 fp32 / `eta_oja=0` / SDR 新颖性印迹开 / `--step-profiling` 默认开 / `--lang en`（只影响终端文案）/ **前向only 路径开** / 稀疏读出 `conn_k=128` / 在线 CSR 大空间表 / **M2 推理核按平台自动择优**（x86→fused、昇腾→plain）/ `--m2-kernel auto` / `--numba-threads 16` / `--cython-kernels auto`。完整源码核实表见 `docs/PHD-Net_现状速查.md` §3 |
 | 当前性能 | 服务器 1b 档 step **10.8 ms/tok**（CPU ~6.5 / NPU 读出 3.5）；NPU 是**「假占用」**（`aicore_time≈0`），见 `docs/PHD-Net_NPU利用率诊断与优化_P214.md` |
 | 已知红线 | `eta_oja>0` 生产规模正反馈发散（已默认 0 + RuntimeWarning）；1B 档大词表 × 少 token 曝光不足（见 §9）。**完整红线清单见 `docs/PHD-Net_现状速查.md` §7** |
