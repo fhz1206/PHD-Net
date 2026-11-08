@@ -61,6 +61,6 @@ python tests/run_tests.py fast            # fast 回归
 | **逐位一致** | 浮点结果按位相同。跨设备/跨库只能用**容差**，不能要求逐位 |
 | **容差判据** | 判「两个实现等价」的数值阈值。**基线必须经过同一精度舍入**，否则会得到反向假阳性 |
 | **`probe_PPL`**（固定探针 PPL） | **A/B 唯一判据**。训练流 sliding PPL 波动 ±20%，**不可用作判据** |
-| **`segments(win)`** | 判性能**一律看滑窗**；`segments(cum)` 是含 JIT 冷编译的历史平均 |
+| **`segments(win)` / `readout (win)`** | **滑窗**：每个打印间隔（约 500 步）清零重算的**区间真实平均**，判性能一律用它。`cum` = 从 token 0 起全程累加、**从不清零**的历史平均，含启动期 numba JIT 编译 / 首次 kernel 编译 / CSR 首次生长 → 系统性**高估稳态**。P115 实测 readout 从 28.77 衰减到 7.68 不是变快，是早期昂贵样本被摊薄；用它做 A/B 会把「冷热缓存」误判成改动收益。P218 起日志同时打印 `readout X ms/tok (cum) / Y (win)` |
 | **假占用** | 设备占用 90%+ 但 `aicore_time≈0` → 指标虚高，不是真实算力利用率 |
 | **段名** | `M1_encode` / `M2_infer` / `M3_pred` / `M4a_wm` / `M4b_ltm` / `M5_mod` / `PC_learn` / `STDP_learn` |
